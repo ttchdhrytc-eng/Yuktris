@@ -1,6 +1,22 @@
 import { logger } from './logger.js';
 
 const BROWSERBASE_API_URL = 'https://api.browserbase.com/v1';
+const BROWSERBASE_REQUEST_TIMEOUT_MS = 20000;
+
+async function browserbaseFetch(url: string, init: RequestInit = {}, timeoutMs = BROWSERBASE_REQUEST_TIMEOUT_MS): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new BrowserbaseError('Browserbase request timed out', 504);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 export interface BrowserbaseSession {
   id: string;
@@ -53,7 +69,7 @@ async function createSession(opts?: {
 
   let lastError: Error | null = null;
   for (let attempt = 0; attempt < 3; attempt++) {
-    const res = await fetch(`${BROWSERBASE_API_URL}/sessions`, {
+    const res = await browserbaseFetch(`${BROWSERBASE_API_URL}/sessions`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -86,7 +102,7 @@ async function createSession(opts?: {
       let debugUrl = data.debugUrl || '';
 
       try {
-        const debugRes = await fetch(`${BROWSERBASE_API_URL}/sessions/${data.id}/debug`, {
+        const debugRes = await browserbaseFetch(`${BROWSERBASE_API_URL}/sessions/${data.id}/debug`, {
           headers: { 'x-bb-api-key': apiKey },
         });
         if (debugRes.ok) {
@@ -100,10 +116,9 @@ async function createSession(opts?: {
           debugUrl = debugData.debuggerUrl || debugUrl;
           logger.info('Browserbase debug URLs fetched', {
             sessionId: data.id,
-            debuggerFullscreenUrl: debugData.debuggerFullscreenUrl,
-            debuggerUrl: debugData.debuggerUrl,
+            debuggerFullscreenUrlAvailable: !!debugData.debuggerFullscreenUrl,
+            debuggerUrlAvailable: !!debugData.debuggerUrl,
             pageCount: debugData.pages?.length || 0,
-            pageUrls: debugData.pages?.map(p => p.url) || [],
           });
         } else {
           logger.warn('Browserbase /debug endpoint returned non-OK', {
@@ -118,13 +133,11 @@ async function createSession(opts?: {
       // Fallback if /debug didn't return a usable URL
       if (!liveUrl) {
         liveUrl = `https://www.browserbase.com/sessions/${data.id}`;
-        logger.warn('Using fallback live URL (dashboard, not debugger)', { sessionId: data.id, liveUrl });
+        logger.warn('Using fallback Browserbase dashboard URL instead of debugger', { sessionId: data.id });
       }
 
       logger.info('Browserbase session created', {
         id: data.id,
-        liveUrl,
-        debugUrl,
         wsUrlSource: data.wsEndpoint ? 'api' : 'constructed',
         liveUrlSource: liveUrl.includes('debugger') ? 'debug-endpoint' : 'fallback',
       });
@@ -157,7 +170,7 @@ async function createSession(opts?: {
 async function endSession(sessionId: string): Promise<void> {
   const apiKey = getApiKey();
   try {
-    const res = await fetch(`${BROWSERBASE_API_URL}/sessions/${sessionId}`, {
+    const res = await browserbaseFetch(`${BROWSERBASE_API_URL}/sessions/${sessionId}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-bb-api-key': apiKey },
       body: JSON.stringify({ status: 'REQUEST_RELEASE' }),
@@ -173,7 +186,7 @@ async function endSession(sessionId: string): Promise<void> {
 async function getSessionStatus(sessionId: string): Promise<'running' | 'completed' | 'error' | 'unknown'> {
   const apiKey = getApiKey();
   try {
-    const res = await fetch(`${BROWSERBASE_API_URL}/sessions/${sessionId}`, {
+    const res = await browserbaseFetch(`${BROWSERBASE_API_URL}/sessions/${sessionId}`, {
       headers: { 'x-bb-api-key': apiKey },
     });
     if (!res.ok) return 'unknown';
@@ -190,14 +203,16 @@ async function getSessionStatus(sessionId: string): Promise<'running' | 'complet
 async function getDebugUrl(sessionId: string): Promise<string> {
   const apiKey = getApiKey();
   try {
-    const res = await fetch(`${BROWSERBASE_API_URL}/sessions/${sessionId}/debug`, {
+    const res = await browserbaseFetch(`${BROWSERBASE_API_URL}/sessions/${sessionId}/debug`, {
       headers: { 'x-bb-api-key': apiKey },
     });
     if (res.ok) {
       const data = await res.json() as { debuggerUrl?: string; debuggerFullscreenUrl?: string };
       return data.debuggerFullscreenUrl || data.debuggerUrl || `https://www.browserbase.com/sessions/${sessionId}`;
     }
-  } catch {}
+  } catch {
+    // Fall back to the Browserbase session dashboard URL.
+  }
   return `https://www.browserbase.com/sessions/${sessionId}`;
 }
 
@@ -207,7 +222,7 @@ async function getLiveUrls(sessionId: string): Promise<{
   pages: Array<{ id: string; url: string; debuggerUrl: string; debuggerFullscreenUrl: string }>;
 }> {
   const apiKey = getApiKey();
-  const res = await fetch(`${BROWSERBASE_API_URL}/sessions/${sessionId}/debug`, {
+  const res = await browserbaseFetch(`${BROWSERBASE_API_URL}/sessions/${sessionId}/debug`, {
     headers: { 'x-bb-api-key': apiKey },
   });
   if (!res.ok) throw new BrowserbaseError(`Failed to fetch live URLs: ${res.status}`, res.status);

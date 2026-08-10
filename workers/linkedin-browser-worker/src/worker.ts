@@ -1,7 +1,7 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { logger } from './logger.js';
 import { Queue, QueueItem } from './queue.js';
-import { LinkedInBrowser, SessionData, ProgressStep, ProgressCallback } from './linkedin.js';
+import { LinkedInBrowser, SessionData, ProgressStep, ProgressCallback, IntendedLinkedInIdentity } from './linkedin.js';
 import { encrypt, decrypt, getKeyId } from './session.js';
 import { browserbase, BrowserbaseError } from './browserbase.js';
 
@@ -130,7 +130,6 @@ export class Worker {
   }
 
   private async register(): Promise<void> {
-    const now = new Date().toISOString();
     const metadata = {
       worker_region: this.region,
       browser_provider: browserbase.isConfigured() ? 'browserbase' : 'local-chromium',
@@ -254,11 +253,17 @@ export class Worker {
           await this.queue.fail(item.id, `Unknown action type: ${item.action_type}`, Date.now() - startTime, false);
       }
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = this.sanitizeError(err);
       const isBbError = err instanceof BrowserbaseError;
       const isRetryable = isBbError && (err as BrowserbaseError).statusCode !== 401;
       logger.error('Task processing error', { id: item.id, error: msg, browserbase_error: isBbError, retryable: isRetryable });
       await this.queue.fail(item.id, msg, Date.now() - startTime, isRetryable);
+    } finally {
+      // Every task owns a short-lived browser session. Cleanup is idempotent and
+      // prevents Browserbase keep-alive sessions from leaking on unexpected errors.
+      await this.linkedin.close().catch((error) => {
+        logger.warn('Browser cleanup after task failed', { task_id: item.id, error: this.sanitizeError(error) });
+      });
     }
   }
 
@@ -298,6 +303,7 @@ export class Worker {
     }
 
     const onProgress = this.makeProgressCallback(workspaceId, accountId, item.id);
+    const intendedIdentity = await this.loadIntendedIdentity(accountId, workspaceId);
 
     // STATE: authenticating (transition from IDLE)
     await this.updateAccount(accountId, { connection_state: 'authenticating', last_error: null, browserbase_session_id: null, browser_connected_at: null });
@@ -311,7 +317,7 @@ export class Worker {
 
       try {
         await this.linkedin.launch(onProgress);
-        const reuseResult = await this.linkedin.connectWithSession(existingSession.session, TEST_CONNECTION_TIMEOUT, onProgress);
+        const reuseResult = await this.linkedin.connectWithSession(existingSession.session, TEST_CONNECTION_TIMEOUT, onProgress, intendedIdentity);
 
         if (reuseResult.success) {
           await this.updateAccount(accountId, {
@@ -335,7 +341,7 @@ export class Worker {
         await onProgress('creating_session', 'Previous session expired. Starting fresh login...');
         await this.linkedin.close();
       } catch (err) {
-        logger.warn('Session reuse error, proceeding to fresh login', { error: String(err) });
+        logger.warn('Session reuse error, proceeding to fresh login', { error: this.sanitizeError(err) });
         await this.linkedin.close().catch(() => {});
       }
     }
@@ -347,7 +353,7 @@ export class Worker {
     try {
       await this.linkedin.launch(onProgress);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = this.sanitizeError(err);
       logger.error('handleConnect: launch failed', { error: msg });
       await this.updateAccount(accountId, { connection_state: 'failed', last_error: `Browser launch failed: ${msg}` });
       await onProgress('login_failed', `Browser launch failed: ${msg}`);
@@ -358,7 +364,7 @@ export class Worker {
     // ── Verify: Browserbase session exists ──────────────────────
     const bbSessionId = this.linkedin.getSessionId();
     const liveUrl = this.linkedin.getLiveUrl();
-    logger.info('handleConnect: Browserbase session ready', { account_id: accountId, bbSessionId, liveUrl });
+    logger.info('handleConnect: browser session ready', { account_id: accountId, bbSessionId, liveUrlAvailable: !!liveUrl });
 
     if (!bbSessionId && browserbase.isConfigured()) {
       const msg = 'No Browserbase session ID after launch';
@@ -385,7 +391,7 @@ export class Worker {
     try {
       await this.linkedin.newContext();
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = this.sanitizeError(err);
       logger.error('handleConnect: context creation failed', { error: msg });
       await this.linkedin.close();
       await this.updateAccount(accountId, { connection_state: 'failed', last_error: `Context creation failed: ${msg}` });
@@ -402,6 +408,7 @@ export class Worker {
       workspaceId,
       accountId,
       item.id,
+      intendedIdentity,
     );
 
     logger.info('handleConnect: linkedin.connect() returned', { account_id: accountId, success: result.success, requiresAction: result.requiresAction, error: result.error });
@@ -418,19 +425,8 @@ export class Worker {
         });
         await this.logSessionEvent(workspaceId, accountId, 'login_failed', { error: result.error, challenge: result.challengeType });
 
-        await this.client.rpc('insert_auth_interaction', {
-          p_workspace_id: workspaceId,
-          p_account_id: accountId,
-          p_queue_item_id: item.id,
-          p_interaction_type: 'challenge',
-          p_step: 'challenge_detected',
-          p_message: result.error || 'LinkedIn verification required',
-          p_status: 'pending',
-          p_metadata: { queue_item_id: item.id },
-          p_challenge_type: result.challengeType,
-          p_challenge_description: result.error,
-        });
-
+        // LinkedInBrowser already persisted the challenge when it was detected.
+        // Do not create a duplicate interaction here.
         await this.client.rpc('set_queue_item_waiting', { p_queue_item_id: item.id });
         logger.warn('Challenge detected, queue item set to waiting', { account_id: accountId, challenge: result.challengeType });
         return;
@@ -502,8 +498,9 @@ export class Worker {
       return;
     }
 
+    const intendedIdentity = await this.loadIntendedIdentity(accountId, item.workspace_id);
     await this.linkedin.launch(undefined);
-    const result = await this.linkedin.testConnection(loaded.session, TEST_CONNECTION_TIMEOUT);
+    const result = await this.linkedin.testConnection(loaded.session, TEST_CONNECTION_TIMEOUT, intendedIdentity);
     await this.linkedin.close();
 
     if (result.success) {
@@ -540,6 +537,7 @@ export class Worker {
     }
 
     const { session: sessionData, sessionId } = loaded;
+    const intendedIdentity = await this.loadIntendedIdentity(accountId, item.workspace_id);
     const params = item.action_params ?? {};
     let result: { success: boolean; data?: Record<string, unknown>; error?: string };
 
@@ -556,7 +554,7 @@ export class Worker {
       }
 
       // Validate session before automation
-      const validation = await this.linkedin.validateSession();
+      const validation = await this.linkedin.validateSession(intendedIdentity);
       if (!validation.valid) {
         await this.linkedin.close();
         await this.client.rpc('expire_session', { p_session_id: sessionId, p_reason: validation.reason });
@@ -718,7 +716,7 @@ export class Worker {
       }
     } catch (err) {
       await this.linkedin.close().catch(() => {});
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = this.sanitizeError(err);
       logger.error('Automation action error', { action: item.action_type, error: msg });
       await this.queue.fail(item.id, msg, Date.now() - startTime, true);
     }
@@ -732,6 +730,33 @@ export class Worker {
       p_updates: updates,
     });
     if (error) logger.error('Failed to update account', { account_id: accountId, error: error.message });
+  }
+
+  private async loadIntendedIdentity(accountId: string, workspaceId?: string): Promise<IntendedLinkedInIdentity> {
+    let query = this.client
+      .from('linkedin_accounts')
+      .select('profile_url, profile_name, linkedin_email')
+      .eq('id', accountId);
+    if (workspaceId) query = query.eq('workspace_id', workspaceId);
+
+    const { data, error } = await query.maybeSingle();
+    if (error) throw new Error(`Unable to load intended LinkedIn account identity: ${this.sanitizeError(error)}`);
+    if (!data) throw new Error('LinkedIn account was not found in the expected workspace');
+    return {
+      profileUrl: data.profile_url,
+      profileName: data.profile_name,
+      linkedinEmail: data.linkedin_email,
+    };
+  }
+
+  private sanitizeError(error: unknown): string {
+    const message = error instanceof Error ? error.message : typeof error === 'object' && error && 'message' in error
+      ? String((error as { message: unknown }).message)
+      : String(error ?? 'Unknown error');
+    return message
+      .replace(/(li_at|jsessionid|password|token|cookie|authorization)=?[^\s&]*/gi, '$1=[redacted]')
+      .replace(/https?:\/\/[^\s]+/gi, '[url redacted]')
+      .slice(0, 500);
   }
 
   private async logSessionEvent(workspaceId: string, accountId: string, eventType: string, eventData: Record<string, unknown>): Promise<void> {
@@ -832,7 +857,8 @@ export class Worker {
         return null;
       }
 
-      const validation = await this.linkedin.validateSession();
+      const intendedIdentity = await this.loadIntendedIdentity(accountId);
+      const validation = await this.linkedin.validateSession(intendedIdentity);
       if (!validation.valid) {
         await this.linkedin.close();
         await this.client.rpc('expire_session', { p_session_id: sessionId, p_reason: validation.reason });
@@ -958,7 +984,8 @@ export class Worker {
       }
 
       // Validate restored session
-      const validation = await this.linkedin.validateSession();
+      const intendedIdentity = await this.loadIntendedIdentity(accountId, workspaceId);
+      const validation = await this.linkedin.validateSession(intendedIdentity);
       if (!validation.valid) {
         await this.client.rpc('update_session_health', {
           p_session_id: sessionId,
