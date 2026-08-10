@@ -1,0 +1,10 @@
+export { prospectDiscoveryService } from './ProspectDiscoveryService';
+export { discoveryProviderManager } from './DiscoveryProviderManager';
+export { duplicateDetectionService } from './DuplicateDetectionService';
+export { prospectScoringService } from './ProspectScoringService';
+export { discoveryProviderRegistry } from './providers/DiscoveryProviderRegistry';
+export { BaseDiscoveryProvider } from './providers/BaseDiscoveryProvider';
+export { AIGatewayDiscoveryProvider } from './providers/AIGatewayDiscoveryProvider';
+export { TavilyDiscoveryProvider } from './providers/TavilyDiscoveryProvider';
+export { FirecrawlDiscoveryProvider } from './providers/FirecrawlDiscoveryProvider';
+export { ApolloDiscoveryProvider } from './providers/ApolloDiscoveryProvider';

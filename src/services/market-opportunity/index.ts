@@ -1,0 +1,1 @@
+export { marketOpportunityService } from './MarketOpportunityService';

@@ -1,0 +1,26 @@
+{
+  "name": "linkedin-browser-worker",
+  "version": "1.0.0",
+  "description": "Real Playwright browser worker for LinkedIn automation — polls Supabase queue, launches Chromium, executes LinkedIn actions, saves encrypted sessions.",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "test": "tsx src/test.ts",
+    "install-browser": "echo 'No local browser needed — using Browserbase'"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.0",
+    "@types/dotenv": "^6.1.1",
+    "dotenv": "^17.4.2",
+    "playwright": "^1.49.0",
+    "ws": "^8.21.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}

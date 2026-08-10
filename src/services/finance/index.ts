@@ -1,0 +1,1 @@
+export { financeIntelligenceService } from './FinanceIntelligenceService';

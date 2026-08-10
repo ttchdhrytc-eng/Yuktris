@@ -1,0 +1,951 @@
+import { chromium, Browser, BrowserContext, Page } from 'playwright';
+import { SupabaseClient } from '@supabase/supabase-js';
+import { logger } from './logger.js';
+import { browserbase, BrowserbaseSession, BrowserbaseError } from './browserbase.js';
+
+const LINKEDIN_LOGIN_URL = 'https://www.linkedin.com/login';
+const LINKEDIN_FEED_URL = 'https://www.linkedin.com/feed';
+const LINKEDIN_PROFILE_URL = 'https://www.linkedin.com/in/me';
+
+const CDP_CONNECT_TIMEOUT_MS = 30000;
+const PAGE_LOAD_TIMEOUT_MS = 30000;
+
+export interface LinkedInIdentity {
+  profileUrl: string | null;
+  profileName: string | null;
+  profileHeadline: string | null;
+}
+
+export interface BrowserFingerprint {
+  userAgent: string;
+  viewport: { width: number; height: number };
+  timezone: string;
+  language: string;
+  platform: string;
+  cookieEnabled: boolean;
+  hardwareConcurrency: number;
+}
+
+export interface SessionData {
+  cookies: unknown[];
+  storageState: Record<string, unknown>;
+  localStorage: Record<string, unknown>;
+  sessionStorage: Record<string, unknown>;
+  userAgent: string;
+  viewport: { width: number; height: number };
+  timezone: string | null;
+  language: string | null;
+  browserVersion: string | null;
+  playwrightVersion: string | null;
+  fingerprint: BrowserFingerprint | null;
+}
+
+export interface ConnectionResult {
+  success: boolean;
+  identity?: LinkedInIdentity;
+  session?: SessionData;
+  error?: string;
+  requiresAction?: boolean;
+  challengeType?: string;
+}
+
+export type ProgressStep =
+  | 'creating_session'
+  | 'session_created'
+  | 'connecting_browser'
+  | 'browser_connected'
+  | 'opening_linkedin'
+  | 'ready_for_login'
+  | 'waiting_for_login'
+  | 'challenge_detected'
+  | 'saving_session'
+  | 'connected'
+  | 'login_timeout'
+  | 'login_failed';
+
+export interface ProgressCallback {
+  (step: ProgressStep, message: string, metadata?: Record<string, unknown>): Promise<void>;
+}
+
+export interface ChallengeInfo {
+  type: 'email_otp' | 'captcha' | 'two_factor' | 'phone_verification';
+  description: string;
+}
+
+export class LinkedInBrowser {
+  private browser: Browser | null = null;
+  private context: BrowserContext | null = null;
+  private page: Page | null = null;
+  private encryptionSecret: string;
+  private client: SupabaseClient;
+  private bbSession: BrowserbaseSession | null = null;
+
+  constructor(client: SupabaseClient, _headless: boolean, encryptionSecret: string) {
+    this.client = client;
+    this.encryptionSecret = encryptionSecret;
+  }
+
+  getLiveUrl(): string | null {
+    return this.bbSession?.liveUrl || null;
+  }
+
+  getSessionId(): string | null {
+    return this.bbSession?.id || null;
+  }
+
+  async refreshLiveUrl(): Promise<string | null> {
+    if (!this.bbSession?.id) return null;
+    try {
+      const liveUrls = await browserbase.getLiveUrls(this.bbSession.id);
+      if (liveUrls.debuggerFullscreenUrl) {
+        this.bbSession.liveUrl = liveUrls.debuggerFullscreenUrl;
+        logger.info('Live URL refreshed from Browserbase /debug', {
+          sessionId: this.bbSession.id,
+          liveUrl: this.bbSession.liveUrl,
+          pageCount: liveUrls.pages.length,
+          pageUrls: liveUrls.pages.map(p => p.url),
+        });
+        return this.bbSession.liveUrl;
+      }
+    } catch (err) {
+      logger.warn('Failed to refresh live URL', { error: String(err) });
+    }
+    return null;
+  }
+
+  // ── LAUNCH: Create Browserbase session + attach Playwright ────
+
+  async launch(onProgress?: ProgressCallback): Promise<void> {
+    const useBrowserbase = browserbase.isConfigured();
+
+    if (!useBrowserbase) {
+      // Fix 4: Auto-detect — no Browserbase config, use local Chromium automatically
+      logger.info('Browserbase not configured, using local Chromium automatically');
+      await this.launchLocalChromium();
+      return;
+    }
+
+    // Try Browserbase, fall back to local Chromium on ANY failure (Fix 5)
+    try {
+      if (onProgress) await onProgress('creating_session', 'Creating secure browser session...');
+      logger.info('Creating Browserbase session');
+
+      this.bbSession = await browserbase.createSession({ keepAlive: true });
+
+      if (!this.bbSession?.id) {
+        throw new Error('Browserbase session creation returned no session ID');
+      }
+
+      logger.info('Browserbase session created', { id: this.bbSession.id });
+      if (onProgress) await onProgress('session_created', 'Browser session created. Attaching Playwright...', {
+        browserbase_session_id: this.bbSession.id,
+        browserbase_live_url: this.bbSession.liveUrl,
+      });
+
+      if (onProgress) await onProgress('connecting_browser', 'Attaching Playwright to browser session...');
+      logger.info('Connecting via CDP');
+
+      try {
+        this.browser = await Promise.race([
+          chromium.connectOverCDP(this.bbSession.wsUrl),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error(`CDP connection timed out after ${CDP_CONNECT_TIMEOUT_MS}ms`)), CDP_CONNECT_TIMEOUT_MS)
+          ),
+        ]) as Browser;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.warn('Browserbase CDP connection failed, falling back to local Chromium', { error: msg });
+        await browserbase.endSession(this.bbSession.id).catch(() => {});
+        this.bbSession = null;
+        await this.launchLocalChromium();
+        return;
+      }
+
+      if (!this.browser) {
+        await browserbase.endSession(this.bbSession.id).catch(() => {});
+        this.bbSession = null;
+        throw new Error('Playwright attach succeeded but browser object is null');
+      }
+
+      try {
+        const version = this.browser.version();
+        logger.info('Browserbase browser attached', { version });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.warn('Browserbase browser verification failed, falling back to local Chromium', { error: msg });
+        await browserbase.endSession(this.bbSession.id).catch(() => {});
+        this.bbSession = null;
+        await this.launchLocalChromium();
+        return;
+      }
+
+      if (onProgress) await onProgress('browser_connected', 'Playwright attached to browser. Creating context...');
+    } catch (err) {
+      // Fix 5: Any Browserbase failure (401, 402, 403, 429, timeout, network) → local Chromium
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.warn('Browserbase failed, falling back to local Chromium', { error: msg });
+      this.bbSession = null;
+      await this.launchLocalChromium();
+    }
+  }
+
+  private async launchLocalChromium(): Promise<void> {
+    const executablePath = process.env.CHROMIUM_EXECUTABLE_PATH || undefined;
+    this.browser = await chromium.launch({
+      headless: true,
+      ...(executablePath ? { executablePath } : {}),
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-blink-features=AutomationControlled', '--disable-gpu', '--disable-dev-shm-usage'],
+    });
+    logger.info('Local Chromium launched', { version: this.browser.version() });
+  }
+
+  // ── NEW CONTEXT: Create browser context + page ─────────────────
+
+  async newContext(): Promise<BrowserContext> {
+    if (!this.browser) throw new Error('Browser not launched — call launch() first');
+
+    if (this.bbSession) {
+      // Browserbase: reuse the existing default context + page so Live View tracks navigation
+      const contexts = this.browser.contexts();
+      if (contexts.length > 0) {
+        this.context = contexts[0];
+        const pages = this.context.pages();
+        if (pages.length > 0) {
+          this.page = pages[0];
+          logger.info('Reusing existing Browserbase default context + page', {
+            contextCount: contexts.length,
+            pageCount: pages.length,
+            currentUrl: this.page.url(),
+          });
+        } else {
+          this.page = await this.context.newPage();
+          logger.info('Created new page in Browserbase default context');
+        }
+      } else {
+        this.context = await this.browser.newContext({
+          viewport: { width: 1440, height: 900 },
+          locale: 'en-US',
+          timezoneId: 'America/New_York',
+          userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+        });
+        this.page = await this.context.newPage();
+        logger.info('Created new context + page for Browserbase (no default context found)');
+      }
+      await this.page.bringToFront().catch(() => {});
+    } else {
+      this.context = await this.browser.newContext({
+        viewport: { width: 1440, height: 900 },
+        locale: 'en-US',
+        timezoneId: 'America/New_York',
+        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      });
+      this.page = await this.context.newPage();
+      logger.info('Browser context + page created (local Chromium)');
+    }
+    return this.context;
+  }
+
+  async close(): Promise<void> {
+    if (this.page) { await this.page.close().catch(() => {}); this.page = null; }
+    if (this.context) { await this.context.close().catch(() => {}); this.context = null; }
+    if (this.browser) { await this.browser.close().catch(() => {}); this.browser = null; }
+    if (this.bbSession) {
+      await browserbase.endSession(this.bbSession.id);
+      this.bbSession = null;
+    }
+    logger.info('Browser closed');
+  }
+
+  getPage(): Page {
+    if (!this.page) throw new Error('No page available — call newContext() first');
+    return this.page;
+  }
+
+  // ── OPEN LINKEDIN: Navigate to login page + verify loaded ──────
+
+  async openLinkedIn(onProgress?: ProgressCallback): Promise<void> {
+    if (!this.page) throw new Error('No page — call newContext() first');
+
+    if (onProgress) await onProgress('opening_linkedin', 'Opening LinkedIn login page...');
+    logger.info('OPENING LINKEDIN: Navigating to login page');
+
+    // Runtime diagnostic: dump all contexts and pages before navigation
+    if (this.browser) {
+      const contexts = this.browser.contexts();
+      logger.info('RUNTIME DIAGNOSTIC: Browser state before goto', {
+        contextCount: contexts.length,
+        contextUrls: contexts.map((c, i) => ({
+          contextIndex: i,
+          pageCount: c.pages().length,
+          pageUrls: c.pages().map(p => p.url()),
+        })),
+      });
+    }
+
+    const urlBefore = this.page.url();
+    logger.info('RUNTIME URL: Before goto', { url: urlBefore });
+
+    // Ensure this page is the active tab in Browserbase Live View
+    await this.page.bringToFront().catch(() => {});
+
+    try {
+      await this.page.goto(LINKEDIN_LOGIN_URL, {
+        waitUntil: 'domcontentloaded',
+        timeout: PAGE_LOAD_TIMEOUT_MS,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.error('OPENING LINKEDIN FAILED: Navigation failed', { error: msg });
+      throw new Error(`Failed to open LinkedIn login page: ${msg}`);
+    }
+
+    const urlAfterGoto = this.page.url();
+    logger.info('RUNTIME URL: After goto', { url: urlAfterGoto });
+
+    // ── Verify page actually loaded ──────────────────────────────
+    const url = this.page.url();
+    logger.info('OPENING LINKEDIN: Page URL after navigation', { url });
+
+    if (!url.includes('linkedin.com')) {
+      throw new Error(`Page did not load LinkedIn — current URL: ${url}`);
+    }
+
+    // Wait for page to finish rendering before checking selectors
+    await this.page.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
+    const urlAfterLoadState = this.page.url();
+    logger.info('RUNTIME URL: After waitForLoadState', { url: urlAfterLoadState });
+
+    await this.page.waitForTimeout(5000);
+    const urlAfterWait = this.page.url();
+    logger.info('RUNTIME URL: After 5s wait', { url: urlAfterWait });
+
+    // Monitor URL every second for 10 seconds
+    for (let i = 1; i <= 10; i++) {
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      const currentUrl = this.page.url();
+      logger.info(`RUNTIME URL MONITOR: t=${i}s`, { url: currentUrl });
+    }
+
+    const finalUrl = this.page.url();
+    logger.info('RUNTIME URL: Final after 10s monitor', { url: finalUrl });
+
+    const usernameSelectors = [
+      'input[type=email]',
+      'input[name=session_key]',
+      'input[name=username]',
+      'input[autocomplete=username]',
+      'input[autocomplete=email]',
+      'input[type=text]',
+    ];
+    const passwordSelectors = [
+      'input[type=password]',
+      'input[name=session_password]',
+      'input[autocomplete=current-password]',
+    ];
+
+    let usernameFound = false;
+    let passwordFound = false;
+
+    // Use evaluate first — Playwright's waitForSelector has issues finding elements
+    // on LinkedIn's login page due to CSP nonce restrictions on the selector engine
+    const inputs = await this.page.evaluate(() => {
+      return Array.from(document.querySelectorAll('input')).map(el => ({
+        type: el.type, name: el.name || '', id: el.id || '',
+      }));
+    }).catch(() => [] as Array<{ type: string; name: string; id: string }>);
+
+    if (Array.isArray(inputs) && inputs.length > 0) {
+      logger.info('Inputs found via evaluate', { count: inputs.length, types: inputs.map(i => i.type) });
+      usernameFound = inputs.some(i => i.type === 'email' || i.type === 'text');
+      passwordFound = inputs.some(i => i.type === 'password');
+    }
+
+    // If evaluate didn't find inputs, try waitForSelector as fallback
+    if (!usernameFound) {
+      for (const sel of usernameSelectors) {
+        try {
+          const el = await this.page.waitForSelector(sel, { timeout: 3000 });
+          if (el) { usernameFound = true; break; }
+        } catch {}
+      }
+    }
+
+    if (!passwordFound) {
+      for (const sel of passwordSelectors) {
+        try {
+          const el = await this.page.waitForSelector(sel, { timeout: 3000 });
+          if (el) { passwordFound = true; break; }
+        } catch {}
+      }
+    }
+
+    // Check if already authenticated
+    if (!usernameFound && !passwordFound) {
+      const currentUrl = this.page.url();
+      if (this.isAuthenticatedUrl(currentUrl)) {
+        logger.info('Already authenticated', { url: currentUrl });
+        if (onProgress) await onProgress('ready_for_login', 'Already logged in to LinkedIn.');
+        return;
+      }
+    }
+
+    if (usernameFound && passwordFound) {
+      logger.info('Login form detected (username + password fields found)');
+    } else if (usernameFound || passwordFound) {
+      logger.info('Login form partially detected', { username: usernameFound, password: passwordFound });
+    } else {
+      throw new Error('LinkedIn login page loaded but no form elements found — page may not be interactive');
+    }
+
+    if (onProgress) await onProgress('ready_for_login', 'LinkedIn login page is ready. Complete your sign-in in the browser window.', {
+      login_url: url,
+      browserbase_session_id: this.bbSession?.id,
+      browserbase_live_url: this.bbSession?.liveUrl,
+    });
+  }
+
+  // ── CONNECTION FLOW: open LinkedIn → wait for auth → verify ────
+
+  async connect(
+    timeoutMs: number,
+    onProgress?: ProgressCallback,
+    workspaceId?: string,
+    accountId?: string,
+    queueItemId?: string,
+  ): Promise<ConnectionResult> {
+    if (!this.page) throw new Error('No page — call newContext() first');
+
+    try {
+      // ── Open LinkedIn login page ────────────────────────────────
+      await this.openLinkedIn(onProgress);
+
+      // ── Refresh Live URL after navigation ───────────────────────
+      // After page.goto() navigates to LinkedIn, fetch the updated debug URL
+      // from Browserbase so the frontend's "Open Browser" button opens the
+      // live debugger view showing the actual LinkedIn page, not about:blank.
+      const refreshedLiveUrl = await this.refreshLiveUrl();
+      if (refreshedLiveUrl && onProgress) {
+        await onProgress('ready_for_login', 'LinkedIn login page ready. Open the browser to complete sign-in.', {
+          browserbase_session_id: this.getSessionId(),
+          browserbase_live_url: refreshedLiveUrl,
+          login_url: LINKEDIN_LOGIN_URL,
+        });
+      }
+
+      // ── Wait for authentication ────────────────────────────────
+      if (onProgress) await onProgress('waiting_for_login', 'Waiting for login. Complete LinkedIn sign-in in the browser window...');
+      const authResult = await this.waitForAuthenticationWithChallenges(timeoutMs, onProgress, workspaceId, accountId, queueItemId);
+
+      if (authResult.challenge) {
+        return {
+          success: false,
+          requiresAction: true,
+          challengeType: authResult.challenge.type,
+          error: `LinkedIn verification required: ${authResult.challenge.description}`,
+        };
+      }
+
+      if (!authResult.authenticated) {
+        if (onProgress) await onProgress('login_timeout', 'LinkedIn authentication not completed within timeout.');
+        return { success: false, error: 'LinkedIn authentication not completed within timeout', nonRetryable: true } as ConnectionResult & { nonRetryable?: boolean };
+      }
+
+      logger.info('Authentication detected, verifying identity');
+      if (onProgress) await onProgress('saving_session', 'Login detected. Verifying identity and saving session...');
+
+      // ── Verify identity ────────────────────────────────────────
+      const identity = await this.verifyIdentity();
+      if (!identity) {
+        return { success: false, error: 'Identity verification failed — could not read LinkedIn profile' };
+      }
+      logger.info('Identity verified', { name: identity.profileName, url: identity.profileUrl });
+
+      // ── Capture session ────────────────────────────────────────
+      const session = await this.captureSession();
+
+      // ── Test session restore ────────────────────────────────────
+      await this.context?.close().catch(() => {});
+      this.context = null;
+      this.page = null;
+
+      logger.info('Starting session restore test');
+      await this.newContext();
+      const restored = await this.restoreSession(session);
+      if (!restored) {
+        return { success: false, error: 'Session restore failed — could not restore authenticated session in new context' };
+      }
+
+      const restoredIdentity = await this.verifyIdentity();
+      if (!restoredIdentity) {
+        return { success: false, error: 'Session restore verification failed — identity could not be confirmed after restore' };
+      }
+
+      logger.info('Session restore successful', { name: restoredIdentity.profileName });
+
+      if (onProgress) await onProgress('connected', 'LinkedIn connected successfully. Session encrypted and saved.');
+
+      return { success: true, identity: restoredIdentity, session };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.error('Connection flow error', { error: msg });
+      if (onProgress) await onProgress('login_failed', `Connection failed: ${msg}`);
+      return { success: false, error: msg };
+    }
+  }
+
+  // ── Connect with existing session (session reuse) ──────────────
+
+  async connectWithSession(
+    session: SessionData,
+    _timeoutMs: number,
+    onProgress?: ProgressCallback,
+  ): Promise<ConnectionResult> {
+    if (!this.browser) throw new Error('Browser not launched');
+
+    try {
+      if (onProgress) await onProgress('creating_session', 'Restoring existing session...');
+      await this.newContext();
+      const restored = await this.restoreSession(session);
+      if (!restored) {
+        return { success: false, error: 'Session restore failed — please reconnect your account' };
+      }
+
+      if (onProgress) await onProgress('opening_linkedin', 'Verifying session on LinkedIn...');
+      await this.page!.goto(LINKEDIN_FEED_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
+
+      const auth = await this.waitForAuthentication(15000);
+      if (!auth) {
+        return { success: false, error: 'Session expired — LinkedIn did not show authenticated state' };
+      }
+
+      const identity = await this.verifyIdentity();
+      if (!identity) {
+        return { success: false, error: 'Identity verification failed' };
+      }
+
+      if (onProgress) await onProgress('connected', 'Session restored successfully.');
+      return { success: true, identity };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return { success: false, error: msg };
+    }
+  }
+
+  // ── Test Connection ─────────────────────────────────────────────
+
+  async testConnection(session: SessionData, _timeoutMs: number): Promise<ConnectionResult> {
+    try {
+      await this.newContext();
+      const restored = await this.restoreSession(session);
+      if (!restored) return { success: false, error: 'Session restore failed' };
+
+      await this.page!.goto(LINKEDIN_FEED_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      const auth = await this.waitForAuthentication(15000);
+      if (!auth) return { success: false, error: 'Session expired — LinkedIn did not show authenticated state' };
+
+      const identity = await this.verifyIdentity();
+      if (!identity) return { success: false, error: 'Identity verification failed' };
+
+      return { success: true, identity };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return { success: false, error: msg };
+    }
+  }
+
+  // ── Authentication Detection ────────────────────────────────────
+
+  private async waitForAuthentication(timeoutMs: number): Promise<boolean> {
+    if (!this.page) return false;
+    const deadline = Date.now() + timeoutMs;
+
+    while (Date.now() < deadline) {
+      const url = this.page.url();
+      if (this.isAuthenticatedUrl(url)) {
+        logger.info('Authenticated state detected', { url });
+        return true;
+      }
+      if (!url.includes('/login') && !url.includes('/checkpoint') && !url.includes('/uas/')) {
+        try {
+          await this.page.goto(LINKEDIN_FEED_URL, { waitUntil: 'domcontentloaded', timeout: 15000 });
+          if (this.page.url().includes('/feed')) return true;
+        } catch { /* continue waiting */ }
+      }
+      await new Promise(resolve => setTimeout(resolve, 2000));
+    }
+    return false;
+  }
+
+  private isAuthenticatedUrl(url: string): boolean {
+    return url.includes('/feed') || url.includes('/mynetwork') || url.includes('/notifications') || url.includes('/in/');
+  }
+
+  // ── Authentication with Challenge Detection ─────────────────────
+
+  private async waitForAuthenticationWithChallenges(
+    timeoutMs: number,
+    onProgress?: ProgressCallback,
+    workspaceId?: string,
+    accountId?: string,
+    queueItemId?: string,
+  ): Promise<{ authenticated: boolean; challenge: ChallengeInfo | null }> {
+    if (!this.page) return { authenticated: false, challenge: null };
+
+    const deadline = Date.now() + timeoutMs;
+    let lastChallengeCheck = 0;
+    const CHALLENGE_CHECK_INTERVAL = 5000;
+
+    while (Date.now() < deadline) {
+      const url = this.page.url();
+
+      if (this.isAuthenticatedUrl(url)) {
+        logger.info('Authenticated state detected', { url });
+        return { authenticated: true, challenge: null };
+      }
+
+      if (Date.now() - lastChallengeCheck > CHALLENGE_CHECK_INTERVAL) {
+        lastChallengeCheck = Date.now();
+        const challenge = await this.detectChallengeDetailed();
+        if (challenge) {
+          logger.warn('Challenge detected during auth wait', { type: challenge.type, url });
+          if (onProgress) {
+            await onProgress('challenge_detected', `LinkedIn verification required: ${challenge.description}`, {
+              challenge_type: challenge.type, url,
+            });
+          }
+          if (workspaceId && accountId) {
+            await this.writeChallengeInteraction(workspaceId, accountId, queueItemId, challenge);
+          }
+          const challengeResolved = await this.waitForChallengeResolution(deadline - Date.now());
+          if (challengeResolved) return { authenticated: true, challenge: null };
+          return { authenticated: false, challenge };
+        }
+      }
+
+      if (!url.includes('/login') && !url.includes('/checkpoint') && !url.includes('/uas/')) {
+        try {
+          await this.page.goto(LINKEDIN_FEED_URL, { waitUntil: 'domcontentloaded', timeout: 15000 });
+          if (this.page.url().includes('/feed')) return { authenticated: true, challenge: null };
+        } catch { /* continue waiting */ }
+      }
+
+      await new Promise(resolve => setTimeout(resolve, 2000));
+    }
+
+    return { authenticated: false, challenge: null };
+  }
+
+  private async waitForChallengeResolution(remainingMs: number): Promise<boolean> {
+    if (!this.page) return false;
+    const deadline = Date.now() + Math.max(remainingMs, 60000);
+
+    while (Date.now() < deadline) {
+      const url = this.page.url();
+      if (this.isAuthenticatedUrl(url)) {
+        logger.info('Challenge resolved, authenticated state detected', { url });
+        return true;
+      }
+      await new Promise(resolve => setTimeout(resolve, 3000));
+    }
+    return false;
+  }
+
+  // ── Challenge Detection ─────────────────────────────────────────
+
+  private async detectChallengeDetailed(): Promise<ChallengeInfo | null> {
+    if (!this.page) return null;
+    const url = this.page.url();
+
+    if (url.includes('/checkpoint/challenge/') || url.includes('/uas/challenge')) {
+      const pageText = await this.page.textContent('body').catch(() => '') || '';
+      if (pageText.toLowerCase().includes('enter the verification code') || pageText.toLowerCase().includes('enter the code we sent')) {
+        return { type: 'email_otp', description: 'Enter the verification code sent to your email' };
+      }
+      if (pageText.toLowerCase().includes('authenticator') || pageText.toLowerCase().includes('two-factor') || pageText.toLowerCase().includes('2fa')) {
+        return { type: 'two_factor', description: 'Enter the 2FA code from your authenticator app' };
+      }
+      return { type: 'email_otp', description: 'Complete the LinkedIn verification challenge' };
+    }
+
+    if (url.includes('/captcha') || url.includes('/challenge/captcha')) {
+      return { type: 'captcha', description: 'Complete the CAPTCHA verification' };
+    }
+
+    const challengeSelectors = [
+      '[data-test-challenge]', '.challenge', '#captcha', '.captcha',
+      'input[name="pin"]', 'input[name="verificationCode"]', 'input[name="otp"]',
+    ];
+
+    for (const sel of challengeSelectors) {
+      const el = await this.page.$(sel).catch(() => null);
+      if (el) {
+        const isVisible = await el.isVisible().catch(() => false);
+        if (isVisible) {
+          logger.warn('Challenge element detected', { selector: sel });
+          return { type: 'email_otp', description: 'Complete the LinkedIn verification challenge' };
+        }
+      }
+    }
+
+    return null;
+  }
+
+  private async writeChallengeInteraction(
+    workspaceId: string,
+    accountId: string,
+    queueItemId: string | undefined,
+    challenge: ChallengeInfo,
+  ): Promise<void> {
+    try {
+      await this.client.from('linkedin_auth_interactions').insert({
+        workspace_id: workspaceId,
+        account_id: accountId,
+        queue_item_id: queueItemId || null,
+        interaction_type: 'challenge',
+        step: 'challenge_detected',
+        message: challenge.description,
+        challenge_type: challenge.type,
+        challenge_description: challenge.description,
+        status: 'pending',
+        metadata: { url: this.page?.url() || '' },
+      });
+      logger.info('Challenge interaction written to DB', { type: challenge.type });
+    } catch (err) {
+      logger.error('Failed to write challenge interaction', { error: String(err) });
+    }
+  }
+
+  // ── Identity Verification ────────────────────────────────────────
+
+  private async verifyIdentity(): Promise<LinkedInIdentity | null> {
+    if (!this.page) return null;
+
+    try {
+      await this.page.goto(LINKEDIN_PROFILE_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      await this.page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
+
+      const url = this.page.url();
+      if (!url.includes('/in/') || url.includes('/in/me')) {
+        logger.warn('Profile URL not resolved', { url });
+        return null;
+      }
+
+      const profileName = await this.page.textContent('h1').catch(() => null);
+      const headline = await this.page.textContent('.text-body-medium, [class*="headline"]').catch(() => null);
+
+      const identity: LinkedInIdentity = {
+        profileUrl: url,
+        profileName: profileName?.trim() || null,
+        profileHeadline: headline?.trim() || null,
+      };
+
+      logger.info('Identity extracted', { name: identity.profileName, url: identity.profileUrl });
+      return identity;
+    } catch (err) {
+      logger.error('Identity verification failed', { error: String(err) });
+      return null;
+    }
+  }
+
+  // ── Session Capture & Restore ───────────────────────────────────
+
+  async captureSession(): Promise<SessionData> {
+    if (!this.context) throw new Error('No context to capture session from');
+
+    const cookies = await this.context.cookies();
+    const storageState = await this.context.storageState();
+
+    const localStorage: Record<string, unknown> = {};
+    const sessionStorage: Record<string, unknown> = {};
+
+    if (this.page) {
+      const ls = await this.page.evaluate(() => {
+        const items: Record<string, string> = {};
+        for (let i = 0; i < window.localStorage.length; i++) {
+          const key = window.localStorage.key(i);
+          if (key) items[key] = window.localStorage.getItem(key) || '';
+        }
+        return items;
+      }).catch(() => ({}));
+      Object.assign(localStorage, ls);
+
+      const ss = await this.page.evaluate(() => {
+        const items: Record<string, string> = {};
+        for (let i = 0; i < window.sessionStorage.length; i++) {
+          const key = window.sessionStorage.key(i);
+          if (key) items[key] = window.sessionStorage.getItem(key) || '';
+        }
+        return items;
+      }).catch(() => ({}));
+      Object.assign(sessionStorage, ss);
+    }
+
+    const userAgent = await this.page!.evaluate(() => navigator.userAgent);
+    const fingerprint = await this.page!.evaluate(() => ({
+      userAgent: navigator.userAgent,
+      viewport: { width: window.innerWidth, height: window.innerHeight },
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || null,
+      language: navigator.language || null,
+      platform: navigator.platform || null,
+      cookieEnabled: navigator.cookieEnabled,
+      hardwareConcurrency: navigator.hardwareConcurrency || 1,
+    })).catch(() => null) as BrowserFingerprint | null;
+
+    const browserVersion = this.browser?.version() || null;
+    const playwrightVersion = null;
+
+    return {
+      cookies,
+      storageState,
+      localStorage,
+      sessionStorage,
+      userAgent,
+      viewport: { width: 1440, height: 900 },
+      timezone: fingerprint?.timezone || null,
+      language: fingerprint?.language || null,
+      browserVersion,
+      playwrightVersion,
+      fingerprint,
+    };
+  }
+
+  // ── Validate Session: verify restored session is still authenticated ──
+
+  async validateSession(): Promise<{ valid: boolean; reason: string | null; identity: LinkedInIdentity | null }> {
+    if (!this.page) return { valid: false, reason: 'No page available', identity: null };
+
+    try {
+      // 1. Navigate to LinkedIn feed
+      await this.page.goto(LINKEDIN_FEED_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      await this.page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
+
+      const url = this.page.url();
+
+      // 2. Check if redirected to login (session expired)
+      if (url.includes('/login') || url.includes('/checkpoint') || url.includes('/uas/')) {
+        logger.warn('Session validation failed: redirected to login', { url });
+        return { valid: false, reason: 'LinkedIn redirected to login — session expired', identity: null };
+      }
+
+      // 3. Check for authentication indicators on the feed page
+      const hasGlobalNav = await this.page.$('.global-nav, nav[aria-label="Primary"], nav[aria-label="Main"]') !== null;
+      const hasFeedContent = await this.page.$('.feed-update-wrapper, .core-entry-card, div[class*="feed-shared"]') !== null;
+      const hasAvatar = await this.page.$('.global-nav__me-photo, img[alt*="photo"], .presence-entity__image') !== null;
+
+      if (!hasGlobalNav && !hasFeedContent && !hasAvatar) {
+        logger.warn('Session validation failed: no auth indicators on feed', { url, hasGlobalNav, hasFeedContent, hasAvatar });
+        return { valid: false, reason: 'No authentication indicators found on feed page', identity: null };
+      }
+
+      // 4. Verify profile is accessible
+      const identity = await this.verifyIdentity();
+      if (!identity) {
+        return { valid: false, reason: 'Profile page not accessible — identity verification failed', identity: null };
+      }
+
+      logger.info('Session validation successful', { name: identity.profileName });
+      return { valid: true, reason: null, identity };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.error('Session validation error', { error: msg });
+      return { valid: false, reason: msg, identity: null };
+    }
+  }
+
+  // ── Refresh Session: re-capture cookies and storage during automation ──
+
+  async refreshSession(): Promise<SessionData | null> {
+    if (!this.context) {
+      logger.warn('Cannot refresh session: no context');
+      return null;
+    }
+
+    try {
+      const session = await this.captureSession();
+      logger.info('Session refreshed', { cookieCount: session.cookies.length });
+      return session;
+    } catch (err) {
+      logger.error('Session refresh failed', { error: String(err) });
+      return null;
+    }
+  }
+
+  async restoreSession(session: SessionData): Promise<boolean> {
+    if (!this.context || !this.page) throw new Error('No context to restore session into');
+
+    try {
+      if (session.storageState && (session.storageState as { cookies?: unknown }).cookies) {
+        await this.context.addCookies((session.storageState as { cookies: never[] }).cookies);
+      } else if (session.cookies && session.cookies.length > 0) {
+        await this.context.addCookies(session.cookies as never[]);
+      }
+
+      await this.page.goto('https://www.linkedin.com', { waitUntil: 'domcontentloaded', timeout: 30000 });
+
+      if (Object.keys(session.localStorage).length > 0) {
+        await this.page.evaluate((data) => {
+          for (const [key, value] of Object.entries(data)) {
+            try { window.localStorage.setItem(key, String(value)); } catch {}
+          }
+        }, session.localStorage).catch(() => {});
+      }
+
+      if (Object.keys(session.sessionStorage).length > 0) {
+        await this.page.evaluate((data) => {
+          for (const [key, value] of Object.entries(data)) {
+            try { window.sessionStorage.setItem(key, String(value)); } catch {}
+          }
+        }, session.sessionStorage).catch(() => {});
+      }
+
+      await this.page.goto(LINKEDIN_FEED_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      const url = this.page.url();
+      const isAuth = !url.includes('/login') && !url.includes('/checkpoint');
+
+      logger.info('Session restore attempt', { url, authenticated: isAuth });
+      return isAuth;
+    } catch (err) {
+      logger.error('Session restore error', { error: String(err) });
+      return false;
+    }
+  }
+
+  getBrowserVersion(): string | null {
+    return this.browser?.version() || null;
+  }
+
+  // ── Safety Checks ───────────────────────────────────────────────
+
+  async detectRestriction(): Promise<boolean> {
+    if (!this.page) return false;
+    const url = this.page.url();
+    if (url.includes('/restricted') || url.includes('/suspended') || url.includes('/account-restricted')) {
+      return true;
+    }
+    const text = await this.page.textContent('body').catch(() => '');
+    if (text && (text.includes('account has been restricted') || text.includes('temporarily restricted'))) {
+      return true;
+    }
+    return false;
+  }
+
+  async takeScreenshot(): Promise<string | null> {
+    if (!this.page) return null;
+    try {
+      const buf = await this.page.screenshot({ type: 'png', fullPage: false });
+      return buf.toString('base64');
+    } catch (err) {
+      logger.error('Screenshot failed', { error: String(err) });
+      return null;
+    }
+  }
+
+  isUrlAllowed(url: string): boolean {
+    try {
+      const parsed = new URL(url);
+      return ['linkedin.com', 'www.linkedin.com'].includes(parsed.hostname);
+    } catch {
+      return false;
+    }
+  }
+}

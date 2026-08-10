@@ -1,0 +1,50 @@
+import { useState } from 'react';
+import { Webhook, Zap, Activity, AlertTriangle, CheckCircle2, RefreshCw, Plus, Trash2, Clock, Mail, Send, XCircle } from 'lucide-react';
+import { PageHeader } from '@/components/ui/PageHeader';
+import { Card } from '@/components/ui/Card';
+import { Spinner } from '@/components/ui/Spinner';
+import { Badge } from '@/components/ui/Badge';
+import { cn, timeAgo } from '@/lib/utils';
+import { useWebhookPlatformDashboard, useCreateWebhookSubscription, useDeleteWebhookSubscription, useReplayWebhook, usePurgeDeadLetter } from '@/hooks/useWebhookPlatform';
+
+const TABS = [
+  { id: 'overview', label: 'Overview', icon: Activity },
+  { id: 'subscriptions', label: 'Subscriptions', icon: Webhook },
+  { id: 'deliveries', label: 'Deliveries', icon: Send },
+  { id: 'deadletter', label: 'Dead Letter Queue', icon: AlertTriangle },
+  { id: 'events', label: 'Event Catalog', icon: Mail },
+] as const;
+
+type TabId = (typeof TABS)[number]['id'];
+
+export function WebhookPlatformPage() {
+  const { data: dash, isLoading } = useWebhookPlatformDashboard();
+  const createSub = useCreateWebhookSubscription();
+  const deleteSub = useDeleteWebhookSubscription();
+  const replay = useReplayWebhook();
+  const purgeDLQ = usePurgeDeadLetter();
+  const [tab, setTab] = useState<TabId>('overview');
+
+  if (isLoading) return (<div><PageHeader title="Webhook Platform" description="Outgoing webhooks with retry, dead letter queue, replay, and monitoring." /><div className="flex justify-center py-20"><Spinner className="h-8 w-8" /></div></div>);
+
+  if (!dash || dash.subscriptions.length === 0) {
+    return (<div><PageHeader title="Webhook Platform" description="Outgoing webhooks with retry, dead letter queue, replay, and monitoring." /><Card className="p-6"><div className="flex flex-col items-center justify-center py-16 space-y-4"><div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-gradient-to-r from-gold-400 to-gold-300/10 border border-brand-500/20"><Webhook className="h-8 w-8 text-brand-400" /></div><div className="text-center space-y-2"><h3 className="text-lg font-semibold text-ink-500">Webhook Platform</h3><p className="text-sm text-ink-500 max-w-md mx-auto leading-relaxed">Subscribe to platform events and receive webhooks at your endpoints with automatic retries, dead letter queues, and replay capabilities.</p></div><button onClick={() => createSub.mutate({ name: 'Default Webhook', endpointUrl: 'https://example.com/webhook', events: ['lead.created', 'meeting.booked'] })} disabled={createSub.isPending} className="flex items-center gap-2 rounded-lg bg-gradient-to-r from-gold-400 to-gold-300 px-6 py-2.5 text-sm font-medium text-maroon-950 hover:bg-brand-300/15 disabled:opacity-50"><Zap className="h-4 w-4" />{createSub.isPending ? 'Creating...' : 'Create Webhook'}</button></div></Card></div>);
+  }
+
+  return (
+    <div>
+      <PageHeader title="Webhook Platform" description="Outgoing webhooks with retry, dead letter queue, replay, and monitoring." actions={<button onClick={() => createSub.mutate({ name: `Webhook ${dash.subscriptions.length + 1}`, endpointUrl: 'https://example.com/webhook', events: ['lead.created'] })} disabled={createSub.isPending} className="flex items-center gap-2 rounded-lg bg-gradient-to-r from-gold-400 to-gold-300 px-4 py-2 text-sm font-medium text-maroon-950 hover:bg-brand-300/15 disabled:opacity-50"><Plus className="h-3.5 w-3.5" />New Webhook</button>} />
+      <div className="flex items-start gap-3 mb-6 rounded-xl bg-gradient-to-r from-gold-400 to-gold-300/5 border border-brand-500/10 p-4"><Webhook className="h-5 w-5 text-brand-400 shrink-0 mt-0.5" /><div className="flex-1"><p className="text-sm text-ink-500">{dash.totalDeliveries} total deliveries with {dash.successRate.toFixed(1)}% success rate. {dash.deadLetterCount > 0 ? `${dash.deadLetterCount} events in dead letter queue. ` : ''}{dash.pendingDeliveries > 0 ? `${dash.pendingDeliveries} pending deliveries. ` : ''}</p><p className="text-xs text-ink-500 mt-0.5">Today: {dash.deliveriesToday} deliveries · Avg latency: {dash.avgLatency.toFixed(0)}ms</p></div></div>
+      <Card>
+        <div className="border-b border-gold-500/12 px-2"><div className="flex items-center gap-1 overflow-x-auto scrollbar-thin">{TABS.map((t) => (<button key={t.id} onClick={() => setTab(t.id)} className={cn('flex items-center gap-1.5 px-3 py-2.5 text-xs font-medium border-b-2 transition-colors whitespace-nowrap', tab === t.id ? 'border-brand-500 text-brand-400' : 'border-transparent text-ink-500 hover:text-ink-500')}><t.icon className="h-3.5 w-3.5" />{t.label}</button>))}</div></div>
+        <div className="p-4">
+          {tab === 'overview' && (<div className="grid grid-cols-2 md:grid-cols-4 gap-4">{[<Card key="d" className="p-4"><div className="flex items-center gap-2 mb-1"><Send className="h-4 w-4 text-brand-400" /><span className="text-xs text-ink-500">Total Deliveries</span></div><p className="text-2xl font-bold text-ink-500">{dash.totalDeliveries}</p></Card>, <Card key="s" className="p-4"><div className="flex items-center gap-2 mb-1"><CheckCircle2 className="h-4 w-4 text-success-400" /><span className="text-xs text-ink-500">Success Rate</span></div><p className="text-2xl font-bold text-ink-500">{dash.successRate.toFixed(1)}%</p></Card>, <Card key="f" className="p-4"><div className="flex items-center gap-2 mb-1"><XCircle className="h-4 w-4 text-error-400" /><span className="text-xs text-ink-500">Failed</span></div><p className="text-2xl font-bold text-ink-500">{dash.failedDeliveries}</p></Card>, <Card key="dlq" className="p-4"><div className="flex items-center gap-2 mb-1"><AlertTriangle className="h-4 w-4 text-warning-400" /><span className="text-xs text-ink-500">Dead Letters</span></div><p className="text-2xl font-bold text-ink-500">{dash.deadLetterCount}</p></Card>]}</div>)}
+          {tab === 'subscriptions' && (<div className="space-y-2">{dash.subscriptions.map((s) => { const sub = s as Record<string, unknown>; return (<Card key={sub.id as string} className="p-3"><div className="flex items-start justify-between"><div className="flex items-center gap-2"><Webhook className="h-4 w-4 text-brand-400" /><div><p className="text-sm font-medium text-ink-500">{sub.subscription_name as string}</p><p className="text-xs text-ink-500 truncate max-w-xs">{sub.endpoint_url as string}</p></div></div><div className="flex items-center gap-2"><Badge tone={sub.is_active ? 'success' : 'neutral'} dot>{sub.is_active ? 'Active' : 'Inactive'}</Badge><button onClick={() => deleteSub.mutate(sub.id as string)} className="rounded-lg bg-error-500/10 px-2.5 py-1 text-xs text-error-400 hover:bg-error-500/20"><Trash2 className="h-3 w-3" /></button></div></div><div className="mt-2 flex flex-wrap gap-1">{(sub.events as string[]).map((e) => <Badge key={e} tone="brand">{e}</Badge>)}</div></Card>); })}</div>)}
+          {tab === 'deliveries' && (<div className="space-y-2">{dash.deliveries.slice(0, 30).map((d) => { const del = d as Record<string, unknown>; return (<Card key={del.id as string} className="p-3"><div className="flex items-start justify-between"><div className="flex items-center gap-2"><Send className="h-4 w-4 text-brand-400" /><div><p className="text-sm font-medium text-ink-500">{del.event_name as string}</p><p className="text-xs text-ink-500">Attempt {del.attempt_number as number} · {timeAgo(del.created_at as string)} · {del.latency_ms as number ?? 0}ms</p></div></div><div className="flex items-center gap-2"><Badge tone={del.status as string === 'delivered' ? 'success' : del.status as string === 'failed' ? 'error' : 'warning'} dot>{del.status as string}</Badge>{del.status === 'failed' && <button onClick={() => replay.mutate(del.id as string)} className="rounded-lg bg-warning-500/10 px-2.5 py-1 text-xs text-warning-400 hover:bg-warning-500/20"><RefreshCw className="h-3 w-3" /></button>}</div></div>{del.error_message && <p className="text-xs text-error-400 mt-1">{del.error_message as string}</p>}</Card>); })}</div>)}
+          {tab === 'deadletter' && (dash.deadLetters.length > 0 ? (<div className="space-y-2">{dash.deadLetters.map((d) => { const dlq = d as Record<string, unknown>; return (<Card key={dlq.id as string} className="p-3"><div className="flex items-start justify-between"><div className="flex items-center gap-2"><AlertTriangle className="h-4 w-4 text-error-400" /><div><p className="text-sm font-medium text-ink-500">{dlq.event_name as string}</p><p className="text-xs text-ink-500">{dlq.failure_reason as string} · {dlq.total_attempts as number} attempts · {timeAgo(dlq.created_at as string)}</p></div></div><div className="flex items-center gap-2"><button onClick={() => replay.mutate(dlq.id as string)} className="rounded-lg bg-warning-500/10 px-2.5 py-1 text-xs text-warning-400 hover:bg-warning-500/20"><RefreshCw className="h-3 w-3" />Replay</button><button onClick={() => purgeDLQ.mutate(dlq.id as string)} className="rounded-lg bg-error-500/10 px-2.5 py-1 text-xs text-error-400 hover:bg-error-500/20"><Trash2 className="h-3 w-3" /></button></div></div></Card>); })}</div>) : <div className="text-center py-8 text-sm text-ink-500">No dead letters. All deliveries successful.</div>)}
+          {tab === 'events' && (<div className="space-y-2">{dash.events.length === 0 ? <div className="text-center py-8 text-sm text-ink-500">No events registered.</div> : dash.events.map((e) => { const ev = e as Record<string, unknown>; return (<Card key={ev.id as string} className="p-3"><div className="flex items-start justify-between"><div className="flex items-center gap-2"><Mail className="h-4 w-4 text-brand-400" /><div><p className="text-sm font-medium text-ink-500 font-mono">{ev.event_name as string}</p><p className="text-xs text-ink-500">{ev.event_description as string ?? ev.event_category as string}</p></div></div><Badge tone={ev.is_active ? 'success' : 'neutral'} dot>{ev.is_active ? 'Active' : 'Inactive'}</Badge></div></Card>); })}</div>)}
+        </div>
+      </Card>
+    </div>
+  );
+}
