@@ -1,5 +1,6 @@
 // linkedin-meeting-engine — Meeting booking & calendar sync
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
+import { authorizeLinkedInWorkspace } from "../_shared/linkedinAuthorization.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -10,12 +11,11 @@ const corsHeaders = {
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") return new Response(null, { status: 200, headers: corsHeaders });
   try {
-    const { createClient } = await import("jsr:@supabase/supabase-js@2");
-    const supabase = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
     const body = await req.json();
     const { action, workspace_id } = body as Record<string, unknown>;
 
     if (!workspace_id) return jsonError("workspace_id is required", 400);
+    const { admin: supabase } = await authorizeLinkedInWorkspace(req, workspace_id);
 
     switch (action) {
       case "generate_slots": {
@@ -43,13 +43,13 @@ Deno.serve(async (req: Request) => {
             }
           }
         }
-        await supabase.from("linkedin_meeting_requests").update({ status: "slots_generated" }).eq("id", meeting_request_id as string);
+        await supabase.from("linkedin_meeting_requests").update({ status: "slots_generated" }).eq("id", meeting_request_id as string).eq("workspace_id", workspace_id);
         return jsonResponse({ slots, count: slots.length });
       }
       case "confirm_meeting": {
         const { slot_id } = body as Record<string, string>;
         if (!slot_id) return jsonError("slot_id is required", 400);
-        const { data: slot } = await supabase.from("linkedin_meeting_slots").select("*").eq("id", slot_id).maybeSingle();
+        const { data: slot } = await supabase.from("linkedin_meeting_slots").select("*").eq("id", slot_id).eq("workspace_id", workspace_id).maybeSingle();
         if (!slot) return jsonError("Slot not found", 404);
         const s = slot as Record<string, unknown>;
         const meetLink = `https://meet.google.com/${Math.random().toString(36).substring(2, 12)}`;
@@ -59,8 +59,8 @@ Deno.serve(async (req: Request) => {
           meeting_url: meetLink, meeting_provider: "google_meet",
         }).select("*").maybeSingle();
         if (error) return jsonError(error.message, 400);
-        await supabase.from("linkedin_meeting_slots").update({ status: "confirmed" }).eq("id", slot_id);
-        await supabase.from("linkedin_meeting_requests").update({ status: "confirmed" }).eq("id", s.meeting_request_id as string);
+        await supabase.from("linkedin_meeting_slots").update({ status: "confirmed" }).eq("id", slot_id).eq("workspace_id", workspace_id);
+        await supabase.from("linkedin_meeting_requests").update({ status: "confirmed" }).eq("id", s.meeting_request_id as string).eq("workspace_id", workspace_id);
         return jsonResponse({ confirmation, meeting_url: meetLink });
       }
       case "list_requests": {

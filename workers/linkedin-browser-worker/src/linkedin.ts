@@ -1,7 +1,7 @@
 import { chromium, Browser, BrowserContext, Page } from 'playwright';
 import { SupabaseClient } from '@supabase/supabase-js';
 import { logger } from './logger.js';
-import { browserbase, BrowserbaseSession } from './browserbase.js';
+import { browserbase, BrowserbaseError, BrowserbaseSession } from './browserbase.js';
 
 const LINKEDIN_LOGIN_URL = 'https://www.linkedin.com/login';
 const LINKEDIN_FEED_URL = 'https://www.linkedin.com/feed';
@@ -47,7 +47,7 @@ export interface IntendedLinkedInIdentity {
   linkedinEmail?: string | null;
 }
 
-type LoginFlowState = 'idle' | 'opening_linkedin' | 'waiting_for_login' | 'challenge' | 'verifying_identity' | 'capturing_session' | 'verifying_restore' | 'connected' | 'failed';
+type LoginFlowState = 'idle' | 'opening_browser' | 'waiting_for_login' | 'challenge_detected' | 'waiting_for_user' | 'verifying_authentication' | 'verifying_identity' | 'capturing_session' | 'verifying_restore' | 'connected' | 'failed' | 'cancelled';
 
 export interface LinkedInIdentity {
   profileUrl: string | null;
@@ -88,6 +88,8 @@ export interface ConnectionResult {
   challengeType?: string;
   authState?: LinkedInAuthenticationState;
   nonRetryable?: boolean;
+  retryable?: boolean;
+  cancelled?: boolean;
 }
 
 export type ProgressStep =
@@ -99,6 +101,8 @@ export type ProgressStep =
   | 'ready_for_login'
   | 'waiting_for_login'
   | 'challenge_detected'
+  | 'waiting_for_user'
+  | 'verifying_authentication'
   | 'saving_session'
   | 'connected'
   | 'login_timeout'
@@ -120,6 +124,7 @@ export class LinkedInBrowser {
   private encryptionSecret: string;
   private client: SupabaseClient;
   private bbSession: BrowserbaseSession | null = null;
+  private cancellationReason: string | null = null;
 
   constructor(client: SupabaseClient, _headless: boolean, encryptionSecret: string) {
     this.client = client;
@@ -155,6 +160,7 @@ export class LinkedInBrowser {
   // ── LAUNCH: Create Browserbase session + attach Playwright ────
 
   async launch(onProgress?: ProgressCallback): Promise<void> {
+    this.cancellationReason = null;
     const useBrowserbase = browserbase.isConfigured();
 
     if (!useBrowserbase) {
@@ -233,8 +239,13 @@ export class LinkedInBrowser {
         await this.launchLocalChromium();
         return;
       }
-      throw new Error('Secure browser provider is unavailable');
+      const status = err instanceof BrowserbaseError ? err.statusCode : 503;
+      throw new BrowserbaseError('Secure browser provider is unavailable', status);
     }
+  }
+
+  cancel(reason = 'Operation cancelled'): void {
+    this.cancellationReason = reason;
   }
 
   private localFallbackEnabled(): boolean {
@@ -506,15 +517,18 @@ export class LinkedInBrowser {
     let flowState: LoginFlowState = 'idle';
     const transition = (next: LoginFlowState): void => {
       const allowed: Record<LoginFlowState, LoginFlowState[]> = {
-        idle: ['opening_linkedin', 'failed'],
-        opening_linkedin: ['waiting_for_login', 'failed'],
-        waiting_for_login: ['challenge', 'verifying_identity', 'failed'],
-        challenge: ['verifying_identity', 'failed'],
+        idle: ['opening_browser', 'failed', 'cancelled'],
+        opening_browser: ['waiting_for_login', 'failed', 'cancelled'],
+        waiting_for_login: ['challenge_detected', 'verifying_authentication', 'failed', 'cancelled'],
+        challenge_detected: ['waiting_for_user', 'failed', 'cancelled'],
+        waiting_for_user: ['verifying_authentication', 'failed', 'cancelled'],
+        verifying_authentication: ['verifying_identity', 'failed', 'cancelled'],
         verifying_identity: ['capturing_session', 'failed'],
         capturing_session: ['verifying_restore', 'failed'],
         verifying_restore: ['connected', 'failed'],
         connected: [],
         failed: [],
+        cancelled: [],
       };
       if (!allowed[flowState].includes(next)) throw new Error(`Invalid login transition ${flowState} -> ${next}`);
       logger.info('LinkedIn login state transition', { from: flowState, to: next });
@@ -523,7 +537,7 @@ export class LinkedInBrowser {
 
     try {
       // ── Open LinkedIn login page ────────────────────────────────
-      transition('opening_linkedin');
+      transition('opening_browser');
       await this.openLinkedIn(onProgress);
 
       // ── Refresh Live URL after navigation ───────────────────────
@@ -544,21 +558,19 @@ export class LinkedInBrowser {
       if (onProgress) await onProgress('waiting_for_login', 'Waiting for login. Complete LinkedIn sign-in in the browser window...');
       const authResult = await this.waitForAuthenticationWithChallenges(timeoutMs, onProgress, workspaceId, accountId, queueItemId);
 
-      if (authResult.challenge) {
-        transition('challenge');
-        return {
-          success: false,
-          requiresAction: true,
-          challengeType: authResult.challenge.type,
-          error: `LinkedIn verification required: ${authResult.challenge.description}`,
-        };
+      if (authResult.cancelled) {
+        transition('cancelled');
+        return { success: false, cancelled: true, nonRetryable: true, error: 'LinkedIn connection was cancelled' };
       }
 
       if (!authResult.authenticated) {
         if (onProgress) await onProgress('login_timeout', 'LinkedIn authentication not completed within timeout.');
-        return { success: false, error: 'LinkedIn authentication not completed within timeout', nonRetryable: true } as ConnectionResult & { nonRetryable?: boolean };
+        const challengeSuffix = authResult.challenge ? ' Additional verification was not completed in the secure browser.' : '';
+        return { success: false, error: `LinkedIn authentication not completed within timeout.${challengeSuffix}`, nonRetryable: true, challengeType: authResult.challenge?.type };
       }
 
+      transition('verifying_authentication');
+      if (onProgress) await onProgress('verifying_authentication', 'LinkedIn sign-in detected. Verifying authentication...');
       logger.info('Authentication detected, verifying identity');
       transition('verifying_identity');
       if (onProgress) await onProgress('saving_session', 'Login detected. Verifying identity and saving session...');
@@ -579,26 +591,27 @@ export class LinkedInBrowser {
       const session = await this.captureSession();
 
       // ── Test session restore ────────────────────────────────────
-      await this.context?.close().catch(() => {});
-      this.context = null;
-      this.page = null;
-
       logger.info('Starting session restore test');
       transition('verifying_restore');
-      await this.newContext();
-      const restored = await this.restoreSession(session);
-      if (!restored) {
-        return { success: false, error: 'Session restore failed — could not restore authenticated session in new context' };
+      const validator = new LinkedInBrowser(this.client, true, this.encryptionSecret);
+      let restoredIdentity: LinkedInIdentity | null = null;
+      try {
+        // Validate in a separate provider session; never close Browserbase's
+        // provider-owned default context and assume another can be created.
+        await validator.launch();
+        await validator.newContext();
+        const restored = await validator.restoreSession(session);
+        if (!restored) return { success: false, error: 'Session restore failed in an independent browser session', retryable: true };
+        const validation = await validator.validateSession(intendedIdentity);
+        if (!validation.valid) {
+          const mismatch = validation.reason?.includes('does not match') === true;
+          return { success: false, error: validation.reason || 'Session restore validation failed', nonRetryable: mismatch, retryable: !mismatch };
+        }
+        restoredIdentity = validation.identity;
+      } finally {
+        await validator.close().catch(() => {});
       }
-
-      const restoredIdentity = await this.verifyIdentity();
-      if (!restoredIdentity) {
-        return { success: false, error: 'Session restore verification failed — identity could not be confirmed after restore' };
-      }
-      const restoredMismatch = this.getIdentityMismatch(restoredIdentity, intendedIdentity);
-      if (restoredMismatch) {
-        return { success: false, error: restoredMismatch, nonRetryable: true, authState: 'authenticated' };
-      }
+      if (!restoredIdentity) return { success: false, error: 'Identity could not be confirmed after restore', retryable: true };
 
       logger.info('Session restore successful', { name: restoredIdentity.profileName });
       transition('connected');
@@ -805,11 +818,13 @@ export class LinkedInBrowser {
     workspaceId?: string,
     accountId?: string,
     queueItemId?: string,
-  ): Promise<{ authenticated: boolean; challenge: ChallengeInfo | null }> {
-    if (!this.page) return { authenticated: false, challenge: null };
+  ): Promise<{ authenticated: boolean; challenge: ChallengeInfo | null; cancelled: boolean }> {
+    if (!this.page) return { authenticated: false, challenge: null, cancelled: false };
 
     const deadline = Date.now() + timeoutMs;
     let lastChallengeCheck = 0;
+    let lastCancellationCheck = 0;
+    let activeChallenge: ChallengeInfo | null = null;
     const CHALLENGE_CHECK_INTERVAL = 5000;
 
     while (Date.now() < deadline) {
@@ -818,47 +833,39 @@ export class LinkedInBrowser {
 
       if (assessment.state === 'authenticated') {
         logger.info('Authenticated state verified', { host: this.safeHostname(url), confidence: assessment.confidence, signals: assessment.signals });
-        return { authenticated: true, challenge: null };
+        return { authenticated: true, challenge: activeChallenge, cancelled: false };
+      }
+
+      if (this.cancellationReason) return { authenticated: false, challenge: activeChallenge, cancelled: true };
+      if (queueItemId && Date.now() - lastCancellationCheck > 3000) {
+        lastCancellationCheck = Date.now();
+        const { data } = await this.client.from('browser_execution_queue').select('status').eq('id', queueItemId).maybeSingle();
+        if (data?.status === 'cancelled') return { authenticated: false, challenge: activeChallenge, cancelled: true };
       }
 
       if (Date.now() - lastChallengeCheck > CHALLENGE_CHECK_INTERVAL) {
         lastChallengeCheck = Date.now();
         const challenge = assessment.state === 'checkpoint' ? await this.detectChallengeDetailed() : null;
         if (challenge) {
+          const isNewChallenge = !activeChallenge || activeChallenge.type !== challenge.type;
+          activeChallenge = challenge;
           logger.warn('Challenge detected during auth wait', { type: challenge.type, host: this.safeHostname(url) });
-          if (onProgress) {
+          if (onProgress && isNewChallenge) {
             await onProgress('challenge_detected', `LinkedIn verification required: ${challenge.description}`, {
               challenge_type: challenge.type,
             });
+            await onProgress('waiting_for_user', 'Complete verification in the secure LinkedIn browser. Yuktris never collects verification codes.');
           }
-          if (workspaceId && accountId) {
+          if (workspaceId && accountId && isNewChallenge) {
             await this.writeChallengeInteraction(workspaceId, accountId, queueItemId, challenge);
           }
-          const challengeResolved = await this.waitForChallengeResolution(deadline - Date.now());
-          if (challengeResolved) return { authenticated: true, challenge: null };
-          return { authenticated: false, challenge };
         }
       }
 
       await new Promise(resolve => setTimeout(resolve, 2000));
     }
 
-    return { authenticated: false, challenge: null };
-  }
-
-  private async waitForChallengeResolution(remainingMs: number): Promise<boolean> {
-    if (!this.page) return false;
-    const deadline = Date.now() + Math.max(0, remainingMs);
-
-    while (Date.now() < deadline) {
-      const assessment = await this.assessAuthentication();
-      if (assessment.state === 'authenticated') {
-        logger.info('Challenge resolved, authenticated state verified', { host: this.safeHostname(assessment.url) });
-        return true;
-      }
-      await new Promise(resolve => setTimeout(resolve, 3000));
-    }
-    return false;
+    return { authenticated: false, challenge: activeChallenge, cancelled: false };
   }
 
   // ── Challenge Detection ─────────────────────────────────────────
@@ -870,10 +877,10 @@ export class LinkedInBrowser {
     if (url.includes('/checkpoint/challenge/') || url.includes('/uas/challenge')) {
       const pageText = await this.page.textContent('body').catch(() => '') || '';
       if (pageText.toLowerCase().includes('enter the verification code') || pageText.toLowerCase().includes('enter the code we sent')) {
-        return { type: 'email_otp', description: 'Enter the verification code sent to your email' };
+        return { type: 'email_otp', description: 'Complete email verification inside the secure LinkedIn browser' };
       }
       if (pageText.toLowerCase().includes('authenticator') || pageText.toLowerCase().includes('two-factor') || pageText.toLowerCase().includes('2fa')) {
-        return { type: 'two_factor', description: 'Enter the 2FA code from your authenticator app' };
+        return { type: 'two_factor', description: 'Complete two-factor verification inside the secure LinkedIn browser' };
       }
       return { type: 'email_otp', description: 'Complete the LinkedIn verification challenge' };
     }

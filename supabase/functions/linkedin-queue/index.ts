@@ -15,6 +15,7 @@
 //   POST /linkedin-queue { action: "cancel", item_id } — cancel a task
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
+import { authorizeLinkedInWorkspace } from "../_shared/linkedinAuthorization.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -25,13 +26,12 @@ const corsHeaders = {
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") return new Response(null, { status: 200, headers: corsHeaders });
   try {
-    const { createClient } = await import("jsr:@supabase/supabase-js@2");
-    const supabase = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
-
     if (req.method === "GET") {
       const url = new URL(req.url);
       const workspaceId = url.searchParams.get("workspace_id");
       const status = url.searchParams.get("status") || "pending";
+      if (!workspaceId) return jsonError("workspace_id is required", 400);
+      const { admin: supabase } = await authorizeLinkedInWorkspace(req, workspaceId);
 
       let q = supabase.from("browser_execution_queue").select("*").eq("status", status).order("created_at", { ascending: false }).limit(50);
       if (workspaceId) q = q.eq("workspace_id", workspaceId);
@@ -42,9 +42,11 @@ Deno.serve(async (req: Request) => {
 
     const body = await req.json().catch(() => ({}));
     const action = body.action as string | undefined;
+    const workspaceId = body.workspace_id as string | undefined;
+    if (!workspaceId) return jsonError("workspace_id is required", 400);
+    const { admin: supabase } = await authorizeLinkedInWorkspace(req, workspaceId);
 
     if (action === "status") {
-      const workspaceId = body.workspace_id as string | undefined;
       let q = supabase.from("browser_execution_queue").select("status, action_type").limit(500);
       if (workspaceId) q = q.eq("workspace_id", workspaceId);
       const { data, error } = await q;
@@ -70,7 +72,7 @@ Deno.serve(async (req: Request) => {
     if (action === "cancel") {
       const itemId = body.item_id as string;
       if (!itemId) return jsonError("Missing item_id", 400);
-      const { error } = await supabase.from("browser_execution_queue").update({ status: "cancelled", completed_at: new Date().toISOString() }).eq("id", itemId).in("status", ["pending", "retry"]);
+      const { error } = await supabase.from("browser_execution_queue").update({ status: "cancelled", completed_at: new Date().toISOString() }).eq("id", itemId).eq("workspace_id", workspaceId).in("status", ["pending", "retry"]);
       if (error) return jsonError(error.message, 500);
       return jsonResponse({ cancelled: true, item_id: itemId });
     }

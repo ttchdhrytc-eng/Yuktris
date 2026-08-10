@@ -1,5 +1,6 @@
 // linkedin-health — LinkedIn automation health monitoring
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
+import { authorizeLinkedInWorkspace } from "../_shared/linkedinAuthorization.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -10,11 +11,10 @@ const corsHeaders = {
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") return new Response(null, { status: 200, headers: corsHeaders });
   try {
-    const { createClient } = await import("jsr:@supabase/supabase-js@2");
-    const supabase = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
     const url = new URL(req.url);
     const workspaceId = url.searchParams.get("workspace_id");
     if (!workspaceId) return jsonError("workspace_id is required", 400);
+    const { admin: supabase } = await authorizeLinkedInWorkspace(req, workspaceId);
 
     const { data: accounts } = await supabase.from("linkedin_accounts").select("*").eq("workspace_id", workspaceId);
     const { data: sessions } = await supabase.from("linkedin_sessions").select("*").eq("workspace_id", workspaceId).eq("status", "active");

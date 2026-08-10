@@ -1,4 +1,4 @@
-import { createClient, SupabaseClient } from '@supabase/supabase-js';
+import { SupabaseClient } from '@supabase/supabase-js';
 import { logger } from './logger.js';
 
 export interface QueueItem {
@@ -25,6 +25,9 @@ export interface QueueItem {
   metadata: Record<string, unknown>;
   created_at: string;
   updated_at: string;
+  attempt_id: string;
+  lease_expires_at: string;
+  idempotency_key: string | null;
 }
 
 export class Queue {
@@ -44,6 +47,7 @@ export class Queue {
     // Atomic claim via SECURITY DEFINER RPC (FOR UPDATE SKIP LOCKED)
     const { data, error } = await this.client.rpc('claim_queue_task', {
       p_worker_id: this.workerId,
+      p_lease_seconds: 90,
     });
 
     if (error) {
@@ -63,12 +67,15 @@ export class Queue {
     }
 
     logger.info('Claimed task', { id: item.id, action: item.action_type, account_id: item.account_id, status: item.status });
-    return item as QueueItem;
+    return this.rememberClaim(item as QueueItem);
   }
 
   async complete(itemId: string, result: Record<string, unknown>, durationMs: number) {
+    const attemptId = this.requireAttempt(itemId);
     const { error } = await this.client.rpc('complete_queue_task', {
       p_task_id: itemId,
+      p_worker_id: this.workerId,
+      p_attempt_id: attemptId,
       p_result: result,
       p_duration_ms: durationMs,
     });
@@ -76,13 +83,17 @@ export class Queue {
     if (error) {
       logger.error('Failed to mark task complete', { id: itemId, error: error.message });
     } else {
+      this.attempts.delete(itemId);
       logger.info('Task completed', { id: itemId, duration_ms: durationMs });
     }
   }
 
   async fail(itemId: string, errorMsg: string, durationMs: number, retryable: boolean) {
+    const attemptId = this.requireAttempt(itemId);
     const { error } = await this.client.rpc('fail_queue_task', {
       p_task_id: itemId,
+      p_worker_id: this.workerId,
+      p_attempt_id: attemptId,
       p_error: errorMsg,
       p_duration_ms: durationMs,
       p_retryable: retryable,
@@ -91,7 +102,34 @@ export class Queue {
     if (error) {
       logger.error('Failed to mark task failed', { id: itemId, error: error.message });
     } else {
+      this.attempts.delete(itemId);
       logger.warn('Task failed', { id: itemId, error: errorMsg, retryable });
     }
+  }
+
+  private attempts = new Map<string, string>();
+
+  rememberClaim(item: QueueItem): QueueItem {
+    if (!item.attempt_id) throw new Error('Claimed queue task has no attempt ID');
+    this.attempts.set(item.id, item.attempt_id);
+    return item;
+  }
+
+  private requireAttempt(itemId: string): string {
+    const attemptId = this.attempts.get(itemId);
+    if (!attemptId) throw new Error(`No active claim ownership for queue task ${itemId}`);
+    return attemptId;
+  }
+
+  async renew(itemId: string): Promise<boolean> {
+    const attemptId = this.requireAttempt(itemId);
+    const { data, error } = await this.client.rpc('renew_queue_lease', {
+      p_task_id: itemId,
+      p_worker_id: this.workerId,
+      p_attempt_id: attemptId,
+      p_lease_seconds: 90,
+    });
+    if (error) throw error;
+    return data === true;
   }
 }

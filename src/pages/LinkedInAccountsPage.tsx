@@ -1,11 +1,10 @@
 import { useState, useEffect, useMemo } from 'react';
 import {
-  Linkedin, Plus, CheckCircle2, AlertTriangle, X, RefreshCw, Settings,
+  Linkedin, Plus, CheckCircle2, AlertTriangle, X, RefreshCw,
   ShieldCheck, Activity, Cpu, Globe, Clock, Zap, FlaskConical,
-  ChevronDown, ChevronUp, Camera, Heart, KeyRound, ExternalLink,
-  Upload, Info,
+  ChevronDown, ChevronUp, Camera, Heart, ExternalLink,
 } from 'lucide-react';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQuery } from '@tanstack/react-query';
 import { PageHeader } from '@/components/ui/PageHeader';
 import { Card, CardContent } from '@/components/ui/Card';
 import { Badge } from '@/components/ui/Badge';
@@ -19,15 +18,14 @@ import { useWorkspace } from '@/contexts/WorkspaceContext';
 import { timeAgo } from '@/lib/utils';
 import {
   useConnectLinkedIn, useTestLinkedInConnection, useDisconnectLinkedIn, useToggleDryRun,
-  useAuthInteractions, useSubmitChallengeResponse, useCancelAuthInteraction,
-  useSessionHeartbeats, useManualConnectLinkedIn,
+  useAuthInteractions, useCancelAuthInteraction,
 } from '@/hooks/useLinkedInBrowser';
 import type { LinkedInAuthInteraction } from '@/types/linkedin-browser-automation';
 
 type ConnectionState =
   | 'pending' | 'authenticating' | 'requires_action' | 'connected'
   | 'session_expired' | 'session_invalid' | 'restricted'
-  | 'disconnected' | 'failed';
+  | 'disconnected' | 'failed' | 'cancelled';
 
 const STATE_META: Record<ConnectionState, { label: string; tone: 'success' | 'warning' | 'error' | 'neutral' | 'brand'; description: string }> = {
   connected: { label: 'Connected', tone: 'success', description: 'Session is healthy and authenticated' },
@@ -39,6 +37,7 @@ const STATE_META: Record<ConnectionState, { label: string; tone: 'success' | 'wa
   restricted: { label: 'Restricted', tone: 'error', description: 'Account restricted by LinkedIn. Manual review required.' },
   disconnected: { label: 'Not Connected', tone: 'neutral', description: 'Not connected to LinkedIn' },
   failed: { label: 'Failed', tone: 'error', description: 'Connection failed. See error details.' },
+  cancelled: { label: 'Cancelled', tone: 'neutral', description: 'Connection attempt cancelled' },
 };
 
 const STEP_LABELS: Record<string, string> = {
@@ -51,6 +50,8 @@ const STEP_LABELS: Record<string, string> = {
   ready_for_login: 'LinkedIn login page ready',
   waiting_for_login: 'Waiting for login...',
   challenge_detected: 'Verification required',
+  waiting_for_user: 'Waiting for verification in secure browser...',
+  verifying_authentication: 'Verifying authentication...',
   saving_session: 'Saving session...',
   connected: 'Connected.',
   login_timeout: 'Login timed out',
@@ -128,7 +129,7 @@ export function LinkedInAccountsPage() {
       setAuthAccountId(inProgress.id);
     } else if (authAccountId) {
       const stillExists = accounts.find((a) => a.id === authAccountId);
-      if (stillExists && (stillExists.connection_state === 'connected' || stillExists.connection_state === 'failed' || stillExists.connection_state === 'disconnected')) {
+      if (stillExists && (stillExists.connection_state === 'connected' || stillExists.connection_state === 'failed' || stillExists.connection_state === 'disconnected' || stillExists.connection_state === 'cancelled')) {
         // Keep panel open for 5s after completion, then close
         const timer = setTimeout(() => setAuthAccountId(null), 5000);
         return () => clearTimeout(timer);
@@ -262,7 +263,7 @@ export function LinkedInAccountsPage() {
                         </button>
                       </>
                     )}
-                    {(state === 'disconnected' || state === 'session_expired' || state === 'session_invalid' || state === 'failed') && (
+                    {(state === 'disconnected' || state === 'session_expired' || state === 'session_invalid' || state === 'failed' || state === 'cancelled') && (
                       <>
                         <button
                           onClick={() => setShowConnect(true)}
@@ -492,26 +493,12 @@ function AuthProgressPanel({ accountId, connectionState }: { accountId: string; 
 // ── Challenge Notification ───────────────────────────────────
 
 function ChallengeNotification({ event, onResolved }: { event: LinkedInAuthInteraction; onResolved: () => void }) {
-  const [otpCode, setOtpCode] = useState('');
-  const [password, setPassword] = useState('');
-  const submitResponse = useSubmitChallengeResponse();
   const cancelInteraction = useCancelAuthInteraction();
 
-  const challengeType = event.challenge_type || 'email_otp';
   const description = event.challenge_description || event.message || 'Complete the LinkedIn verification';
 
-  const handleSubmit = () => {
-    let response: Record<string, unknown> = {};
-    if (challengeType === 'email_otp' || challengeType === 'two_factor') {
-      response = { otp_code: otpCode };
-    } else if (challengeType === 'captcha') {
-      response = { captcha_solution: otpCode };
-    }
-    submitResponse.mutate({ interactionId: event.id, response }, { onSuccess: onResolved });
-  };
-
   const handleCancel = () => {
-    cancelInteraction.mutate(event.id, { onSuccess: onResolved });
+    cancelInteraction.mutate(event, { onSuccess: onResolved });
   };
 
   return (
@@ -521,51 +508,14 @@ function ChallengeNotification({ event, onResolved }: { event: LinkedInAuthInter
         <div>
           <p className="text-sm font-semibold text-warning-500">LinkedIn Verification Required</p>
           <p className="text-xs text-warning-500 mt-1">{description}</p>
+          <p className="text-xs text-warning-500 mt-1">Complete the verification in the secure LinkedIn browser window. Yuktris never collects or submits verification codes.</p>
         </div>
       </div>
-
-      {(challengeType === 'email_otp' || challengeType === 'two_factor') && (
-        <Field label="Verification code" required>
-          <input
-            type="text"
-            value={otpCode}
-            onChange={(e) => setOtpCode(e.target.value)}
-            placeholder="Enter the code"
-            maxLength={6}
-            className="w-full rounded-lg border border-gold-500/12 bg-maroon-900 px-3 py-2 text-sm text-ink-50 placeholder:text-ink-500 focus:border-brand-500 focus:outline-none"
-          />
-        </Field>
-      )}
-
-      {challengeType === 'captcha' && (
-        <div className="text-xs text-warning-500">
-          <p>Please complete the CAPTCHA in the browser window. The worker will automatically detect when you're done.</p>
-        </div>
-      )}
-
-      {challengeType === 'phone_verification' && (
-        <Field label="Verification code" required>
-          <input
-            type="text"
-            value={otpCode}
-            onChange={(e) => setOtpCode(e.target.value)}
-            placeholder="Enter the SMS code"
-            maxLength={6}
-            className="w-full rounded-lg border border-gold-500/12 bg-maroon-900 px-3 py-2 text-sm text-ink-50 placeholder:text-ink-500 focus:border-brand-500 focus:outline-none"
-          />
-        </Field>
-      )}
 
       <div className="flex justify-end gap-2">
         <Button variant="ghost" onClick={handleCancel} disabled={cancelInteraction.isPending}>
           Cancel
         </Button>
-        {(challengeType === 'email_otp' || challengeType === 'two_factor' || challengeType === 'phone_verification') && (
-          <Button onClick={handleSubmit} disabled={!otpCode || submitResponse.isPending}>
-            {submitResponse.isPending ? <Spinner className="h-4 w-4" /> : <KeyRound className="h-4 w-4" />}
-            Submit Code
-          </Button>
-        )}
       </div>
     </div>
   );
@@ -575,70 +525,22 @@ function ChallengeNotification({ event, onResolved }: { event: LinkedInAuthInter
 
 function ConnectLinkedInModal({ onClose, onConnect, isConnecting }: {
   onClose: () => void;
-  onConnect: (params: { linkedinEmail: string; displayName?: string }) => void;
+  onConnect: (params: { linkedinEmail: string; displayName?: string; profileUrl: string }) => void;
   isConnecting: boolean;
 }) {
   const [email, setEmail] = useState('');
   const [displayName, setDisplayName] = useState('');
-  const [activeTab, setActiveTab] = useState<'browser' | 'manual'>('browser');
-
-  // Manual connect state
-  const manualConnect = useManualConnectLinkedIn();
-  const [manualEmail, setManualEmail] = useState('');
-  const [manualDisplayName, setManualDisplayName] = useState('');
-  const [cookiesJson, setCookiesJson] = useState('');
-  const [profileUrl, setProfileUrl] = useState('');
-  const [profileName, setProfileName] = useState('');
-  const [manualError, setManualError] = useState<string | null>(null);
-
-  const handleManualConnect = async () => {
-    setManualError(null);
-    if (!manualEmail) { setManualError('Please enter your LinkedIn email.'); return; }
-    if (!cookiesJson.trim()) { setManualError('Please paste your LinkedIn cookie data.'); return; }
-    try {
-      await manualConnect.mutateAsync({
-        linkedinEmail: manualEmail,
-        displayName: manualDisplayName || undefined,
-        cookiesJson,
-        profileUrl: profileUrl || undefined,
-        profileName: profileName || undefined,
-      });
-      onClose();
-    } catch (err) {
-      setManualError(err instanceof Error ? err.message : 'Failed to connect. Please check your cookie data.');
-    }
-  };
+  const [expectedProfileUrl, setExpectedProfileUrl] = useState('');
 
   return (
-    <Modal open onClose={onClose} title="Connect your existing LinkedIn account" description="Sign in to your existing LinkedIn account through the secure browser connection. Your LinkedIn password is never stored by Revenue AI.">
+    <Modal open onClose={onClose} title="Connect your existing LinkedIn account" description="Sign in directly inside the secure LinkedIn browser. Yuktris never receives your password or verification codes.">
       <div className="space-y-4">
-        {/* Tab switcher */}
-        <div className="flex gap-1 rounded-lg bg-maroon-900 p-1">
-          <button
-            onClick={() => setActiveTab('browser')}
-            className={`flex-1 rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
-              activeTab === 'browser' ? 'bg-brand-500 text-white' : 'text-ink-400 hover:text-ink-200'
-            }`}
-          >
-            Browser Connect
-          </button>
-          <button
-            onClick={() => setActiveTab('manual')}
-            className={`flex-1 rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
-              activeTab === 'manual' ? 'bg-brand-500 text-white' : 'text-ink-400 hover:text-ink-200'
-            }`}
-          >
-            Manual Cookie Import
-          </button>
-        </div>
-
-        {activeTab === 'browser' ? (
-          <>
+        <>
             <div className="rounded-lg bg-brand-300/10 border border-brand-300/20 p-3">
               <div className="flex items-start gap-2">
                 <ShieldCheck className="h-4 w-4 text-brand-300 mt-0.5 flex-shrink-0" />
                 <p className="text-xs text-brand-300 leading-relaxed">
-                  Revenue AI does not create LinkedIn accounts. You are connecting an existing LinkedIn account. Your password is used only transiently during the browser authentication flow and is never persisted, logged, or stored in our database.
+                  Yuktris does not create LinkedIn accounts. Enter your password, OTP, 2FA code, or CAPTCHA response only inside the secure LinkedIn browser; Yuktris never collects or submits them.
                 </p>
               </div>
             </div>
@@ -659,96 +561,26 @@ function ConnectLinkedInModal({ onClose, onConnect, isConnecting }: {
                 className="w-full rounded-lg border border-gold-500/12 bg-maroon-900 px-3 py-2 text-sm text-ink-50 placeholder:text-ink-500 focus:border-brand-500 focus:outline-none"
               />
             </Field>
+            <Field label="LinkedIn profile URL" required>
+              <input
+                type="url"
+                value={expectedProfileUrl}
+                onChange={(e) => setExpectedProfileUrl(e.target.value)}
+                placeholder="https://www.linkedin.com/in/username"
+                className="w-full rounded-lg border border-gold-500/12 bg-maroon-900 px-3 py-2 text-sm text-ink-50 placeholder:text-ink-500 focus:border-brand-500 focus:outline-none"
+              />
+            </Field>
             <div className="flex justify-end gap-2 pt-2">
               <Button variant="ghost" onClick={onClose}>Cancel</Button>
               <Button
-                onClick={() => onConnect({ linkedinEmail: email, displayName: displayName || undefined })}
-                disabled={!email || isConnecting}
+                onClick={() => onConnect({ linkedinEmail: email, displayName: displayName || undefined, profileUrl: expectedProfileUrl })}
+                disabled={!email || !/^https:\/\/(?:[a-z]{2,3}\.)?linkedin\.com\/in\/[A-Za-z0-9_%.-]+\/?(?:[?#].*)?$/i.test(expectedProfileUrl.trim()) || isConnecting}
               >
                 {isConnecting ? <Spinner className="h-4 w-4" /> : <Zap className="h-4 w-4" />}
                 Continue to LinkedIn
               </Button>
             </div>
-          </>
-        ) : (
-          <>
-            <div className="rounded-lg bg-warning-500/10 border border-warning-500/20 p-3">
-              <div className="flex items-start gap-2">
-                <Info className="h-4 w-4 text-warning-500 mt-0.5 flex-shrink-0" />
-                <div className="text-xs text-warning-500 leading-relaxed space-y-1">
-                  <p>Use this option if the browser connection is unavailable. You'll need to export your LinkedIn session cookies from your browser.</p>
-                  <p className="font-semibold">How to get cookies:</p>
-                  <ol className="list-decimal list-inside space-y-0.5 ml-1">
-                    <li>Log in to linkedin.com in your browser</li>
-                    <li>Open Developer Tools (F12) &rarr; Application &rarr; Cookies</li>
-                    <li>Use a browser extension like "EditThisCookie" or "Cookie-Editor" to export cookies as JSON</li>
-                    <li>Paste the JSON below</li>
-                  </ol>
-                  <p>Make sure the cookies include <code className="bg-maroon-900 px-1 rounded">li_at</code> — that's the LinkedIn session token.</p>
-                </div>
-              </div>
-            </div>
-            <Field label="LinkedIn email / username" required>
-              <input
-                type="email"
-                value={manualEmail}
-                onChange={(e) => setManualEmail(e.target.value)}
-                placeholder="your.email@company.com"
-                className="w-full rounded-lg border border-gold-500/12 bg-maroon-900 px-3 py-2 text-sm text-ink-50 placeholder:text-ink-500 focus:border-brand-500 focus:outline-none"
-              />
-            </Field>
-            <Field label="Optional display name">
-              <input
-                value={manualDisplayName}
-                onChange={(e) => setManualDisplayName(e.target.value)}
-                placeholder="e.g. Sales Team Account"
-                className="w-full rounded-lg border border-gold-500/12 bg-maroon-900 px-3 py-2 text-sm text-ink-50 placeholder:text-ink-500 focus:border-brand-500 focus:outline-none"
-              />
-            </Field>
-            <Field label="Cookie JSON data" required>
-              <textarea
-                value={cookiesJson}
-                onChange={(e) => setCookiesJson(e.target.value)}
-                placeholder='[{"name":"li_at","value":"...","domain":".linkedin.com",...}]'
-                rows={6}
-                className="w-full rounded-lg border border-gold-500/12 bg-maroon-900 px-3 py-2 text-xs font-mono text-ink-50 placeholder:text-ink-500 focus:border-brand-500 focus:outline-none resize-y"
-              />
-            </Field>
-            <div className="grid grid-cols-2 gap-3">
-              <Field label="Profile URL (optional)">
-                <input
-                  value={profileUrl}
-                  onChange={(e) => setProfileUrl(e.target.value)}
-                  placeholder="https://www.linkedin.com/in/username"
-                  className="w-full rounded-lg border border-gold-500/12 bg-maroon-900 px-3 py-2 text-sm text-ink-50 placeholder:text-ink-500 focus:border-brand-500 focus:outline-none"
-                />
-              </Field>
-              <Field label="Profile name (optional)">
-                <input
-                  value={profileName}
-                  onChange={(e) => setProfileName(e.target.value)}
-                  placeholder="John Doe"
-                  className="w-full rounded-lg border border-gold-500/12 bg-maroon-900 px-3 py-2 text-sm text-ink-50 placeholder:text-ink-500 focus:border-brand-500 focus:outline-none"
-                />
-              </Field>
-            </div>
-            {manualError && (
-              <div className="rounded-lg bg-error-500/10 border border-error-500/20 p-3">
-                <p className="text-xs text-error-500">{manualError}</p>
-              </div>
-            )}
-            <div className="flex justify-end gap-2 pt-2">
-              <Button variant="ghost" onClick={onClose}>Cancel</Button>
-              <Button
-                onClick={handleManualConnect}
-                disabled={!manualEmail || !cookiesJson.trim() || manualConnect.isPending}
-              >
-                {manualConnect.isPending ? <Spinner className="h-4 w-4" /> : <Upload className="h-4 w-4" />}
-                Import Session
-              </Button>
-            </div>
-          </>
-        )}
+        </>
       </div>
     </Modal>
   );
@@ -768,7 +600,7 @@ function DiagnosticsPanel() {
       const [workers, queue, sessions, events, heartbeats] = await Promise.all([
         supabase.from('browser_workers').select('status').eq('workspace_id', workspace.id).limit(10),
         supabase.from('browser_execution_queue').select('status').eq('workspace_id', workspace.id).limit(50),
-        supabase.from('linkedin_sessions').select('status, last_validated_at').eq('workspace_id', workspace.id).order('created_at', { ascending: false }).limit(10),
+        supabase.from('linkedin_session_public_view').select('status, last_validated_at').eq('workspace_id', workspace.id).order('created_at', { ascending: false }).limit(10),
         supabase.from('linkedin_session_events').select('event_type, created_at').eq('workspace_id', workspace.id).order('created_at', { ascending: false }).limit(20),
         supabase.from('linkedin_session_heartbeats').select('status, created_at').eq('workspace_id', workspace.id).order('created_at', { ascending: false }).limit(5),
       ]);

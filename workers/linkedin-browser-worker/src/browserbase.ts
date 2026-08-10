@@ -2,6 +2,7 @@ import { logger } from './logger.js';
 
 const BROWSERBASE_API_URL = 'https://api.browserbase.com/v1';
 const BROWSERBASE_REQUEST_TIMEOUT_MS = 20000;
+const TRANSIENT_RETRY_DELAY_MS = 1500;
 
 async function browserbaseFetch(url: string, init: RequestInit = {}, timeoutMs = BROWSERBASE_REQUEST_TIMEOUT_MS): Promise<Response> {
   const controller = new AbortController();
@@ -69,14 +70,22 @@ async function createSession(opts?: {
 
   let lastError: Error | null = null;
   for (let attempt = 0; attempt < 3; attempt++) {
-    const res = await browserbaseFetch(`${BROWSERBASE_API_URL}/sessions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-bb-api-key': apiKey,
-      },
-      body: JSON.stringify(body),
-    });
+    let res: Response;
+    try {
+      res = await browserbaseFetch(`${BROWSERBASE_API_URL}/sessions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-bb-api-key': apiKey,
+        },
+        body: JSON.stringify(body),
+      });
+    } catch (error) {
+      lastError = error instanceof BrowserbaseError ? error : new BrowserbaseError('Browserbase network request failed', 503);
+      if (attempt === 2) throw lastError;
+      await new Promise(resolve => setTimeout(resolve, TRANSIENT_RETRY_DELAY_MS * (attempt + 1)));
+      continue;
+    }
 
     if (res.ok) {
       const data = await res.json() as {
@@ -159,6 +168,11 @@ async function createSession(opts?: {
       logger.warn('Browserbase rate limited, waiting before retry', { attempt: attempt + 1, waitMs, body: text.slice(0, 200) });
       lastError = new BrowserbaseError('Browserbase rate limit exceeded', 429);
       await new Promise(r => setTimeout(r, waitMs));
+      continue;
+    }
+    if (res.status >= 500 && attempt < 2) {
+      lastError = new BrowserbaseError('Browserbase service is temporarily unavailable', res.status);
+      await new Promise(resolve => setTimeout(resolve, TRANSIENT_RETRY_DELAY_MS * (attempt + 1)));
       continue;
     }
     throw new BrowserbaseError(`Browserbase session creation failed: ${res.status} ${text}`, res.status);

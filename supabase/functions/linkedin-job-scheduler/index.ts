@@ -1,4 +1,5 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
+import { authorizeLinkedInWorkspace } from "../_shared/linkedinAuthorization.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -13,6 +14,7 @@ Deno.serve(async (req: Request) => {
 
   try {
     const { workspace_id } = await req.json();
+    await authorizeLinkedInWorkspace(req, workspace_id, { allowServiceRole: true });
     const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
     const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 

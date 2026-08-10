@@ -217,6 +217,24 @@ export class Worker {
 
   private async processTask(item: QueueItem): Promise<void> {
     const startTime = Date.now();
+    let leaseLost = false;
+    let leaseRenewalFailures = 0;
+    const leaseTimer = setInterval(() => {
+      void this.queue.renew(item.id).then((renewed) => {
+        leaseRenewalFailures = 0;
+        if (!renewed) {
+          leaseLost = true;
+          this.linkedin.cancel('Queue lease ownership lost');
+        }
+      }).catch((error) => {
+        leaseRenewalFailures++;
+        logger.warn('Queue lease renewal failed', { task_id: item.id, error: this.sanitizeError(error) });
+        if (leaseRenewalFailures >= 2) {
+          leaseLost = true;
+          this.linkedin.cancel('Queue lease could not be renewed');
+        }
+      });
+    }, 30000);
     logger.info('Processing task', { id: item.id, action: item.action_type, workspace: item.workspace_id, account: item.account_id });
 
     try {
@@ -255,15 +273,22 @@ export class Worker {
     } catch (err) {
       const msg = this.sanitizeError(err);
       const isBbError = err instanceof BrowserbaseError;
-      const isRetryable = isBbError && (err as BrowserbaseError).statusCode !== 401;
+      const isRetryable = isBbError && ![401, 402, 403].includes((err as BrowserbaseError).statusCode);
       logger.error('Task processing error', { id: item.id, error: msg, browserbase_error: isBbError, retryable: isRetryable });
       await this.queue.fail(item.id, msg, Date.now() - startTime, isRetryable);
     } finally {
+      clearInterval(leaseTimer);
       // Every task owns a short-lived browser session. Cleanup is idempotent and
       // prevents Browserbase keep-alive sessions from leaking on unexpected errors.
       await this.linkedin.close().catch((error) => {
         logger.warn('Browser cleanup after task failed', { task_id: item.id, error: this.sanitizeError(error) });
       });
+      if (item.action_type === 'linkedin_connect' && item.account_id) {
+        await this.cleanupConnectionArtifacts(item.workspace_id, item.account_id).catch((error) => {
+          logger.warn('Connection artifact cleanup failed', { account_id: item.account_id, error: this.sanitizeError(error) });
+        });
+      }
+      if (leaseLost) logger.warn('Task ended after queue lease ownership was lost', { task_id: item.id });
     }
   }
 
@@ -354,10 +379,11 @@ export class Worker {
       await this.linkedin.launch(onProgress);
     } catch (err) {
       const msg = this.sanitizeError(err);
+      const retryable = err instanceof BrowserbaseError && ![401, 402, 403].includes(err.statusCode);
       logger.error('handleConnect: launch failed', { error: msg });
       await this.updateAccount(accountId, { connection_state: 'failed', last_error: `Browser launch failed: ${msg}` });
       await onProgress('login_failed', `Browser launch failed: ${msg}`);
-      await this.queue.fail(item.id, `Browser launch failed: ${msg}`, Date.now() - startTime, false);
+      await this.queue.fail(item.id, `Browser launch failed: ${msg}`, Date.now() - startTime, retryable);
       return;
     }
 
@@ -418,23 +444,15 @@ export class Worker {
 
       const isNonRetryable = (result as { nonRetryable?: boolean }).nonRetryable === true;
 
-      if (result.requiresAction) {
-        await this.updateAccount(accountId, {
-          connection_state: 'requires_action',
-          last_error: result.error || 'LinkedIn verification required',
-        });
-        await this.logSessionEvent(workspaceId, accountId, 'login_failed', { error: result.error, challenge: result.challengeType });
-
-        // LinkedInBrowser already persisted the challenge when it was detected.
-        // Do not create a duplicate interaction here.
-        await this.client.rpc('set_queue_item_waiting', { p_queue_item_id: item.id });
-        logger.warn('Challenge detected, queue item set to waiting', { account_id: accountId, challenge: result.challengeType });
+      if (result.cancelled) {
+        await this.updateAccount(accountId, { connection_state: 'cancelled', session_status: 'disconnected', status: 'disconnected', last_error: null });
+        await this.logSessionEvent(workspaceId, accountId, 'login_failed', { reason: 'user_cancelled' });
         return;
       }
 
       await this.updateAccount(accountId, { connection_state: 'failed', status: 'failed', session_status: 'disconnected', last_error: result.error || 'Connection failed' });
       await this.logSessionEvent(workspaceId, accountId, 'login_failed', { error: result.error });
-      await this.queue.fail(item.id, result.error || 'Connection failed', Date.now() - startTime, !isNonRetryable);
+      await this.queue.fail(item.id, result.error || 'Connection failed', Date.now() - startTime, result.retryable === true || !isNonRetryable);
       return;
     }
 
@@ -729,13 +747,13 @@ export class Worker {
       p_account_id: accountId,
       p_updates: updates,
     });
-    if (error) logger.error('Failed to update account', { account_id: accountId, error: error.message });
+    if (error) throw new Error(`Failed to persist LinkedIn account state: ${this.sanitizeError(error)}`);
   }
 
   private async loadIntendedIdentity(accountId: string, workspaceId?: string): Promise<IntendedLinkedInIdentity> {
     let query = this.client
       .from('linkedin_accounts')
-      .select('profile_url, profile_name, linkedin_email')
+      .select('expected_profile_url, profile_url, profile_name, linkedin_email')
       .eq('id', accountId);
     if (workspaceId) query = query.eq('workspace_id', workspaceId);
 
@@ -743,7 +761,7 @@ export class Worker {
     if (error) throw new Error(`Unable to load intended LinkedIn account identity: ${this.sanitizeError(error)}`);
     if (!data) throw new Error('LinkedIn account was not found in the expected workspace');
     return {
-      profileUrl: data.profile_url,
+      profileUrl: data.expected_profile_url || data.profile_url,
       profileName: data.profile_name,
       linkedinEmail: data.linkedin_email,
     };
@@ -770,6 +788,29 @@ export class Worker {
     } catch (err) {
       logger.error('Failed to log session event', { error: String(err) });
     }
+  }
+
+  private async cleanupConnectionArtifacts(workspaceId: string, accountId: string): Promise<void> {
+    const { data, error } = await this.client
+      .from('linkedin_auth_interactions')
+      .select('id, metadata, status')
+      .eq('workspace_id', workspaceId)
+      .eq('account_id', accountId)
+      .order('created_at', { ascending: false })
+      .limit(100);
+    if (error) throw error;
+
+    for (const interaction of data ?? []) {
+      const metadata = { ...((interaction.metadata as Record<string, unknown> | null) ?? {}) };
+      delete metadata.browserbase_live_url;
+      delete metadata.debugger_url;
+      await this.client.from('linkedin_auth_interactions').update({
+        metadata,
+        user_response: null,
+        status: interaction.status === 'pending' ? 'expired' : interaction.status,
+      }).eq('id', interaction.id);
+    }
+    await this.updateAccount(accountId, { browserbase_session_id: null, browser_connected_at: null });
   }
 
   private async saveSession(workspaceId: string, accountId: string, session: SessionData): Promise<string | null> {
@@ -931,14 +972,8 @@ export class Worker {
             continue;
           }
 
-          // Lightweight check: just verify the session row health status
-          // Full browser-based validation happens on automation or test_connection
-          const { sessionId } = loaded;
-          await this.client.rpc('update_session_health', {
-            p_session_id: sessionId,
-            p_health_status: 'healthy',
-            p_connection_state: 'active',
-          });
+          // Decryption proves storage integrity only. It must never promote a
+          // LinkedIn session to healthy without a real browser validation.
         } catch (err) {
           logger.error('Health check failed for account', { account_id: accountId, error: String(err) });
         }

@@ -85,112 +85,24 @@ export function useConnectLinkedIn() {
   const { workspace } = useWorkspace();
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: async (params: { linkedinEmail: string; displayName?: string }) => {
+    mutationFn: async (params: { linkedinEmail: string; displayName?: string; profileUrl: string; existingAccountId?: string }) => {
       if (!workspace) throw new Error('No workspace');
-
-      const { data: account, error: insertError } = await supabase
-        .from('linkedin_accounts')
-        .insert({
-          workspace_id: workspace.id,
-          account_name: params.displayName || params.linkedinEmail,
-          linkedin_email: params.linkedinEmail,
-          status: 'pending_login',
-          session_status: 'disconnected',
-          connection_state: 'pending',
-        })
-        .select('*')
-        .maybeSingle();
-
-      if (insertError) throw insertError;
-      if (!account) throw new Error('Failed to create LinkedIn account — workspace membership check failed.');
-
-      const { error: queueError } = await supabase
-        .from('browser_execution_queue')
-        .insert({
-          workspace_id: workspace.id,
-          account_id: account.id,
-          action_type: 'linkedin_connect',
-          action_params: { linkedin_email: params.linkedinEmail, display_name: params.displayName },
-          priority: 1,
-          priority_label: 'critical',
-          status: 'pending',
-        });
-
-      if (queueError) throw queueError;
-
-      await supabase
-        .from('linkedin_session_events')
-        .insert({
-          workspace_id: workspace.id,
-          account_id: account.id,
-          event_type: 'created',
-          event_data: { action: 'linkedin_connect', email: params.linkedinEmail },
-        });
-
-      return { accountId: account.id, message: 'Connection attempt created. Browser authentication task queued.' };
+      const { data, error } = await supabase.rpc('start_linkedin_connection', {
+        p_workspace_id: workspace.id,
+        p_linkedin_email: params.linkedinEmail,
+        p_display_name: params.displayName ?? null,
+        p_expected_profile_url: params.profileUrl,
+        p_existing_account_id: params.existingAccountId ?? null,
+        p_idempotency_key: crypto.randomUUID(),
+      });
+      if (error) throw error;
+      const result = Array.isArray(data) ? data[0] : data;
+      if (!result?.account_id) throw new Error('Failed to start LinkedIn connection.');
+      return { accountId: result.account_id as string, queueItemId: result.queue_item_id as string };
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['linkedin-accounts'] });
       queryClient.invalidateQueries({ queryKey: ['browser-exec-queue'] });
-    },
-  });
-}
-
-export function useManualConnectLinkedIn() {
-  const { workspace } = useWorkspace();
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: async (params: {
-      linkedinEmail: string;
-      displayName?: string;
-      cookiesJson: string;
-      profileUrl?: string;
-      profileName?: string;
-    }) => {
-      if (!workspace) throw new Error('No workspace');
-
-      let cookies: unknown;
-      try {
-        cookies = JSON.parse(params.cookiesJson);
-      } catch {
-        throw new Error('Invalid cookie JSON. Please paste valid cookie data from your browser.');
-      }
-
-      if (!Array.isArray(cookies) && typeof cookies !== 'object') {
-        throw new Error('Cookies must be a JSON array of cookie objects or a browser storage state object.');
-      }
-
-      const cookieArray = Array.isArray(cookies) ? cookies : (cookies as { cookies?: unknown[] }).cookies;
-      if (!Array.isArray(cookieArray) || cookieArray.length === 0) {
-        throw new Error('No cookies found. Please ensure you exported cookies from linkedin.com.');
-      }
-
-      const hasSessionCookie = (cookieArray as { name: string }[]).some(
-        (c) => c.name === 'li_at' || c.name === 'li_s' || c.name === 'bsession'
-      );
-      if (!hasSessionCookie) {
-        throw new Error('No LinkedIn session cookie (li_at) found. Please make sure you are logged in to LinkedIn and exported cookies from the correct domain.');
-      }
-
-      const { data, error } = await supabase.functions.invoke('manual-cookie-import', {
-        body: {
-          linkedinEmail: params.linkedinEmail,
-          displayName: params.displayName,
-          cookiesJson: params.cookiesJson,
-          profileUrl: params.profileUrl,
-          profileName: params.profileName,
-          workspaceId: workspace.id,
-        },
-      });
-
-      if (error) throw error;
-      if (data && (data as { error?: string }).error) throw new Error((data as { error: string }).error);
-
-      return data as { accountId: string; sessionId: string; message: string };
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['linkedin-accounts'] });
-      queryClient.invalidateQueries({ queryKey: ['linkedin-sessions'] });
     },
   });
 }
@@ -201,17 +113,10 @@ export function useTestLinkedInConnection() {
   return useMutation({
     mutationFn: async (accountId: string) => {
       if (!workspace) throw new Error('No workspace');
-      const { error } = await supabase
-        .from('browser_execution_queue')
-        .insert({
-          workspace_id: workspace.id,
-          account_id: accountId,
-          action_type: 'linkedin_test_connection',
-          action_params: { account_id: accountId },
-          priority: 2,
-          priority_label: 'high',
-          status: 'pending',
-        });
+      const { error } = await supabase.rpc('enqueue_linkedin_connection_test', {
+        p_workspace_id: workspace.id,
+        p_account_id: accountId,
+      });
       if (error) throw error;
       return { message: 'Connection test queued.' };
     },
@@ -228,11 +133,11 @@ export function useDisconnectLinkedIn() {
     mutationFn: async (accountId: string) => {
       if (!workspace) throw new Error('No workspace');
 
-      await supabase
-        .from('browser_execution_queue')
-        .update({ status: 'cancelled', completed_at: new Date().toISOString() })
-        .eq('account_id', accountId)
-        .in('status', ['pending', 'running', 'waiting', 'retry']);
+      const { error: cancelError } = await supabase.rpc('cancel_account_browser_executions', {
+        p_workspace_id: workspace.id,
+        p_account_id: accountId,
+      });
+      if (cancelError) throw cancelError;
 
       await supabase
         .from('linkedin_sessions')
@@ -555,13 +460,15 @@ export function useEnqueueExecution() {
 }
 
 export function useCancelExecution() {
+  const { workspace } = useWorkspace();
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: async (itemId: string) => {
-      const { error } = await supabase
-        .from('browser_execution_queue')
-        .update({ status: 'cancelled', completed_at: new Date().toISOString() })
-        .eq('id', itemId);
+      if (!workspace) throw new Error('No workspace');
+      const { error } = await supabase.rpc('cancel_browser_execution', {
+        p_workspace_id: workspace.id,
+        p_task_id: itemId,
+      });
       if (error) throw error;
     },
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['browser-exec-queue'] }),
@@ -685,39 +592,24 @@ export function useAuthInteractions(accountId: string | null) {
   });
 }
 
-export function useSubmitChallengeResponse() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: async (params: {
-      interactionId: string;
-      response: Record<string, unknown>;
-    }) => {
-      const { error } = await supabase
-        .from('linkedin_auth_interactions')
-        .update({
-          user_response: params.response,
-          status: 'completed',
-          updated_at: new Date().toISOString(),
-        })
-        .eq('id', params.interactionId);
-      if (error) throw error;
-      return { success: true };
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['linkedin-auth-interactions'] });
-    },
-  });
-}
-
 export function useCancelAuthInteraction() {
+  const { workspace } = useWorkspace();
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: async (interactionId: string) => {
+    mutationFn: async (interaction: LinkedInAuthInteraction) => {
       const { error } = await supabase
         .from('linkedin_auth_interactions')
         .update({ status: 'cancelled', updated_at: new Date().toISOString() })
-        .eq('id', interactionId);
+        .eq('id', interaction.id);
       if (error) throw error;
+      if (interaction.queue_item_id) {
+        if (!workspace) throw new Error('No workspace');
+        const { error: queueError } = await supabase.rpc('cancel_browser_execution', {
+          p_workspace_id: workspace.id,
+          p_task_id: interaction.queue_item_id,
+        });
+        if (queueError) throw queueError;
+      }
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['linkedin-auth-interactions'] });

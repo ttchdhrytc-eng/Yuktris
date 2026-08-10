@@ -1,5 +1,6 @@
 // linkedin-conversation-engine — AI conversation analysis
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
+import { authorizeLinkedInWorkspace } from "../_shared/linkedinAuthorization.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -10,17 +11,16 @@ const corsHeaders = {
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") return new Response(null, { status: 200, headers: corsHeaders });
   try {
-    const { createClient } = await import("jsr:@supabase/supabase-js@2");
-    const supabase = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
     const body = await req.json();
     const { action, workspace_id, conversation_id } = body as Record<string, unknown>;
 
     if (!workspace_id) return jsonError("workspace_id is required", 400);
+    const { admin: supabase } = await authorizeLinkedInWorkspace(req, workspace_id);
 
     switch (action) {
       case "analyze": {
         if (!conversation_id) return jsonError("conversation_id is required", 400);
-        const { data: messages } = await supabase.from("linkedin_messages").select("*").eq("conversation_id", conversation_id).order("created_at", { ascending: false }).limit(1);
+        const { data: messages } = await supabase.from("linkedin_messages").select("*").eq("conversation_id", conversation_id).eq("workspace_id", workspace_id).order("created_at", { ascending: false }).limit(1);
         if (!messages || messages.length === 0) return jsonError("No messages found", 404);
         const lastMsg = messages[0] as Record<string, unknown>;
         const messageText = (lastMsg.body as string) ?? "";
@@ -53,7 +53,7 @@ Deno.serve(async (req: Request) => {
       }
       case "get_messages": {
         if (!conversation_id) return jsonError("conversation_id is required", 400);
-        const { data, error } = await supabase.from("linkedin_messages").select("*").eq("conversation_id", conversation_id).order("created_at", { ascending: true });
+        const { data, error } = await supabase.from("linkedin_messages").select("*").eq("conversation_id", conversation_id).eq("workspace_id", workspace_id).order("created_at", { ascending: true });
         if (error) return jsonError(error.message, 400);
         return jsonResponse({ messages: data });
       }

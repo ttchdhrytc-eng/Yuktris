@@ -12,7 +12,7 @@ import {
   RotateCcw, Trash2, Smartphone, Activity, Settings,
   Plus, Shield, Clock, Zap, TrendingUp,
   ExternalLink, Loader2, CheckCircle2, XCircle, AlertOctagon,
-  Monitor, Sparkles,
+  Monitor,
 } from 'lucide-react';
 import { PageHeader } from '@/components/ui/PageHeader';
 import { Card } from '@/components/ui/Card';
@@ -23,13 +23,12 @@ import { cn } from '@/lib/utils';
 import {
   useLinkedInAccounts, useConnectLinkedIn, useDeleteLinkedInAccount,
   useLinkedInSessions, useDeleteLinkedInSession,
-  useLinkedInSessionBackups, useLinkedInLoginHistory,
   useLinkedInDevices, useLinkedInSessionEvents,
   useBrowserExecutionQueue, useCancelExecution,
   useBrowserExecutionHistory, useBrowserExecutionFailures,
   useResolveExecutionFailure, useBrowserRetryQueue,
   useBrowserDeadLetterQueue,
-  useAuthInteractions, useSubmitChallengeResponse, useCancelAuthInteraction,
+  useAuthInteractions, useCancelAuthInteraction,
 } from '@/hooks/useLinkedInBrowser';
 import type { LinkedInAuthInteraction } from '@/types/linkedin-browser-automation';
 
@@ -110,6 +109,7 @@ function AccountsTab() {
   const [showForm, setShowForm] = useState(false);
   const [email, setEmail] = useState('');
   const [displayName, setDisplayName] = useState('');
+  const [profileUrl, setProfileUrl] = useState('');
   const [connectingAccountId, setConnectingAccountId] = useState<string | null>(null);
 
   const list = accounts.data ?? [];
@@ -127,7 +127,7 @@ function AccountsTab() {
         <Card className="p-4 mb-4 space-y-3">
           <div className="rounded-lg bg-gold-500/5 border border-gold-500/15 p-3">
             <p className="text-xs text-ink-300 leading-relaxed">
-              Connect an existing LinkedIn account. Your LinkedIn password is never stored by Revenue AI. Authentication happens through a secure browser session.
+              Enter your password and any verification codes only inside the secure LinkedIn browser. Yuktris never receives or stores them.
             </p>
           </div>
           <input
@@ -135,6 +135,13 @@ function AccountsTab() {
             placeholder="LinkedIn email / username"
             value={email}
             onChange={(e) => setEmail(e.target.value)}
+            className="w-full rounded-lg border border-gold-500/12 bg-maroon-950/60 px-3 py-2 text-sm text-ink-50 placeholder:text-ink-600 input-luxury focus:outline-none"
+          />
+          <input
+            type="url"
+            placeholder="LinkedIn profile URL (required)"
+            value={profileUrl}
+            onChange={(e) => setProfileUrl(e.target.value)}
             className="w-full rounded-lg border border-gold-500/12 bg-maroon-950/60 px-3 py-2 text-sm text-ink-50 placeholder:text-ink-600 input-luxury focus:outline-none"
           />
           <input
@@ -147,16 +154,16 @@ function AccountsTab() {
             size="sm"
             onClick={() => {
               connect.mutate(
-                { linkedinEmail: email, displayName: displayName || undefined },
+                { linkedinEmail: email, displayName: displayName || undefined, profileUrl },
                 {
                   onSuccess: (data) => {
                     setConnectingAccountId(data.accountId);
                   },
                 },
               );
-              setEmail(''); setDisplayName(''); setShowForm(false);
+              setEmail(''); setDisplayName(''); setProfileUrl(''); setShowForm(false);
             }}
-            disabled={!email || connect.isPending}
+            disabled={!email || !/^https:\/\/(?:[a-z]{2,3}\.)?linkedin\.com\/in\/[A-Za-z0-9_%.-]+\/?(?:[?#].*)?$/i.test(profileUrl.trim()) || connect.isPending}
             loading={connect.isPending}
           >
             Continue to LinkedIn
@@ -316,7 +323,6 @@ function AccountCard({
   }, [isConnecting, account.connection_state, onSetConnecting]);
 
   const interactions = useAuthInteractions(showPanel ? account.id : null);
-  const submitChallenge = useSubmitChallengeResponse();
   const cancelInteraction = useCancelAuthInteraction();
 
   // Extract live URL and progress from interactions
@@ -463,7 +469,7 @@ function AccountCard({
           <p className="text-xs text-ink-300 mb-1">{challenge.challenge_description || challenge.message}</p>
           <p className="text-2xs text-ink-500 mb-3">Complete the verification in the browser window. The system will detect when you're done.</p>
           <button
-            onClick={() => cancelInteraction.mutate(challenge.id)}
+            onClick={() => cancelInteraction.mutate(challenge)}
             className="text-xs text-ink-500 hover:text-error-500 transition-colors"
           >
             Cancel authentication

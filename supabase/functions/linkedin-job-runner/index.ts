@@ -1,5 +1,6 @@
 // linkedin-job-runner — Executes LinkedIn automation jobs by enqueuing browser tasks
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
+import { authorizeLinkedInWorkspace } from "../_shared/linkedinAuthorization.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -10,16 +11,15 @@ const corsHeaders = {
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") return new Response(null, { status: 200, headers: corsHeaders });
   try {
-    const { createClient } = await import("jsr:@supabase/supabase-js@2");
-    const supabase = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
     const body = await req.json();
     const { workspace_id, job_id } = body as Record<string, unknown>;
 
     if (!workspace_id) return jsonError("workspace_id is required", 400);
     if (!job_id) return jsonError("job_id is required", 400);
+    const { admin: supabase } = await authorizeLinkedInWorkspace(req, workspace_id, { allowServiceRole: true });
 
     // Load the job
-    const { data: jobs } = await supabase.from("linkedin_execution_jobs").select("*").eq("id", job_id).maybeSingle();
+    const { data: jobs } = await supabase.from("linkedin_execution_jobs").select("*").eq("id", job_id).eq("workspace_id", workspace_id).maybeSingle();
     if (!jobs) return jsonError("Job not found", 404);
     const job = jobs as Record<string, unknown>;
 
