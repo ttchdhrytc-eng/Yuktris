@@ -14,9 +14,16 @@ Deno.serve(async (req: Request) => {
 
   try {
     const { workspace_id } = await req.json();
-    await authorizeLinkedInWorkspace(req, workspace_id, { allowServiceRole: true });
+    const { admin: supabase } = await authorizeLinkedInWorkspace(req, workspace_id, { allowServiceRole: true });
     const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
     const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+
+    // Complete the existing scheduler path before draining due execution jobs.
+    // The RPC is concurrency-safe and exactly-once per sequence state/step.
+    const { error: scheduleError } = await supabase.rpc("schedule_due_linkedin_followups", { p_workspace_id: workspace_id, p_limit: 50 });
+    if (scheduleError) throw new Error(`Follow-up scheduling failed: ${scheduleError.message}`);
+    const { error: replyScheduleError } = await supabase.rpc("schedule_linkedin_reply_checks", { p_workspace_id: workspace_id, p_limit: 50 });
+    if (replyScheduleError) throw new Error(`Reply-check scheduling failed: ${replyScheduleError.message}`);
 
     // Get jobs ready to execute
     const now = new Date().toISOString();

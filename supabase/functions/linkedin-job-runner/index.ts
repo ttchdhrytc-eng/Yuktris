@@ -45,11 +45,18 @@ Deno.serve(async (req: Request) => {
     }
 
     // Enqueue a real browser task into browser_execution_queue
-    const actionType = job.action_type as string;
+    const requestedActionType = job.action_type as string;
+    const actionType = requestedActionType === "first_message" ? "send_message" : requestedActionType;
     const actionParams: Record<string, unknown> = {
       job_id: job_id,
-      ...((job.action_params as Record<string, unknown>) ?? {}),
+      contact_id: job.contact_id ?? null,
+      campaign_id: job.campaign_id ?? null,
+      sequence_id: job.sequence_id ?? null,
+      ...((job.action_payload as Record<string, unknown>) ?? {}),
     };
+    if (actionType === "connection_request" && !actionParams.note && actionParams.message) {
+      actionParams.note = actionParams.message;
+    }
 
     // Add prospect info if available
     if (job.contact_id) {
@@ -69,6 +76,7 @@ Deno.serve(async (req: Request) => {
       priority: 2,
       priority_label: "high",
       status: "pending",
+      idempotency_key: `execution-job:${job_id}`,
     }).select("*").maybeSingle();
 
     if (queueError) {
@@ -84,8 +92,8 @@ Deno.serve(async (req: Request) => {
       company_id: (job.company_id as string) ?? null,
       contact_id: (job.contact_id as string) ?? null,
       action_type: actionType,
-      action_result: "queued",
-      action_payload: job.action_params ?? {},
+      action_result: "pending",
+      action_payload: job.action_payload ?? {},
       response_payload: { queue_item_id: (queueItem as Record<string, unknown>)?.id ?? null },
     });
 

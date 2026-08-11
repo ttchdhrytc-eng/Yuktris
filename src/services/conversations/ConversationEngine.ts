@@ -210,7 +210,7 @@ export class ConversationEngine {
   ): { text: string; strategy: string } {
     if (intent.category === 'meeting_request') {
       return {
-        text: 'I'd be happy to schedule a call. What day and time works best for you? I can also send over a calendar link with available slots.',
+        text: "I'd be happy to schedule a call. What day and time works best for you? I can also send over a calendar link with available slots.",
         strategy: 'meeting_booking',
       };
     }
@@ -224,7 +224,7 @@ export class ConversationEngine {
 
     if (intent.category === 'buying') {
       return {
-        text: 'Great questions! Based on what you've shared, I think our platform would be a strong fit. Would you like me to put together a brief proposal with pricing tailored to your team size?',
+        text: "Great questions! Based on what you've shared, I think our platform would be a strong fit. Would you like me to put together a brief proposal with pricing tailored to your team size?",
         strategy: 'qualification_and_proposal',
       };
     }
@@ -245,13 +245,13 @@ export class ConversationEngine {
 
     if (sentiment === 'negative') {
       return {
-        text: 'I appreciate you letting me know. I won't take up more of your time, but if anything changes, feel free to reach out. Wishing you all the best!',
+        text: "I appreciate you letting me know. I won't take up more of your time, but if anything changes, feel free to reach out. Wishing you all the best!",
         strategy: 'graceful_exit',
       };
     }
 
     return {
-      text: 'Thanks for getting back to me! Is there anything specific I can help you with? I'm happy to share more about how we've helped similar companies.',
+      text: "Thanks for getting back to me! Is there anything specific I can help you with? I'm happy to share more about how we've helped similar companies.",
       strategy: 'gentle_nudge',
     };
   }
@@ -403,12 +403,19 @@ export class ConversationEngine {
       .maybeSingle();
     if (error) { console.error('Store message failed:', error.message); return null; }
 
+    const { data: currentConversation } = await this.client
+      .from('linkedin_conversations')
+      .select('total_messages,unread_count')
+      .eq('id', conversationId)
+      .maybeSingle();
+    const currentCounts = currentConversation as Record<string, number> | null;
+
     await this.client.from('linkedin_conversations').update({
       last_message_at: new Date().toISOString(),
       last_message_preview: params.body.slice(0, 200),
       last_message_direction: params.direction,
-      total_messages: ((await this.client.from('linkedin_conversations').select('total_messages').eq('id', conversationId).maybeSingle()).data as Record<string, number> | null)?.total_messages ?? 0) + 1,
-      unread_count: params.direction === 'inbound' ? ((await this.client.from('linkedin_conversations').select('unread_count').eq('id', conversationId).maybeSingle().then((r) => r.data as Record<string, number> | null))?.data?.unread_count ?? 0) + 1 : 0,
+      total_messages: (currentCounts?.total_messages ?? 0) + 1,
+      unread_count: params.direction === 'inbound' ? (currentCounts?.unread_count ?? 0) + 1 : 0,
     }).eq('id', conversationId);
 
     return data as LinkedInMessage;

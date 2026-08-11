@@ -82,6 +82,7 @@ export class Queue {
 
     if (error) {
       logger.error('Failed to mark task complete', { id: itemId, error: error.message });
+      throw error;
     } else {
       this.attempts.delete(itemId);
       logger.info('Task completed', { id: itemId, duration_ms: durationMs });
@@ -101,6 +102,7 @@ export class Queue {
 
     if (error) {
       logger.error('Failed to mark task failed', { id: itemId, error: error.message });
+      throw error;
     } else {
       this.attempts.delete(itemId);
       logger.warn('Task failed', { id: itemId, error: errorMsg, retryable });

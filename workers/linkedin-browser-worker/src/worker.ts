@@ -4,6 +4,7 @@ import { Queue, QueueItem } from './queue.js';
 import { LinkedInBrowser, SessionData, ProgressStep, ProgressCallback, IntendedLinkedInIdentity } from './linkedin.js';
 import { encrypt, decrypt, getKeyId } from './session.js';
 import { browserbase, BrowserbaseError } from './browserbase.js';
+import { createHash } from 'node:crypto';
 
 const CONNECTION_TIMEOUT = parseInt(process.env.CONNECTION_TIMEOUT_MS || '600000', 10);
 const TEST_CONNECTION_TIMEOUT = parseInt(process.env.TEST_CONNECTION_TIMEOUT_MS || '120000', 10);
@@ -557,6 +558,21 @@ export class Worker {
     const { session: sessionData, sessionId } = loaded;
     const intendedIdentity = await this.loadIntendedIdentity(accountId, item.workspace_id);
     const params = item.action_params ?? {};
+    if (item.action_type === 'follow_up_message' && params.contact_id) {
+      const { data: priorReply, error: replyCheckError } = await this.client
+        .from('linkedin_inbound_replies')
+        .select('id')
+        .eq('workspace_id', item.workspace_id)
+        .eq('contact_id', params.contact_id as string)
+        .eq('match_status', 'matched')
+        .limit(1)
+        .maybeSingle();
+      if (replyCheckError) throw new Error(`Reply safety check failed: ${this.sanitizeError(replyCheckError)}`);
+      if (priorReply) {
+        await this.queue.fail(item.id, 'Follow-up cancelled: prospect already replied', Date.now() - startTime, false);
+        return;
+      }
+    }
     let result: { success: boolean; data?: Record<string, unknown>; error?: string };
 
     try {
@@ -607,19 +623,24 @@ export class Worker {
           await page.waitForTimeout(800 + Math.random() * 1200);
           if (note) {
             const addNoteBtn = await page.$('button:has-text("Add a note")');
-            if (addNoteBtn) {
-              await addNoteBtn.click();
-              await page.waitForTimeout(500);
-              const noteInput = await page.$('#custom-message');
-              if (noteInput) { await noteInput.fill(note); await page.waitForTimeout(300); }
-              const sendBtn = await page.$('button:has-text("Send")');
-              if (sendBtn) await sendBtn.click();
-            }
+            if (!addNoteBtn) { result = { success: false, error: 'Add note control not found' }; break; }
+            await addNoteBtn.click();
+            await page.waitForTimeout(500);
+            const noteInput = await page.$('#custom-message');
+            if (!noteInput) { result = { success: false, error: 'Connection note input not found' }; break; }
+            await noteInput.fill(note);
+            await page.waitForTimeout(300);
+            const sendBtn = await page.$('button:has-text("Send")');
+            if (!sendBtn || await sendBtn.isDisabled()) { result = { success: false, error: 'Connection request send control unavailable' }; break; }
+            await sendBtn.click();
           } else {
             const sendBtn = await page.$('button:has-text("Send without note")');
-            if (sendBtn) await sendBtn.click();
+            if (!sendBtn || await sendBtn.isDisabled()) { result = { success: false, error: 'Connection request send control unavailable' }; break; }
+            await sendBtn.click();
           }
           await page.waitForTimeout(2000);
+          const stillOpen = await page.$('#custom-message, button:has-text("Send without note")');
+          if (stillOpen) { result = { success: false, error: 'Connection request was not confirmed as sent' }; break; }
           result = { success: true, data: { connected: url } };
           break;
         }
@@ -640,8 +661,11 @@ export class Worker {
           await page.keyboard.type(message, { delay: 30 + Math.random() * 50 });
           await page.waitForTimeout(500);
           const submitBtn = await page.$('button[type="submit"]');
-          if (submitBtn) await submitBtn.click();
+          if (!submitBtn || await submitBtn.isDisabled()) { result = { success: false, error: 'Message send control unavailable' }; break; }
+          await submitBtn.click();
           await page.waitForTimeout(2000);
+          const composerText = (await inputBox.textContent())?.trim() ?? '';
+          if (composerText === message.trim()) { result = { success: false, error: 'Message was not confirmed as sent' }; break; }
           result = { success: true, data: { sent_to: prospectName } };
           break;
         }
@@ -705,14 +729,52 @@ export class Worker {
           break;
         }
         case 'read_replies': {
+          await page.goto('https://www.linkedin.com/messaging', { waitUntil: 'domcontentloaded', timeout: 30000 });
+          await page.waitForTimeout(2000);
+          const prospectName = params.prospect_name as string | undefined;
+          if (prospectName) {
+            const conversation = await page.$(`div.msg-conversation-listitem:has-text("${prospectName}")`);
+            if (!conversation) { result = { success: false, error: `Conversation with ${prospectName} not found` }; break; }
+            await conversation.click();
+            await page.waitForTimeout(1000);
+          }
           const messages = await page.$$eval('div.msg-s-message-list__event', (els) =>
             els.map((el) => ({
+              external_id: el.getAttribute('data-event-urn') ?? el.id ?? null,
               sender: el.querySelector('span.msg-s-message-group__name')?.textContent?.trim() ?? null,
               body: el.querySelector('p.msg-s-event-listitem__body')?.textContent?.trim() ?? null,
               timestamp: el.querySelector('time')?.getAttribute('datetime') ?? null,
             }))
-          ).catch(() => [] as Array<{ sender: string | null; body: string | null; timestamp: string | null }>);
-          result = { success: true, data: { messages, count: messages.length } };
+          ).catch(() => [] as Array<{ external_id: string | null; sender: string | null; body: string | null; timestamp: string | null }>);
+          const ingested: Array<Record<string, unknown>> = [];
+          for (const message of messages) {
+            if (!message.body) continue;
+            const normalizedSender = message.sender?.trim().toLowerCase();
+            const intendedSender = prospectName?.trim().toLowerCase();
+            if (intendedSender && normalizedSender !== intendedSender) continue;
+            const externalId = message.external_id || createHash('sha256')
+              .update([accountId, message.sender ?? '', message.timestamp ?? '', message.body].join('\u001f'))
+              .digest('hex');
+            const classification = classifyLinkedInReply(message.body);
+            const { data: reply, error } = await this.client.rpc('ingest_linkedin_reply', {
+              p_workspace_id: item.workspace_id,
+              p_account_id: accountId,
+              p_external_reply_id: externalId,
+              p_body: message.body,
+              p_received_at: message.timestamp || new Date().toISOString(),
+              p_sender_name: message.sender,
+              p_conversation_id: (params.conversation_id as string) || null,
+              p_contact_id: (params.contact_id as string) || null,
+              p_sequence_id: (params.sequence_id as string) || null,
+              p_campaign_id: (params.campaign_id as string) || null,
+              p_classification: classification.classification,
+              p_confidence: classification.confidence,
+              p_manual_reason: classification.classification === 'unknown' ? 'Deterministic classifier could not classify safely' : null,
+            });
+            if (error) throw new Error(`Reply ingestion failed: ${this.sanitizeError(error)}`);
+            ingested.push(reply as Record<string, unknown>);
+          }
+          result = { success: true, data: { messages_seen: messages.length, replies_ingested: ingested.length, replies: ingested } };
           break;
         }
         default:
@@ -1055,4 +1117,18 @@ export class Worker {
       return false;
     }
   }
+}
+
+type ReplyClassification = 'positive' | 'interested' | 'neutral' | 'objection' | 'not_interested' | 'wrong_person' | 'do_not_contact' | 'unknown';
+
+function classifyLinkedInReply(body: string): { classification: ReplyClassification; confidence: number } {
+  const text = body.toLowerCase().replace(/\s+/g, ' ').trim();
+  if (/\b(do not contact|don't contact|stop messaging|remove me|unsubscribe)\b/.test(text)) return { classification: 'do_not_contact', confidence: 0.98 };
+  if (/\b(not interested|no interest|not a fit|no thanks|please don't)\b/.test(text)) return { classification: 'not_interested', confidence: 0.95 };
+  if (/\b(wrong person|not the right person|speak to|contact .* instead)\b/.test(text)) return { classification: 'wrong_person', confidence: 0.9 };
+  if (/\b(too expensive|already use|not now|concern|however|but we)\b/.test(text)) return { classification: 'objection', confidence: 0.8 };
+  if (/\b(interested|tell me more|more information|send details|learn more)\b/.test(text)) return { classification: 'interested', confidence: 0.9 };
+  if (/\b(yes|sounds good|let's talk|book|schedule|available|happy to chat)\b/.test(text)) return { classification: 'positive', confidence: 0.85 };
+  if (/\b(thanks|thank you|received|okay|ok)\b/.test(text)) return { classification: 'neutral', confidence: 0.7 };
+  return { classification: 'unknown', confidence: 0 };
 }

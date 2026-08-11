@@ -424,7 +424,7 @@ export function BusinessIntelligencePage() {
           {tab === 'value_props' && (revenueDNA ? <ValuePropositionsSection valueProps={revenueDNA.valuePropositions} /> : <RevenueDNAEmpty onGenerate={() => generateDNAMutation.mutate()} isGenerating={generateDNAMutation.isPending} />)}
           {tab === 'trust' && (revenueDNA ? <TrustSignalsSection profile={revenueDNA.profile} /> : <RevenueDNAEmpty onGenerate={() => generateDNAMutation.mutate()} isGenerating={generateDNAMutation.isPending} />)}
           {tab === 'committee' && (revenueDNA ? <BuyingCommitteeSection profile={revenueDNA.profile} /> : <RevenueDNAEmpty onGenerate={() => generateDNAMutation.mutate()} isGenerating={generateDNAMutation.isPending} />)}
-          {tab === 'graph' && workspace && <KnowledgeGraphSection workspaceId={workspace.id} />
+          {tab === 'graph' && workspace && <KnowledgeGraphSection workspaceId={workspace.id} />}
         </CardContent>
       </Card>
 
