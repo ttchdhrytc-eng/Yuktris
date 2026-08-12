@@ -122,15 +122,29 @@ export function LinkedInAccountsPage() {
   const testConnection = useTestLinkedInConnection();
   const disconnect = useDisconnectLinkedIn();
   const toggleDryRun = useToggleDryRun();
+  const activeConnectionAttempts = useQuery({
+    queryKey: ['active-linkedin-connection-attempts', workspace?.id],
+    enabled: !!workspace,
+    queryFn: async () => {
+      if (!workspace) return [];
+      const { data, error } = await supabase.from('browser_execution_queue')
+        .select('id, account_id, status, created_at').eq('workspace_id', workspace.id)
+        .eq('action_type', 'linkedin_connect').in('status', ['pending', 'retry', 'running', 'waiting'])
+        .order('created_at', { ascending: false });
+      if (error) throw error;
+      return data ?? [];
+    },
+    refetchInterval: 1000,
+  });
 
   // Auto-open auth progress panel when an account is in authenticating/pending state
   useEffect(() => {
     if (!accounts) return;
-    const inProgress = accounts.find(
-      (a) => a.connection_state === 'authenticating' || a.connection_state === 'pending' || a.connection_state === 'requires_action'
-    );
+    const activeAttempt = activeConnectionAttempts.data?.[0];
+    const inProgress = accounts.find((a) => a.id === activeAttempt?.account_id &&
+      (a.connection_state === 'authenticating' || a.connection_state === 'pending' || a.connection_state === 'requires_action'));
     if (inProgress) {
-      if (authAccountId !== inProgress.id) setAuthQueueItemId(null);
+      setAuthQueueItemId(activeAttempt?.id ?? null);
       setAuthAccountId(inProgress.id);
     } else if (authAccountId) {
       const stillExists = accounts.find((a) => a.id === authAccountId);
@@ -143,7 +157,7 @@ export function LinkedInAccountsPage() {
         return () => clearTimeout(timer);
       }
     }
-  }, [accounts, authAccountId]);
+  }, [accounts, activeConnectionAttempts.data, authAccountId]);
 
   return (
     <div>

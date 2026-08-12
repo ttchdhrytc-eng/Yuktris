@@ -110,23 +110,71 @@ export function useConnectLinkedIn() {
   return useMutation({
     mutationFn: async (params: { linkedinEmail?: string; displayName?: string; existingAccountId?: string }) => {
       if (!workspace) throw new Error('No workspace');
+      const idempotencyKey = crypto.randomUUID();
+      const startedAt = performance.now();
+      console.info('[linkedin-queue-timing]', {
+        stage: 'Q1_enqueue_started', workspaceId: workspace.id,
+        supabaseHost: new URL(import.meta.env.VITE_SUPABASE_URL).hostname,
+        timestamp: new Date().toISOString(),
+      });
+      const controller = new AbortController();
+      const timeout = window.setTimeout(() => controller.abort(), 12_000);
       const { data, error } = await supabase.rpc('start_linkedin_connection', {
         p_workspace_id: workspace.id,
         p_linkedin_email: params.linkedinEmail?.trim() || null,
         p_display_name: params.displayName ?? null,
         p_expected_profile_url: null,
         p_existing_account_id: params.existingAccountId ?? null,
-        p_idempotency_key: crypto.randomUUID(),
-      });
+        p_idempotency_key: idempotencyKey,
+      }).abortSignal(controller.signal);
+      window.clearTimeout(timeout);
       if (error) throw error;
       const result = Array.isArray(data) ? data[0] : data;
-      if (!result?.account_id) throw new Error('Failed to start LinkedIn connection.');
-      return { accountId: result.account_id as string, queueItemId: result.queue_item_id as string };
+      if (!result?.account_id || !result?.queue_item_id) {
+        throw new Error('Unable to start LinkedIn connection: no queue attempt was created. Please try again.');
+      }
+      const { data: queueItem, error: queueError } = await supabase
+        .from('browser_execution_queue')
+        .select('id, workspace_id, account_id, action_type, status, scheduled_at, next_retry_at, lease_expires_at')
+        .eq('id', result.queue_item_id)
+        .eq('workspace_id', workspace.id)
+        .eq('account_id', result.account_id)
+        .maybeSingle();
+      if (queueError) throw queueError;
+      if (!queueItem || queueItem.action_type !== 'linkedin_connect') {
+        throw new Error('Unable to confirm the LinkedIn connection attempt. Please try again.');
+      }
+      if (['failed', 'cancelled'].includes(queueItem.status)) {
+        throw new Error(`LinkedIn connection attempt is ${queueItem.status}. Please try again.`);
+      }
+      console.info('[linkedin-queue-timing]', {
+        stage: 'Q2_queue_item_confirmed', queueItemId: queueItem.id, workspaceId: workspace.id,
+        queueStatus: queueItem.status, elapsedMs: performance.now() - startedAt, timestamp: new Date().toISOString(),
+      });
+      return { accountId: result.account_id as string, queueItemId: queueItem.id as string, queueStatus: queueItem.status as string };
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['linkedin-accounts'] });
       queryClient.invalidateQueries({ queryKey: ['browser-exec-queue'] });
     },
+  });
+}
+
+export function useLinkedInConnectionAttempt(queueItemId: string | null) {
+  const { workspace } = useWorkspace();
+  return useQuery<Pick<BrowserExecutionQueueItem, 'id' | 'account_id' | 'action_type' | 'status' | 'error' | 'created_at' | 'started_at' | 'completed_at'> | null>({
+    queryKey: ['linkedin-connection-attempt', workspace?.id, queueItemId],
+    queryFn: async () => {
+      if (!workspace || !queueItemId) return null;
+      const { data, error } = await supabase.from('browser_execution_queue')
+        .select('id, account_id, action_type, status, error, created_at, started_at, completed_at')
+        .eq('workspace_id', workspace.id).eq('id', queueItemId).maybeSingle();
+      if (error) throw error;
+      if (data && data.action_type !== 'linkedin_connect') throw new Error('Invalid LinkedIn connection queue attempt');
+      return data as Pick<BrowserExecutionQueueItem, 'id' | 'account_id' | 'action_type' | 'status' | 'error' | 'created_at' | 'started_at' | 'completed_at'> | null;
+    },
+    enabled: !!workspace && !!queueItemId,
+    refetchInterval: 1000,
   });
 }
 

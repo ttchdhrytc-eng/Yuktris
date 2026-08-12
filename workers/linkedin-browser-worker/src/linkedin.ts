@@ -148,6 +148,7 @@ export type ProgressStep =
   | 'challenge_detected'
   | 'human_challenge_required'
   | 'provider_rechallenge'
+  | 'invalid_credentials'
   | 'waiting_for_user'
   | 'verifying_authentication'
   | 'identity_verified'
@@ -792,27 +793,32 @@ export class LinkedInBrowser {
 
     const selectorFlags = await Promise.race([
       page.evaluate(() => {
-        const visible = (selector: string): boolean => Array.from(document.querySelectorAll<HTMLElement>(selector)).some(element => {
+        const elementVisible = (element: HTMLElement): boolean => {
           const style = window.getComputedStyle(element);
           const rect = element.getBoundingClientRect();
           return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
-        });
+        };
+        const visible = (selector: string): boolean => Array.from(document.querySelectorAll<HTMLElement>(selector)).some(elementVisible);
         return {
           loginForm: visible('input[type="password"], input[name="session_key"], form.login__form'),
           checkpoint: visible('input[name="pin"], input[name="verificationCode"], input[name="otp"], #captcha, [data-test-challenge], .challenge'),
           globalNav: visible('.global-nav, nav[aria-label="Primary"], nav[aria-label="Main"]'),
           meControl: visible('.global-nav__me, .global-nav__me-photo, button[aria-label*="Me"], img.global-nav__me-photo'),
           feedContent: visible('.feed-update-wrapper, .core-entry-card, div[class*="feed-shared"]'),
+          invalidCredentials: Array.from(document.querySelectorAll<HTMLElement>('[role="alert"], .alert, .form__label--error, #error-for-password, #error-for-username'))
+            .filter(elementVisible)
+            .some(element => /incorrect|not accepted|wrong (email|password)|couldn['’]t find|could not find/i.test(element.textContent || '')),
         };
       }),
       new Promise<never>((_, reject) => setTimeout(() => reject(new Error('auth signal timeout')), AUTH_SIGNAL_TIMEOUT_MS)),
-    ]).catch(() => ({ loginForm: false, checkpoint: false, globalNav: false, meControl: false, feedContent: false }));
+    ]).catch(() => ({ loginForm: false, checkpoint: false, globalNav: false, meControl: false, feedContent: false, invalidCredentials: false }));
 
     if (selectorFlags.loginForm) signals.push('login_form');
     if (selectorFlags.checkpoint) signals.push('checkpoint_control');
     if (selectorFlags.globalNav) signals.push('global_nav');
     if (selectorFlags.meControl) signals.push('me_control');
     if (selectorFlags.feedContent) signals.push('feed_content');
+    if (selectorFlags.invalidCredentials) signals.push('invalid_credentials');
 
     let hasSessionCookie = false;
     try {
@@ -939,6 +945,7 @@ export class LinkedInBrowser {
     let mainFrameNavigationCount = 0;
     let lastChallengeNavigationCount = -1;
     let wasCheckpoint = false;
+    let invalidCredentialsReported = false;
     const CHALLENGE_CHECK_INTERVAL = 5000;
     const observedPage = this.page;
     const observeMainFrameNavigation = (frame: import('playwright').Frame): void => {
@@ -1001,6 +1008,15 @@ export class LinkedInBrowser {
           worker_action: 'verify_canonical_identity',
         });
         return { authenticated: true, challenge: activeChallenge, cancelled: false };
+      }
+
+      if (assessment.state === 'unauthenticated' && assessment.signals.includes('invalid_credentials')) {
+        if (!invalidCredentialsReported && onProgress) {
+          invalidCredentialsReported = true;
+          await onProgress('invalid_credentials', 'LinkedIn reported that the sign-in details were not accepted. Check them directly in the secure LinkedIn browser and try again.');
+        }
+      } else if (!assessment.signals.includes('invalid_credentials')) {
+        invalidCredentialsReported = false;
       }
 
       const now = Date.now();

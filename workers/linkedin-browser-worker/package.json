@@ -17,6 +17,7 @@
     "test:persistent-fast-path": "npm run build && node dist/persistent-fast-path.test.js",
     "test:interactive-challenge": "npm run build && node dist/interactive-challenge.test.js",
     "test:identity-latency": "npm run build && node dist/identity-latency.test.js",
+    "test:connection-orchestration": "npm run build && node dist/connection-orchestration.test.js",
     "install-browser": "echo 'No local browser needed — using Browserbase'"
   },
   "dependencies": {

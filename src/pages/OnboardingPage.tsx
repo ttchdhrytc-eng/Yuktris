@@ -23,7 +23,7 @@ import {
   type ActivationProgress,
 } from '@/services/activation';
 import { useConnectGoogle, useGoogleConnection } from '@/hooks/useGoogleAuth';
-import { useAuthInteractions, useCancelAuthInteraction, useConnectLinkedIn, useLinkedInAccounts, useLinkedInLoginAccess } from '@/hooks/useLinkedInBrowser';
+import { useAuthInteractions, useCancelAuthInteraction, useConnectLinkedIn, useLinkedInAccounts, useLinkedInConnectionAttempt, useLinkedInLoginAccess } from '@/hooks/useLinkedInBrowser';
 import { SecureLinkedInAuthModal } from '@/components/linkedin/SecureLinkedInAuthModal';
 import { GOOGLE_SCOPES } from '@/types/google-auth';
 import { cn } from '@/lib/utils';
@@ -77,6 +77,8 @@ export function OnboardingPage() {
   const [editing, setEditing] = useState<Record<string, string>>({});
   const [linkedinAccountId, setLinkedinAccountId] = useState<string | null>(null);
   const [linkedinQueueItemId, setLinkedinQueueItemId] = useState<string | null>(null);
+  const [linkedinAttemptTimedOut, setLinkedinAttemptTimedOut] = useState(false);
+  const linkedinAttemptTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const linkedinCompletionHandledRef = useRef(false);
   const creatingRef = useRef(false);
 
@@ -105,6 +107,7 @@ export function OnboardingPage() {
   const linkedinAccounts = useLinkedInAccounts();
   const linkedinLoginAccess = useLinkedInLoginAccess(linkedinAccountId);
   const linkedinAuthInteractions = useAuthInteractions(linkedinAccountId);
+  const linkedinAttempt = useLinkedInConnectionAttempt(linkedinQueueItemId);
   const cancelLinkedinAuth = useCancelAuthInteraction();
   const { workspace, loading: wsLoading } = useWorkspace();
 
@@ -127,7 +130,8 @@ export function OnboardingPage() {
     ['failed', 'restricted'].includes(linkedinAccount.connection_state)
     || linkedinAccount.status === 'restricted'
   );
-  const linkedinWaiting = !!linkedinAccountId && !connectLinkedIn.isPending
+  const activeLinkedinQueue = !!linkedinAttempt.data && ['pending', 'retry', 'running', 'waiting'].includes(linkedinAttempt.data.status);
+  const linkedinWaiting = !!linkedinAccountId && !!linkedinQueueItemId && activeLinkedinQueue && !linkedinAttemptTimedOut && !connectLinkedIn.isPending
     && !linkedinConnected && !linkedinExpired && !linkedinFailed;
   const currentLinkedinInteractions = linkedinAuthInteractions.data
     ?.filter((event) => event.queue_item_id === linkedinQueueItemId) ?? [];
@@ -150,7 +154,21 @@ export function OnboardingPage() {
     (event) => event.interaction_type === 'progress' && event.step === 'provider_rechallenge' && event.status === 'completed'
   );
   const linkedinVerifyingIdentity = latestLinkedinProgress?.step === 'verifying_authentication';
+  const linkedinInvalidCredentials = latestLinkedinProgress?.step === 'invalid_credentials';
   const cancellableLinkedinInteraction = [...(linkedinAuthInteractions.data ?? [])].reverse().find((event) => event.queue_item_id) ?? null;
+
+  useEffect(() => {
+    const workerStarted = linkedinAttempt.data?.status === 'running' || currentLinkedinInteractions.length > 0 || linkedinConnected;
+    if (workerStarted) {
+      setLinkedinAttemptTimedOut(false);
+      if (linkedinAttemptTimerRef.current) clearTimeout(linkedinAttemptTimerRef.current);
+      linkedinAttemptTimerRef.current = null;
+    }
+  }, [currentLinkedinInteractions.length, linkedinAttempt.data?.status, linkedinConnected]);
+
+  useEffect(() => () => {
+    if (linkedinAttemptTimerRef.current) clearTimeout(linkedinAttemptTimerRef.current);
+  }, []);
 
   const googleConnected = googleConnection.data?.account?.status === 'connected' && !googleConnection.data.needsReconnect;
   const googleNeedsReconnect = googleConnection.data?.needsReconnect ?? false;
@@ -169,6 +187,7 @@ export function OnboardingPage() {
     if (step !== 'linkedin' || !linkedinConnected || linkedinCompletionHandledRef.current) return;
     linkedinCompletionHandledRef.current = true;
     console.info('[linkedin-auth-timing]', { queueItemId: linkedinQueueItemId, stage: 'connected_state_observed', timestamp: new Date().toISOString() });
+    console.info('[linkedin-queue-timing]', { queueItemId: linkedinQueueItemId, stage: 'Q4_frontend_connected_observed', timestamp: new Date().toISOString() });
     if (linkedinPersistentFastPath) console.info('[linkedin-persistent-timing]', { queueItemId: linkedinQueueItemId, stage: 'P9_frontend_connected_observed', timestamp: new Date().toISOString() });
     toast.success('LinkedIn connected successfully.');
     requestAnimationFrame(() => {
@@ -442,12 +461,19 @@ export function OnboardingPage() {
               repeatedSecurityChecks={linkedinProviderRechallenge}
               verifyingIdentity={linkedinVerifyingIdentity}
               waitingMessage={linkedinAuthRequired
-                ? 'Preparing secure LinkedIn sign-in...'
+                ? (linkedinInvalidCredentials ? 'LinkedIn did not accept those sign-in details. Check them in the secure browser.' : 'Preparing secure LinkedIn sign-in...')
                 : 'Checking your LinkedIn connection...'}
               error={connectLinkedIn.error
                 ? 'Failed to start LinkedIn connection. Please try again.'
+                : linkedinQueueItemId && linkedinAttempt.isFetched && !linkedinAttempt.data
+                  ? 'Unable to confirm an active LinkedIn connection attempt. Please try again.'
+                : linkedinAttempt.data && ['failed', 'cancelled'].includes(linkedinAttempt.data.status)
+                  ? (linkedinAttempt.data.error || `LinkedIn connection attempt ${linkedinAttempt.data.status}. Please try again.`)
+                : linkedinAttemptTimedOut
+                  ? 'The LinkedIn connection worker did not receive this attempt within 15 seconds. Please try again.'
                 : linkedinFailed ? (linkedinAccount?.last_error || 'LinkedIn authentication failed. Please try again.') : null}
               onConnect={() => {
+                console.info('[linkedin-queue-timing]', { stage: 'Q0_connect_clicked', timestamp: new Date().toISOString() });
                 if (!workspace) {
                   toast.error('No workspace found. Please complete the business details step first.');
                   setStep('business');
@@ -459,6 +485,9 @@ export function OnboardingPage() {
                   { linkedinEmail: email.trim() || undefined },
                   {
                     onSuccess: ({ accountId, queueItemId }) => {
+                      setLinkedinAttemptTimedOut(false);
+                      if (linkedinAttemptTimerRef.current) clearTimeout(linkedinAttemptTimerRef.current);
+                      linkedinAttemptTimerRef.current = setTimeout(() => setLinkedinAttemptTimedOut(true), 15_000);
                       linkedinCompletionHandledRef.current = false;
                       setLinkedinAccountId(accountId);
                       setLinkedinQueueItemId(queueItemId);
@@ -471,12 +500,16 @@ export function OnboardingPage() {
                 );
               }}
               onReconnect={() => {
+                console.info('[linkedin-queue-timing]', { stage: 'Q0_connect_clicked', reconnect: true, timestamp: new Date().toISOString() });
                 linkedinCompletionHandledRef.current = false;
                 if (!linkedinAccountId) return;
                 connectLinkedIn.mutate(
                   { existingAccountId: linkedinAccountId },
                   {
                     onSuccess: ({ accountId, queueItemId }) => {
+                      setLinkedinAttemptTimedOut(false);
+                      if (linkedinAttemptTimerRef.current) clearTimeout(linkedinAttemptTimerRef.current);
+                      linkedinAttemptTimerRef.current = setTimeout(() => setLinkedinAttemptTimedOut(true), 15_000);
                       setLinkedinAccountId(accountId);
                       setLinkedinQueueItemId(queueItemId);
                     },

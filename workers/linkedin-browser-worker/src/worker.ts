@@ -46,6 +46,11 @@ export class Worker {
     this.queue = new Queue(this.client, this.workerId, POLL_INTERVAL);
     this.linkedin = new LinkedInBrowser(this.client, true, this.encryptionSecret);
     this.linkedinContexts = new LinkedInContextService(this.client);
+    logger.info('Worker environment identity', {
+      environment: process.env.NODE_ENV || 'unspecified',
+      supabase_host: new URL(supabaseUrl).hostname,
+      browserbase_project_suffix: process.env.BROWSERBASE_PROJECT_ID?.slice(-6) || null,
+    });
   }
 
   getHealth(): { workerId: string; browserbase: boolean; running: boolean; currentTask: string | null } {
@@ -227,6 +232,10 @@ export class Worker {
         logger.info(`Poll #${pollCount}: calling claimNext()`, { worker_id: this.workerId });
         const item = await this.queue.claimNext();
         if (item) {
+          if (item.action_type === 'linkedin_connect') logger.info('LinkedIn queue orchestration timing', {
+            queue_item_id: item.id, workspace_id: item.workspace_id, account_id: item.account_id,
+            stage: 'Q3_worker_claimed', timestamp: new Date().toISOString(),
+          });
           this.currentTaskId = item.id;
           logger.info(`Poll #${pollCount}: task claimed, processing`, { task_id: item.id, action: item.action_type });
           await this.processTask(item);
