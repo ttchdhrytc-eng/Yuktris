@@ -224,6 +224,18 @@ async function getContext(contextId: string): Promise<BrowserbaseContext> {
   return { id: data.id };
 }
 
+async function deleteContext(contextId: string): Promise<'deleted' | 'not_found'> {
+  const res = await browserbaseFetch(`${BROWSERBASE_API_URL}/contexts/${encodeURIComponent(contextId)}`, {
+    method: 'DELETE', headers: { 'x-bb-api-key': getApiKey() },
+  });
+  if (res.ok || res.status === 204) return 'deleted';
+  if (res.status === 404) return 'not_found';
+  if (res.status === 429 || res.status >= 500) {
+    throw new BrowserbaseError(`Browserbase Context deletion temporarily failed (${res.status})`, res.status);
+  }
+  throw new BrowserbaseError(`Browserbase Context deletion failed (${res.status})`, res.status);
+}
+
 async function waitForSessionTerminal(sessionId: string, timeoutMs = 30000): Promise<'completed' | 'error'> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -238,6 +250,12 @@ async function waitForContextSynchronization(sessionId: string, contextId: strin
   const terminal = await waitForSessionTerminal(sessionId, timeoutMs);
   if (terminal !== 'completed') throw new BrowserbaseError('Browserbase session ended with an error before Context synchronization', 502);
   // Browserbase documents an asynchronous settle period after a persisted session closes.
+  await new Promise(resolve => setTimeout(resolve, 5000));
+  await getContext(contextId);
+}
+
+async function settleClosedContext(sessionId: string, contextId: string, timeoutMs = 45000): Promise<void> {
+  await waitForSessionTerminal(sessionId, timeoutMs);
   await new Promise(resolve => setTimeout(resolve, 5000));
   await getContext(contextId);
 }
@@ -324,8 +342,10 @@ export const browserbase = {
   createSession,
   createContext,
   getContext,
+  deleteContext,
   waitForSessionTerminal,
   waitForContextSynchronization,
+  settleClosedContext,
   endSession,
   getSessionStatus,
   getDebugUrl,

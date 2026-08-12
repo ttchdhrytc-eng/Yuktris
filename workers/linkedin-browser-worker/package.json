@@ -10,6 +10,7 @@
     "test": "tsx src/test.ts",
     "test:phase2a": "npm run build && node dist/phase2a.test.js",
     "test:persistent-context": "npm run build && node dist/persistent-context.test.js",
+    "test:persistent-context-a2": "npm run build && node dist/persistent-context-a2.test.js",
     "install-browser": "echo 'No local browser needed — using Browserbase'"
   },
   "dependencies": {

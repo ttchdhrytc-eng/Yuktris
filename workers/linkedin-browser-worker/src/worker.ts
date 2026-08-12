@@ -221,6 +221,9 @@ export class Worker {
     while (this.running) {
       pollCount++;
       try {
+        if (browserbase.isConfigured()) {
+          await this.linkedinContexts.processOneDeletion(this.workerId);
+        }
         logger.info(`Poll #${pollCount}: calling claimNext()`, { worker_id: this.workerId });
         const item = await this.queue.claimNext();
         if (item) {
@@ -372,16 +375,19 @@ export class Worker {
 
     const onProgress = this.makeProgressCallback(workspaceId, accountId, item.id);
     const intendedIdentity = await this.loadIntendedIdentity(accountId, workspaceId);
-    const usePersistentContext = persistentContextsEnabled();
+    const usePersistentContext = await this.linkedinContexts.shouldUsePersistentContext(
+      workspaceId, accountId, persistentContextsEnabled(),
+    );
     let persistentContext: ContextRecord | null = null;
     let launchOptions = sessionOptionsForAccount(false);
     if (usePersistentContext) {
       const owner: ContextLeaseOwner = {
         workspaceId, accountId, queueItemId: item.id, workerId: this.workerId, attemptId: item.attempt_id,
       };
-      persistentContext = await this.linkedinContexts.ensureProvisioned(workspaceId, accountId);
+      persistentContext = await this.linkedinContexts.ensureProvisioned(owner);
       persistentContext = await this.linkedinContexts.acquire(owner);
       this.activeContextLease = { context: persistentContext, owner };
+      await this.linkedinContexts.reconcileBeforeSession(persistentContext, owner);
       launchOptions = sessionOptionsForAccount(true, persistentContext);
     }
 
