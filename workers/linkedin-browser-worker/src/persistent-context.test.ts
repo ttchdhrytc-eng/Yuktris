@@ -18,7 +18,7 @@ const tests: Array<[string, () => void]> = [
   ['provisioning is serialized and unique', () => { assert.match(migration, /pg_advisory_xact_lock/); assert.match(migration, /FOR UPDATE/); }],
   ['lease acquisition has one winner', () => assert.match(migration, /lease_expires_at IS NULL OR c\.lease_expires_at<=now\(\)/)],
   ['lease renewal requires exact ownership', () => assert.match(migration, /active_queue_item_id=p_queue_item_id AND c\.active_worker_id=p_worker_id[\s\S]*active_attempt_id=p_attempt_id/)],
-  ['context session persists', () => assert.deepEqual(sessionOptionsForAccount(true, { id:'db', workspace_id:'w', account_id:'a', provider_context_id:'provider', status:'active', generation:1 }), { keepAlive:true, contextId:'provider', persistContext:true, requirePersistentContext:true })],
+  ['context session persists without pre-authorizing Live View', () => assert.deepEqual(sessionOptionsForAccount(true, { id:'db', workspace_id:'w', account_id:'a', provider_context_id:'provider', status:'active', generation:1 }), { keepAlive:true, contextId:'provider', persistContext:true, requirePersistentContext:true, liveView:false })],
   ['CAPTCHA solving is false', () => assert.match(browserbase, /solveCaptchas: false/)],
   ['viewport remains 1440x900', () => assert.match(browserbase, /width: 1440, height: 900/)],
   ['feature flag defaults off and preserves legacy options', () => { assert.equal(persistentContextsEnabled({}), false); assert.deepEqual(sessionOptionsForAccount(false), { keepAlive:true }); }],

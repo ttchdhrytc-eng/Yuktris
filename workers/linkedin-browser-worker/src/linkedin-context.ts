@@ -32,7 +32,7 @@ export function sessionOptionsForAccount(enabled: boolean, context?: ContextReco
   if (!context?.provider_context_id || !['active', 'in_use'].includes(context.status)) {
     throw new BrowserbaseError('Persistent browser Context is unavailable for the enrolled account', 409);
   }
-  return { keepAlive: true, contextId: context.provider_context_id, persistContext: true, requirePersistentContext: true };
+  return { keepAlive: true, contextId: context.provider_context_id, persistContext: true, requirePersistentContext: true, liveView: false };
 }
 
 function first<T>(data: T | T[] | null): T | null {

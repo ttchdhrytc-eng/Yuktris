@@ -39,6 +39,7 @@ export interface CreateSessionOptions {
   contextId?: string;
   persistContext?: boolean;
   requirePersistentContext?: boolean;
+  liveView?: boolean;
 }
 
 export class BrowserbaseError extends Error {
@@ -125,14 +126,14 @@ async function createSession(opts?: CreateSessionOptions): Promise<BrowserbaseSe
 
       const wsUrl = data.wsEndpoint || data.connectUrl || `wss://connect.browserbase.com/?session_id=${data.id}&apiKey=${encodeURIComponent(apiKey)}`;
 
-      // Fetch the REAL Live View URL from the /debug endpoint
+      // Fetch the real Live View URL only for sessions that may be shown to a human.
       // The session creation response does NOT include the live debugger URL.
       // The constructed URL "https://www.browserbase.com/sessions/{id}" is just the
       // dashboard page — NOT the live browser view. We need debuggerFullscreenUrl.
       let liveUrl = data.liveUrl || '';
       let debugUrl = data.debugUrl || '';
 
-      try {
+      if (opts?.liveView !== false) try {
         const debugRes = await browserbaseFetch(`${BROWSERBASE_API_URL}/sessions/${data.id}/debug`, {
           headers: { 'x-bb-api-key': apiKey },
         });
@@ -162,7 +163,7 @@ async function createSession(opts?: CreateSessionOptions): Promise<BrowserbaseSe
       }
 
       // Fallback if /debug didn't return a usable URL
-      if (!liveUrl) {
+      if (opts?.liveView !== false && !liveUrl) {
         liveUrl = `https://www.browserbase.com/sessions/${data.id}`;
         logger.warn('Using fallback Browserbase dashboard URL instead of debugger', { sessionId: data.id });
       }
@@ -170,7 +171,7 @@ async function createSession(opts?: CreateSessionOptions): Promise<BrowserbaseSe
       logger.info('Browserbase session created', {
         id: data.id,
         wsUrlSource: data.wsEndpoint ? 'api' : 'constructed',
-        liveUrlSource: liveUrl.includes('debugger') ? 'debug-endpoint' : 'fallback',
+        liveUrlSource: !liveUrl ? 'not-requested' : liveUrl.includes('debugger') ? 'debug-endpoint' : 'fallback',
       });
 
       return {

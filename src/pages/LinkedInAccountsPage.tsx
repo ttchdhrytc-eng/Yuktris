@@ -464,17 +464,24 @@ function AccountAuthModal({ accountId, queueItemId, onClose }: { accountId: stri
   const identityVerified = interactions?.some(
     (event) => event.queue_item_id === currentQueueItemId && event.interaction_type === 'progress' && event.step === 'identity_verified' && event.status === 'completed'
   ) ?? false;
-  const securityCheckRequired = interactions?.some(
-    (event) => event.interaction_type === 'challenge' && event.status === 'pending'
+  const authRequired = interactions?.some(
+    (event) => event.queue_item_id === currentQueueItemId && event.interaction_type === 'progress' && event.step === 'auth_required' && event.status === 'completed'
   ) ?? false;
-  const cancellableInteraction = [...(interactions ?? [])].reverse().find((event) => event.queue_item_id) ?? null;
+  const securityCheckRequired = interactions?.some(
+    (event) => event.queue_item_id === currentQueueItemId && event.interaction_type === 'challenge' && event.status === 'pending'
+  ) ?? false;
+  const repeatedSecurityChecks = interactions?.some(
+    (event) => event.queue_item_id === currentQueueItemId && event.interaction_type === 'progress' && event.step === 'provider_rechallenge' && event.status === 'completed'
+  ) ?? false;
+  const cancellableInteraction = [...(interactions ?? [])].reverse().find((event) => event.queue_item_id === currentQueueItemId) ?? null;
 
   return (
     <SecureLinkedInAuthModal
-      open
+      open={authRequired || identityVerified}
       loginUrl={loginAccess?.loginUrl ?? null}
       identityVerified={identityVerified}
       securityCheckRequired={securityCheckRequired}
+      repeatedSecurityChecks={repeatedSecurityChecks}
       onCancel={() => {
         if (cancellableInteraction) cancelInteraction.mutate(cancellableInteraction);
         onClose();

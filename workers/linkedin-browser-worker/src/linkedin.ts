@@ -130,6 +130,7 @@ export interface ConnectionResult {
   cancelled?: boolean;
   identityVerifiedAt?: number;
   stateCapturedAt?: number;
+  authenticationDetectedAt?: number;
 }
 
 export type ProgressStep =
@@ -137,14 +138,20 @@ export type ProgressStep =
   | 'session_created'
   | 'connecting_browser'
   | 'browser_connected'
+  | 'checking_existing_session'
+  | 'existing_session_authenticated'
+  | 'auth_required'
   | 'opening_linkedin'
   | 'ready_for_login'
   | 'waiting_for_login'
   | 'challenge_detected'
+  | 'human_challenge_required'
+  | 'provider_rechallenge'
   | 'waiting_for_user'
   | 'verifying_authentication'
   | 'identity_verified'
   | 'saving_session'
+  | 'finalizing_connection'
   | 'connected'
   | 'login_timeout'
   | 'login_failed';
@@ -156,6 +163,12 @@ export interface ProgressCallback {
 export interface ChallengeInfo {
   type: 'email_otp' | 'captcha' | 'two_factor' | 'phone_verification';
   description: string;
+}
+
+export interface ExistingSessionCheck {
+  result: ConnectionResult | null;
+  authRequired: boolean;
+  preserveCurrentPage: boolean;
 }
 
 export class LinkedInBrowser {
@@ -570,6 +583,7 @@ export class LinkedInBrowser {
     accountId?: string,
     queueItemId?: string,
     intendedIdentity?: IntendedLinkedInIdentity,
+    preserveCurrentPage = false,
   ): Promise<ConnectionResult> {
     if (!this.page) throw new Error('No page — call newContext() first');
     let flowState: LoginFlowState = 'idle';
@@ -595,7 +609,7 @@ export class LinkedInBrowser {
     try {
       // ── Open LinkedIn login page ────────────────────────────────
       transition('opening_browser');
-      await this.openLinkedIn(onProgress);
+      if (!preserveCurrentPage) await this.openLinkedIn(onProgress);
 
       // ── Refresh Live URL after navigation ───────────────────────
       // After page.goto() navigates to LinkedIn, fetch the updated debug URL
@@ -829,6 +843,34 @@ export class LinkedInBrowser {
     }), url, signals };
   }
 
+  async checkExistingAuthenticatedSession(intendedIdentity?: IntendedLinkedInIdentity): Promise<ExistingSessionCheck> {
+    if (!this.page) throw new Error('No page — call newContext() first');
+    await this.navigateWithRetry(this.page, LINKEDIN_FEED_URL, PAGE_LOAD_TIMEOUT_MS);
+    const assessment = await this.assessAuthentication(undefined, false);
+    logger.info('Persistent Context preflight authentication assessed', {
+      auth_state: assessment.state, confidence: assessment.confidence,
+      origin: this.safeOrigin(assessment.url), pathname: this.safePathname(assessment.url), signals: assessment.signals,
+    });
+    if (assessment.state !== 'authenticated') {
+      return { result: null, authRequired: true, preserveCurrentPage: assessment.state === 'checkpoint' };
+    }
+
+    const authenticationDetectedAt = Date.now();
+    const identity = await this.verifyIdentityWithRetry();
+    if (!identity) return { result: null, authRequired: true, preserveCurrentPage: false };
+    const identityMismatch = this.getIdentityMismatch(identity, intendedIdentity);
+    if (identityMismatch) {
+      return { result: { success: false, error: identityMismatch, nonRetryable: true, authState: 'authenticated' }, authRequired: false, preserveCurrentPage: false };
+    }
+    const identityVerifiedAt = Date.now();
+    const session = await this.captureSession();
+    return {
+      result: { success: true, identity, session, authenticationDetectedAt, identityVerifiedAt, stateCapturedAt: Date.now() },
+      authRequired: false,
+      preserveCurrentPage: false,
+    };
+  }
+
   private async navigateWithRetry(page: Page, url: string, timeoutMs: number): Promise<void> {
     let lastError: Error | null = null;
     for (let attempt = 0; attempt <= TRANSIENT_RETRY_LIMIT; attempt++) {
@@ -892,8 +934,18 @@ export class LinkedInBrowser {
     let lastCancellationCheck = 0;
     let activeChallenge: ChallengeInfo | null = null;
     let lastDiagnosticState = '';
+    let challengeOccurrenceCount = 0;
+    let mainFrameNavigationCount = 0;
+    let lastChallengeNavigationCount = -1;
+    let wasCheckpoint = false;
     const CHALLENGE_CHECK_INTERVAL = 5000;
+    const observedPage = this.page;
+    const observeMainFrameNavigation = (frame: import('playwright').Frame): void => {
+      if (frame === observedPage.mainFrame()) mainFrameNavigationCount++;
+    };
+    observedPage.on('framenavigated', observeMainFrameNavigation);
 
+    try {
     while (Date.now() < absoluteDeadline) {
       if (!this.browser?.isConnected()) {
         return { authenticated: false, challenge: activeChallenge, cancelled: false, failure: 'Secure LinkedIn browser session was lost. Start a new connection attempt.' };
@@ -906,7 +958,7 @@ export class LinkedInBrowser {
       // selection, focus changes, navigation, reloads, clicks, or form input.
       const assessment = await this.assessAuthentication(pinnedChallengePage ?? undefined, pinnedChallengePage === null);
       const url = assessment.url;
-      const diagnosticState = `${assessment.state}:${assessment.confidence}:${assessment.signals.join(',')}`;
+      const diagnosticState = `${assessment.state}:${assessment.confidence}:${assessment.signals.join(',')}:${mainFrameNavigationCount}`;
       if (diagnosticState !== lastDiagnosticState) {
         lastDiagnosticState = diagnosticState;
         logger.info('Human authentication state observed', {
@@ -917,17 +969,41 @@ export class LinkedInBrowser {
           confidence: assessment.confidence,
           origin: this.safeOrigin(url),
           pathname: this.safePathname(url),
-          signals: assessment.signals,
+          challenge_classification: activeChallenge?.type ?? null,
+          login_form_exists: assessment.signals.includes('login_form'),
+          authenticated_cookie_exists: assessment.signals.includes('session_cookie'),
+          navigation_change_detected: mainFrameNavigationCount > 0,
           challenge_pinned: !!pinnedChallengePage,
+          challenge_occurrence_count: challengeOccurrenceCount,
+          browserbase_session_id: this.bbSession?.id ?? null,
+          worker_action: assessment.state === 'checkpoint'
+            ? 'observe_only'
+            : assessment.state === 'authenticated'
+              ? 'verify_canonical_identity'
+              : 'reassess_authentication',
         });
       }
 
       if (assessment.state === 'authenticated') {
-        logger.info('Authenticated state verified', { host: this.safeHostname(url), confidence: assessment.confidence, signals: assessment.signals });
+        logger.info('Authenticated state verified after human authentication', {
+          queue_item_id: queueItemId,
+          workspace_id: workspaceId,
+          account_id: accountId,
+          browserbase_session_id: this.bbSession?.id ?? null,
+          origin: this.safeOrigin(url),
+          pathname: this.safePathname(url),
+          authentication_classification: assessment.state,
+          challenge_classification: activeChallenge?.type ?? null,
+          login_form_exists: assessment.signals.includes('login_form'),
+          authenticated_cookie_exists: assessment.signals.includes('session_cookie'),
+          challenge_occurrence_count: challengeOccurrenceCount,
+          worker_action: 'verify_canonical_identity',
+        });
         return { authenticated: true, challenge: activeChallenge, cancelled: false };
       }
 
       const now = Date.now();
+      const enteredCheckpoint = assessment.state === 'checkpoint' && !wasCheckpoint;
       if (assessment.state === 'checkpoint') {
         challengeMissingSince = null;
         if (!pinnedChallengePage) pinnedChallengePage = this.page;
@@ -963,16 +1039,45 @@ export class LinkedInBrowser {
         lastChallengeCheck = now;
         const challenge = assessment.state === 'checkpoint' ? await this.detectChallengeDetailed(pinnedChallengePage ?? undefined) : null;
         if (challenge) {
-          const isNewChallenge = !activeChallenge || activeChallenge.type !== challenge.type;
+          const providerRechallenge = challengeOccurrenceCount > 0
+            && (enteredCheckpoint || mainFrameNavigationCount !== lastChallengeNavigationCount);
+          const isNewChallenge = challengeOccurrenceCount === 0 || activeChallenge?.type !== challenge.type || providerRechallenge;
           activeChallenge = challenge;
-          logger.warn('Challenge detected during auth wait', { type: challenge.type, host: this.safeHostname(url) });
+          if (isNewChallenge) {
+            challengeOccurrenceCount++;
+            lastChallengeNavigationCount = mainFrameNavigationCount;
+          }
+          logger.warn('Challenge detected during auth wait', {
+            queue_item_id: queueItemId,
+            workspace_id: workspaceId,
+            account_id: accountId,
+            browserbase_session_id: this.bbSession?.id ?? null,
+            origin: this.safeOrigin(url),
+            pathname: this.safePathname(url),
+            type: challenge.type,
+            challenge_occurrence_count: challengeOccurrenceCount,
+            classification: providerRechallenge ? 'provider_rechallenge' : 'human_challenge_required',
+            worker_action: 'observe_only',
+          });
           if (isNewChallenge) {
             onFlowState?.('challenge_detected');
             if (onProgress) {
               await onProgress('challenge_detected', `LinkedIn verification required: ${challenge.description}`, {
                 challenge_type: challenge.type,
                 challenge_deadline: challengeDeadline ? new Date(challengeDeadline).toISOString() : null,
+                challenge_occurrence_count: challengeOccurrenceCount,
+                challenge_classification: providerRechallenge ? 'provider_rechallenge' : 'human_challenge_required',
               });
+              await onProgress('human_challenge_required', 'Complete verification directly in the secure LinkedIn browser. Yuktris will remain passive.', {
+                challenge_type: challenge.type,
+                challenge_occurrence_count: challengeOccurrenceCount,
+              });
+              if (providerRechallenge && challengeOccurrenceCount >= 2) {
+                await onProgress('provider_rechallenge', 'LinkedIn is requesting additional verification for this sign-in. Complete it directly in the secure browser. If verification continues, you can cancel and try again later.', {
+                  challenge_type: challenge.type,
+                  challenge_occurrence_count: challengeOccurrenceCount,
+                });
+              }
             }
             onFlowState?.('waiting_for_user');
             if (onProgress) {
@@ -985,10 +1090,14 @@ export class LinkedInBrowser {
         }
       }
 
+      wasCheckpoint = assessment.state === 'checkpoint';
       await new Promise(resolve => setTimeout(resolve, 2000));
     }
 
     return { authenticated: false, challenge: activeChallenge, cancelled: false };
+    } finally {
+      observedPage.off('framenavigated', observeMainFrameNavigation);
+    }
   }
 
   // ── Challenge Detection ─────────────────────────────────────────

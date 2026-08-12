@@ -318,12 +318,16 @@ function AccountCard({
   const loginAccess = useLinkedInLoginAccess(showPanel ? account.id : null);
   const cancelInteraction = useCancelAuthInteraction();
 
-  const { progressSteps, challenge, identityVerified, cancellableInteraction } = useMemo(() => {
+  const { progressSteps, challenge, identityVerified, authRequired, repeatedSecurityChecks, cancellableInteraction } = useMemo(() => {
     const items = interactions.data ?? [];
+    const currentQueueItemId = [...items].reverse().find((item) => item.queue_item_id)?.queue_item_id ?? null;
+    const currentItems = currentQueueItemId
+      ? items.filter((item) => item.queue_item_id === currentQueueItemId)
+      : [];
     const steps: { step: string; message: string; timestamp: string }[] = [];
     let chal: LinkedInAuthInteraction | null = null;
 
-    for (const item of items) {
+    for (const item of currentItems) {
       steps.push({ step: item.step, message: item.message, timestamp: item.created_at });
       // Look for pending challenge
       if (item.interaction_type === 'challenge' && item.status === 'pending') {
@@ -333,8 +337,10 @@ function AccountCard({
     return {
       progressSteps: steps,
       challenge: chal,
-      identityVerified: items.some((item) => item.interaction_type === 'progress' && item.step === 'identity_verified' && item.status === 'completed'),
-      cancellableInteraction: [...items].reverse().find((item) => item.queue_item_id) ?? null,
+      identityVerified: currentItems.some((item) => item.interaction_type === 'progress' && item.step === 'identity_verified' && item.status === 'completed'),
+      authRequired: currentItems.some((item) => item.interaction_type === 'progress' && item.step === 'auth_required' && item.status === 'completed'),
+      repeatedSecurityChecks: currentItems.some((item) => item.interaction_type === 'progress' && item.step === 'provider_rechallenge' && item.status === 'completed'),
+      cancellableInteraction: [...currentItems].reverse().find((item) => item.queue_item_id) ?? null,
     };
   }, [interactions.data]);
 
@@ -449,10 +455,11 @@ function AccountCard({
       )}
 
       <SecureLinkedInAuthModal
-        open={showPanel}
+        open={showPanel && (authRequired || identityVerified)}
         loginUrl={loginAccess.data?.loginUrl ?? null}
         identityVerified={identityVerified}
         securityCheckRequired={!!challenge && challenge.status === 'pending'}
+        repeatedSecurityChecks={repeatedSecurityChecks}
         onCancel={() => {
           if (cancellableInteraction) cancelInteraction.mutate(cancellableInteraction);
           onSetConnecting(null);

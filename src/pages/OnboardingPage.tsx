@@ -129,15 +129,26 @@ export function OnboardingPage() {
   );
   const linkedinWaiting = !!linkedinAccountId && !connectLinkedIn.isPending
     && !linkedinConnected && !linkedinExpired && !linkedinFailed;
-  const linkedinChallenges = linkedinAuthInteractions.data
+  const currentLinkedinInteractions = linkedinAuthInteractions.data
+    ?.filter((event) => event.queue_item_id === linkedinQueueItemId) ?? [];
+  const linkedinChallenges = currentLinkedinInteractions
     ?.filter((event) => event.interaction_type === 'challenge' && event.status === 'pending') ?? [];
   const linkedinChallenge = linkedinChallenges[linkedinChallenges.length - 1] ?? null;
-  const latestLinkedinProgress = linkedinAuthInteractions.data
+  const latestLinkedinProgress = currentLinkedinInteractions
     ?.filter((event) => event.interaction_type === 'progress')
     .slice(-1)[0] ?? null;
-  const linkedinIdentityVerified = linkedinAuthInteractions.data?.some(
-    (event) => event.queue_item_id === linkedinQueueItemId && event.interaction_type === 'progress' && event.step === 'identity_verified' && event.status === 'completed'
+  const linkedinIdentityVerified = currentLinkedinInteractions.some(
+    (event) => event.interaction_type === 'progress' && event.step === 'identity_verified' && event.status === 'completed'
   ) ?? false;
+  const linkedinAuthRequired = currentLinkedinInteractions.some(
+    (event) => event.interaction_type === 'progress' && event.step === 'auth_required' && event.status === 'completed'
+  );
+  const linkedinPersistentFastPath = currentLinkedinInteractions.some(
+    (event) => event.interaction_type === 'progress' && event.step === 'existing_session_authenticated' && event.status === 'completed'
+  );
+  const linkedinProviderRechallenge = currentLinkedinInteractions.some(
+    (event) => event.interaction_type === 'progress' && event.step === 'provider_rechallenge' && event.status === 'completed'
+  );
   const linkedinVerifyingIdentity = latestLinkedinProgress?.step === 'verifying_authentication';
   const cancellableLinkedinInteraction = [...(linkedinAuthInteractions.data ?? [])].reverse().find((event) => event.queue_item_id) ?? null;
 
@@ -158,9 +169,13 @@ export function OnboardingPage() {
     if (step !== 'linkedin' || !linkedinConnected || linkedinCompletionHandledRef.current) return;
     linkedinCompletionHandledRef.current = true;
     console.info('[linkedin-auth-timing]', { queueItemId: linkedinQueueItemId, stage: 'connected_state_observed', timestamp: new Date().toISOString() });
+    if (linkedinPersistentFastPath) console.info('[linkedin-persistent-timing]', { queueItemId: linkedinQueueItemId, stage: 'P9_frontend_connected_observed', timestamp: new Date().toISOString() });
     toast.success('LinkedIn connected successfully.');
-    requestAnimationFrame(() => console.info('[linkedin-auth-timing]', { queueItemId: linkedinQueueItemId, stage: 'success_ui_rendered', timestamp: new Date().toISOString() }));
-  }, [linkedinConnected, step]);
+    requestAnimationFrame(() => {
+      console.info('[linkedin-auth-timing]', { queueItemId: linkedinQueueItemId, stage: 'success_ui_rendered', timestamp: new Date().toISOString() });
+      if (linkedinPersistentFastPath) console.info('[linkedin-persistent-timing]', { queueItemId: linkedinQueueItemId, stage: 'P10_success_ui_rendered', timestamp: new Date().toISOString() });
+    });
+  }, [linkedinConnected, linkedinPersistentFastPath, linkedinQueueItemId, step]);
 
   // Animate research stages during business analysis
   useEffect(() => {
@@ -424,8 +439,11 @@ export function OnboardingPage() {
               waiting={linkedinWaiting}
               loginUrl={linkedinLoginAccess.data?.loginUrl ?? null}
               securityCheckRequired={!!linkedinChallenge && linkedinAccount?.connection_state === 'requires_action'}
+              repeatedSecurityChecks={linkedinProviderRechallenge}
               verifyingIdentity={linkedinVerifyingIdentity}
-              waitingMessage="Complete sign-in in the secure browser. This step will continue automatically after your LinkedIn identity and encrypted session are verified."
+              waitingMessage={linkedinAuthRequired
+                ? 'Preparing secure LinkedIn sign-in...'
+                : 'Checking your LinkedIn connection...'}
               error={connectLinkedIn.error
                 ? 'Failed to start LinkedIn connection. Please try again.'
                 : linkedinFailed ? (linkedinAccount?.last_error || 'LinkedIn authentication failed. Please try again.') : null}
@@ -444,7 +462,7 @@ export function OnboardingPage() {
                       linkedinCompletionHandledRef.current = false;
                       setLinkedinAccountId(accountId);
                       setLinkedinQueueItemId(queueItemId);
-                      toast.info('Complete LinkedIn sign-in in the secure browser.');
+                      toast.info('Checking your existing LinkedIn connection...');
                     },
                     onError: (err) => {
                       toast.error(err instanceof Error ? err.message : 'Failed to connect LinkedIn.');
@@ -470,7 +488,7 @@ export function OnboardingPage() {
               onNext={goNext}
             />
             <SecureLinkedInAuthModal
-              open={!!linkedinAccountId && !linkedinConnected && !linkedinFailed && !linkedinExpired && (linkedinWaiting || linkedinIdentityVerified)}
+              open={!!linkedinAccountId && !linkedinConnected && !linkedinFailed && !linkedinExpired && (linkedinAuthRequired || linkedinIdentityVerified)}
               loginUrl={linkedinLoginAccess.data?.loginUrl ?? null}
               identityVerified={linkedinIdentityVerified}
               queueItemId={linkedinQueueItemId}

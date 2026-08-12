@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Linkedin, Loader2, ShieldCheck, X } from 'lucide-react';
 import { Button } from '@/components/ui/Button';
 
-type Props = { open: boolean; loginUrl: string | null; identityVerified: boolean; securityCheckRequired: boolean; queueItemId?: string | null; onCancel: () => void };
+type Props = { open: boolean; loginUrl: string | null; identityVerified: boolean; securityCheckRequired: boolean; repeatedSecurityChecks?: boolean; queueItemId?: string | null; onCancel: () => void };
 
 function presentationUrl(value: string): string {
   const url = new URL(value);
@@ -11,7 +11,7 @@ function presentationUrl(value: string): string {
   return url.toString();
 }
 
-export function SecureLinkedInAuthModal({ open, loginUrl, identityVerified, securityCheckRequired, queueItemId, onCancel }: Props) {
+export function SecureLinkedInAuthModal({ open, loginUrl, identityVerified, securityCheckRequired, repeatedSecurityChecks = false, queueItemId, onCancel }: Props) {
   const [covered, setCovered] = useState(false);
   const [iframeMounted, setIframeMounted] = useState(true);
   const safeUrl = useMemo(() => { try { return loginUrl ? presentationUrl(loginUrl) : null; } catch { return null; } }, [loginUrl]);
@@ -49,7 +49,7 @@ export function SecureLinkedInAuthModal({ open, loginUrl, identityVerified, secu
             <p className="text-sm text-ink-400">{covered ? 'You can safely remain in Yuktris while encrypted session setup completes.' : 'The secure LinkedIn authentication surface will appear here.'}</p>
           </div></div>}
         </div>
-        {securityCheckRequired && !covered && <footer className="shrink-0 border-t border-warning-500/20 bg-warning-500/10 px-4 py-3 text-center text-xs text-warning-400">LinkedIn needs an additional security check. Complete it directly in this secure browser. Yuktris remains passive and never collects verification codes.</footer>}
+        {securityCheckRequired && !covered && <footer className="shrink-0 border-t border-warning-500/20 bg-warning-500/10 px-4 py-3 text-center text-xs text-warning-400">{repeatedSecurityChecks ? 'LinkedIn is requesting additional verification for this sign-in. Complete it directly in the secure browser. If LinkedIn continues requesting verification, you can cancel and try again later.' : 'LinkedIn needs an additional security check. Complete it directly in this secure browser. Yuktris remains passive and never collects verification codes.'}</footer>}
       </div>
     </div>
   );

@@ -339,7 +339,7 @@ export class Worker {
     return async (step: ProgressStep, message: string, metadata?: Record<string, unknown>) => {
       logger.info('Progress', { step, message, account_id: accountId });
       try {
-        if (step === 'challenge_detected' || step === 'waiting_for_user') {
+        if (step === 'challenge_detected' || step === 'waiting_for_user' || step === 'human_challenge_required' || step === 'provider_rechallenge') {
           await this.updateAccount(accountId, { connection_state: 'requires_action', last_error: null });
         } else if (step === 'waiting_for_login' || step === 'verifying_authentication' || step === 'saving_session') {
           await this.updateAccount(accountId, { connection_state: 'authenticating', last_error: null });
@@ -373,6 +373,11 @@ export class Worker {
       return;
     }
 
+    const logPersistentFastPath = (stage: string, at = Date.now()): void => logger.info('LinkedIn persistent fast-path latency', {
+      queue_item_id: item.id, workspace_id: workspaceId, account_id: accountId, stage,
+      timestamp: new Date(at).toISOString(), elapsed_from_claim_ms: at - startTime,
+    });
+    logPersistentFastPath('P0_connect_claimed');
     const onProgress = this.makeProgressCallback(workspaceId, accountId, item.id);
     const intendedIdentity = await this.loadIntendedIdentity(accountId, workspaceId);
     const usePersistentContext = await this.linkedinContexts.shouldUsePersistentContext(
@@ -386,9 +391,11 @@ export class Worker {
       };
       persistentContext = await this.linkedinContexts.ensureProvisioned(owner);
       persistentContext = await this.linkedinContexts.acquire(owner);
+      logPersistentFastPath('P1_context_lease_acquired');
       this.activeContextLease = { context: persistentContext, owner };
       await this.linkedinContexts.reconcileBeforeSession(persistentContext, owner);
       launchOptions = sessionOptionsForAccount(true, persistentContext);
+      await onProgress('checking_existing_session', 'Checking your LinkedIn connection...');
     }
 
     // STATE: authenticating (transition from IDLE)
@@ -438,7 +445,7 @@ export class Worker {
     logger.info('handleConnect: starting fresh login flow', { account_id: accountId });
 
     try {
-      await this.linkedin.launch(onProgress, launchOptions);
+      await this.linkedin.launch(usePersistentContext ? undefined : onProgress, launchOptions);
     } catch (err) {
       const msg = this.sanitizeError(err);
       const retryable = err instanceof BrowserbaseError && ![401, 402, 403].includes(err.statusCode);
@@ -451,8 +458,9 @@ export class Worker {
 
     // ── Verify: Browserbase session exists ──────────────────────
     const bbSessionId = this.linkedin.getSessionId();
-    const liveUrl = this.linkedin.getLiveUrl();
+    let liveUrl = this.linkedin.getLiveUrl();
     logger.info('handleConnect: browser session ready', { account_id: accountId, bbSessionId, liveUrlAvailable: !!liveUrl });
+    if (usePersistentContext) logPersistentFastPath('P2_context_session_created');
 
     if (!bbSessionId && browserbase.isConfigured()) {
       const msg = 'No Browserbase session ID after launch';
@@ -468,17 +476,6 @@ export class Worker {
       await this.linkedinContexts.attachSession(persistentContext.id, bbSessionId, this.activeContextLease.owner);
     }
 
-    // Store session ID + live URL in DB immediately so frontend can show "Open Browser"
-    await this.updateAccount(accountId, {
-      browserbase_session_id: bbSessionId,
-      browser_connected_at: new Date().toISOString(),
-    });
-
-    await onProgress('browser_connected', 'Secure browser ready. Complete LinkedIn sign-in in the browser window.', {
-      browserbase_session_id: bbSessionId,
-      browserbase_live_url: liveUrl,
-    });
-
     // ── Create browser context ──────────────────────────────────
     try {
       await this.linkedin.newContext();
@@ -493,15 +490,36 @@ export class Worker {
     }
 
     // ── Connect: open LinkedIn → wait for auth → verify → save ──
-    logger.info('handleConnect: calling linkedin.connect()', { account_id: accountId, timeout: CONNECTION_TIMEOUT });
-    const result = await this.linkedin.connect(
-      CONNECTION_TIMEOUT,
-      onProgress,
-      workspaceId,
-      accountId,
-      item.id,
-      intendedIdentity,
-    );
+    let result;
+    if (usePersistentContext) {
+      const preflight = await this.linkedin.checkExistingAuthenticatedSession(intendedIdentity);
+      if (preflight.result) {
+        result = preflight.result;
+        if (result.success) {
+          logPersistentFastPath('P3_authenticated_state_detected', result.authenticationDetectedAt ?? Date.now());
+          logPersistentFastPath('P4_canonical_identity_verified', result.identityVerifiedAt ?? Date.now());
+          logPersistentFastPath('P5_authenticated_state_captured', result.stateCapturedAt ?? Date.now());
+          await onProgress('existing_session_authenticated', 'Existing LinkedIn connection verified.');
+        }
+      } else {
+        liveUrl = await this.linkedin.refreshLiveUrl() ?? liveUrl;
+        await onProgress('auth_required', 'LinkedIn sign-in is required to continue.');
+        await this.updateAccount(accountId, { browserbase_session_id: bbSessionId, browser_connected_at: new Date().toISOString() });
+        await onProgress('browser_connected', 'Secure browser ready. Complete LinkedIn sign-in in the browser window.', {
+          browserbase_session_id: bbSessionId, browserbase_live_url: liveUrl,
+        });
+        result = await this.linkedin.connect(
+          CONNECTION_TIMEOUT, onProgress, workspaceId, accountId, item.id, intendedIdentity, preflight.preserveCurrentPage,
+        );
+      }
+    } else {
+      await onProgress('auth_required', 'LinkedIn sign-in is required to continue.');
+      await this.updateAccount(accountId, { browserbase_session_id: bbSessionId, browser_connected_at: new Date().toISOString() });
+      await onProgress('browser_connected', 'Secure browser ready. Complete LinkedIn sign-in in the browser window.', {
+        browserbase_session_id: bbSessionId, browserbase_live_url: liveUrl,
+      });
+      result = await this.linkedin.connect(CONNECTION_TIMEOUT, onProgress, workspaceId, accountId, item.id, intendedIdentity);
+    }
 
     logger.info('handleConnect: linkedin.connect() returned', { account_id: accountId, success: result.success, requiresAction: result.requiresAction, error: result.error });
 
@@ -538,6 +556,7 @@ export class Worker {
     await this.linkedin.neutralizeVisiblePage();
     logPostAuthStage('live_view_access_revoked');
     await onProgress('saving_session', 'Login successful. Encrypting and saving session...');
+    await onProgress('finalizing_connection', 'Securing your LinkedIn connection...');
 
     // Persist the verified Browserbase identity before its encrypted session.
     // First login binds the identity; subsequent logins must match it.
@@ -559,6 +578,7 @@ export class Worker {
     if (persistentContext && bbSessionId && this.activeContextLease) {
       const releaseStartedAt = Date.now();
       logPostAuthStage('browserbase_release_requested');
+      if (usePersistentContext) logPersistentFastPath('P6_browserbase_release_requested');
       await this.linkedin.close();
       logPostAuthStage('browserbase_release_request_completed', releaseStartedAt);
       const synchronizationStartedAt = Date.now();
@@ -571,6 +591,7 @@ export class Worker {
         stage_duration_ms: synchronization.terminalObservedAt - synchronizationStartedAt,
       });
       logPostAuthStage('context_synchronization_completed', synchronizationStartedAt);
+      if (usePersistentContext) logPersistentFastPath('P7_context_synchronized');
       this.activeContextLease = null;
     }
 
@@ -582,6 +603,7 @@ export class Worker {
       profile_headline: result.identity?.profileHeadline,
     });
     logPostAuthStage('durable_account_connected');
+    if (usePersistentContext) logPersistentFastPath('P8_durable_connected');
 
     await onProgress('connected', 'LinkedIn connected successfully. Session encrypted and verified.');
 

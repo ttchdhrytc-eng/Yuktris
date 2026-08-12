@@ -1,0 +1,70 @@
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+
+const root = resolve(process.cwd(), '..', '..');
+const read = (path: string) => readFileSync(resolve(root, path), 'utf8');
+const worker = read('workers/linkedin-browser-worker/src/worker.ts');
+const linkedin = read('workers/linkedin-browser-worker/src/linkedin.ts');
+const onboarding = read('src/pages/OnboardingPage.tsx');
+const accounts = read('src/pages/LinkedInAccountsPage.tsx');
+const automation = read('src/pages/LinkedInAutomationPage.tsx');
+
+const tests: Array<[string, () => void]> = [
+  ['healthy Context is checked before auth UI is exposed', () => {
+    const check = worker.indexOf('checkExistingAuthenticatedSession');
+    const authRequired = worker.indexOf("onProgress('auth_required'", check);
+    const expose = worker.indexOf('browserbase_session_id: bbSessionId', check);
+    assert.ok(check > 0 && authRequired > check && expose > check);
+    assert.match(worker, /launch\(usePersistentContext \? undefined : onProgress/);
+  }],
+  ['healthy Context still verifies canonical identity and captures state', () => {
+    const check = linkedin.match(/async checkExistingAuthenticatedSession[\s\S]*?\n  \}/)?.[0] ?? '';
+    assert.match(check, /navigateWithRetry\(this\.page, LINKEDIN_FEED_URL/);
+    assert.match(check, /assessment\.state !== 'authenticated'/);
+    assert.match(check, /verifyIdentityWithRetry/);
+    assert.match(check, /getIdentityMismatch/);
+    assert.match(check, /captureSession/);
+  }],
+  ['healthy Context publishes neither auth_required nor Live View', () => {
+    const branch = worker.match(/if \(preflight\.result\)[\s\S]*?\} else \{/)?.[0] ?? '';
+    assert.doesNotMatch(branch, /auth_required|browserbase_live_url|browserbase_session_id: bbSessionId/);
+    assert.match(branch, /existing_session_authenticated/);
+  }],
+  ['logged out or expired Context explicitly requests human auth', () => {
+    assert.match(linkedin, /assessment\.state !== 'authenticated'[\s\S]*authRequired: true/);
+    assert.match(worker, /onProgress\('auth_required'/);
+  }],
+  ['checkpoint preserves the current page for passive human completion', () => {
+    assert.match(linkedin, /preserveCurrentPage: assessment\.state === 'checkpoint'/);
+    assert.match(worker, /preflight\.preserveCurrentPage/);
+  }],
+  ['identity mismatch cannot connect or request alternate login', () => {
+    assert.match(linkedin, /identityMismatch[\s\S]*nonRetryable: true/);
+    const mismatch = linkedin.indexOf('const identityMismatch = this.getIdentityMismatch', linkedin.indexOf('checkExistingAuthenticatedSession'));
+    const capture = linkedin.indexOf('const session = await this.captureSession()', mismatch);
+    assert.ok(mismatch > 0 && capture > mismatch);
+  }],
+  ['modal requires current-attempt auth_required', () => {
+    assert.match(onboarding, /event\.queue_item_id === linkedinQueueItemId[\s\S]*event\.step === 'auth_required'/);
+    assert.match(onboarding, /open=\{[\s\S]*linkedinAuthRequired \|\| linkedinIdentityVerified/);
+    assert.match(accounts, /open=\{authRequired \|\| identityVerified\}/);
+    assert.match(automation, /open=\{showPanel && \(authRequired \|\| identityVerified\)\}/);
+  }],
+  ['checking and interactive copy are distinct', () => {
+    assert.match(onboarding, /Checking your LinkedIn connection/);
+    assert.match(onboarding, /Preparing secure LinkedIn sign-in/);
+  }],
+  ['fast-path timing stages P0 through P10 are present', () => {
+    for (let stage = 0; stage <= 8; stage++) assert.match(worker, new RegExp(`P${stage}_`));
+    assert.match(onboarding, /P9_frontend_connected_observed/);
+    assert.match(onboarding, /P10_success_ui_rendered/);
+  }],
+];
+
+let failures = 0;
+for (const [name, test] of tests) {
+  try { test(); process.stdout.write(`PASS ${name}\n`); }
+  catch (error) { failures++; process.stderr.write(`FAIL ${name}: ${error instanceof Error ? error.message : String(error)}\n`); }
+}
+if (failures) process.exitCode = 1;
