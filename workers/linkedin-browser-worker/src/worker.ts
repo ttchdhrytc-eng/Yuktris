@@ -5,6 +5,7 @@ import { LinkedInBrowser, SessionData, ProgressStep, ProgressCallback, IntendedL
 import { encrypt, decrypt, getKeyId } from './session.js';
 import { browserbase, BrowserbaseError } from './browserbase.js';
 import { createHash } from 'node:crypto';
+import { ContextLeaseOwner, ContextRecord, LinkedInContextService, persistentContextsEnabled, sessionOptionsForAccount } from './linkedin-context.js';
 
 const CONNECTION_TIMEOUT = parseInt(process.env.CONNECTION_TIMEOUT_MS || '600000', 10);
 const TEST_CONNECTION_TIMEOUT = parseInt(process.env.TEST_CONNECTION_TIMEOUT_MS || '120000', 10);
@@ -20,6 +21,8 @@ export class Worker {
   private encryptionSecret: string;
   private queue: Queue;
   private linkedin: LinkedInBrowser;
+  private linkedinContexts: LinkedInContextService;
+  private activeContextLease: { context: ContextRecord; owner: ContextLeaseOwner } | null = null;
   private running = false;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private sessionHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
@@ -42,6 +45,7 @@ export class Worker {
 
     this.queue = new Queue(this.client, this.workerId, POLL_INTERVAL);
     this.linkedin = new LinkedInBrowser(this.client, true, this.encryptionSecret);
+    this.linkedinContexts = new LinkedInContextService(this.client);
   }
 
   getHealth(): { workerId: string; browserbase: boolean; running: boolean; currentTask: string | null } {
@@ -254,6 +258,13 @@ export class Worker {
           this.linkedin.cancel('Queue lease could not be renewed');
         }
       });
+      const active = this.activeContextLease;
+      if (active) void this.linkedinContexts.renew(active.context.id, active.owner).then((renewed) => {
+        if (!renewed) this.linkedin.cancel('Persistent Context lease ownership lost');
+      }).catch((error) => {
+        logger.warn('Persistent Context lease renewal failed', { error: this.sanitizeError(error) });
+        this.linkedin.cancel('Persistent Context lease could not be renewed');
+      });
     }, 30000);
     logger.info('Processing task', { id: item.id, action: item.action_type, workspace: item.workspace_id, account: item.account_id });
 
@@ -303,6 +314,13 @@ export class Worker {
       await this.linkedin.close().catch((error) => {
         logger.warn('Browser cleanup after task failed', { task_id: item.id, error: this.sanitizeError(error) });
       });
+      if (this.activeContextLease) {
+        const active = this.activeContextLease;
+        this.activeContextLease = null;
+        await this.linkedinContexts.release(active.context.id, active.owner).catch((error) => {
+          logger.warn('Persistent Context lease release failed', { error: this.sanitizeError(error) });
+        });
+      }
       if (item.action_type === 'linkedin_connect' && item.account_id) {
         await this.cleanupConnectionArtifacts(item.workspace_id, item.account_id).catch((error) => {
           logger.warn('Connection artifact cleanup failed', { account_id: item.account_id, error: this.sanitizeError(error) });
@@ -354,13 +372,25 @@ export class Worker {
 
     const onProgress = this.makeProgressCallback(workspaceId, accountId, item.id);
     const intendedIdentity = await this.loadIntendedIdentity(accountId, workspaceId);
+    const usePersistentContext = persistentContextsEnabled();
+    let persistentContext: ContextRecord | null = null;
+    let launchOptions = sessionOptionsForAccount(false);
+    if (usePersistentContext) {
+      const owner: ContextLeaseOwner = {
+        workspaceId, accountId, queueItemId: item.id, workerId: this.workerId, attemptId: item.attempt_id,
+      };
+      persistentContext = await this.linkedinContexts.ensureProvisioned(workspaceId, accountId);
+      persistentContext = await this.linkedinContexts.acquire(owner);
+      this.activeContextLease = { context: persistentContext, owner };
+      launchOptions = sessionOptionsForAccount(true, persistentContext);
+    }
 
     // STATE: authenticating (transition from IDLE)
     await this.updateAccount(accountId, { connection_state: 'authenticating', last_error: null, browserbase_session_id: null, browser_connected_at: null });
     await this.logSessionEvent(workspaceId, accountId, 'created', { action: 'linkedin_connect' });
 
     // ── Try session reuse first ──────────────────────────────────
-    const existingSession = await this.loadSessionForAccount(accountId);
+    const existingSession = usePersistentContext ? null : await this.loadSessionForAccount(accountId);
     if (existingSession) {
       logger.info('Found existing session, attempting reuse', { account_id: accountId });
       await onProgress('creating_session', 'Existing session found. Attempting to restore...');
@@ -402,7 +432,7 @@ export class Worker {
     logger.info('handleConnect: starting fresh login flow', { account_id: accountId });
 
     try {
-      await this.linkedin.launch(onProgress);
+      await this.linkedin.launch(onProgress, launchOptions);
     } catch (err) {
       const msg = this.sanitizeError(err);
       const retryable = err instanceof BrowserbaseError && ![401, 402, 403].includes(err.statusCode);
@@ -426,6 +456,10 @@ export class Worker {
       await onProgress('login_failed', msg);
       await this.queue.fail(item.id, msg, Date.now() - startTime, false);
       return;
+    }
+
+    if (persistentContext && bbSessionId && this.activeContextLease) {
+      await this.linkedinContexts.attachSession(persistentContext.id, bbSessionId, this.activeContextLease.owner);
     }
 
     // Store session ID + live URL in DB immediately so frontend can show "Open Browser"
@@ -507,6 +541,14 @@ export class Worker {
       p_status: 'completed',
       p_metadata: { session_id: sessionId },
     });
+
+    // Browserbase saves a persistent Context only after the provider session
+    // closes and its asynchronous synchronization has settled.
+    if (persistentContext && bbSessionId && this.activeContextLease) {
+      await this.linkedin.close();
+      await this.linkedinContexts.synchronize(persistentContext, bbSessionId, this.activeContextLease.owner);
+      this.activeContextLease = null;
+    }
 
     // STATE: AUTHENTICATED — only after session is saved AND verified
     await this.updateAccount(accountId, {

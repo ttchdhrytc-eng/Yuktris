@@ -4,6 +4,7 @@ const BROWSERBASE_API_URL = 'https://api.browserbase.com/v1';
 const BROWSERBASE_REQUEST_TIMEOUT_MS = 20000;
 const TRANSIENT_RETRY_DELAY_MS = 1500;
 const DEFAULT_VIEWPORT = { width: 1440, height: 900 } as const;
+const CONTEXT_SYNC_POLL_MS = 2000;
 
 async function browserbaseFetch(url: string, init: RequestInit = {}, timeoutMs = BROWSERBASE_REQUEST_TIMEOUT_MS): Promise<Response> {
   const controller = new AbortController();
@@ -26,6 +27,17 @@ export interface BrowserbaseSession {
   debugUrl: string;
   liveUrl: string;
   createdAt: string;
+}
+
+export interface BrowserbaseContext { id: string; }
+export interface CreateSessionOptions {
+  keepAlive?: boolean;
+  timeoutMs?: number;
+  proxies?: boolean;
+  viewport?: { width: number; height: number };
+  contextId?: string;
+  persistContext?: boolean;
+  requirePersistentContext?: boolean;
 }
 
 export class BrowserbaseError extends Error {
@@ -53,24 +65,29 @@ function isConfigured(): boolean {
   return !!(process.env.BROWSERBASE_API_KEY && process.env.BROWSERBASE_PROJECT_ID);
 }
 
-async function createSession(opts?: {
-  keepAlive?: boolean;
-  timeoutMs?: number;
-  proxies?: boolean;
-  viewport?: { width: number; height: number };
-}): Promise<BrowserbaseSession> {
+async function createSession(opts?: CreateSessionOptions): Promise<BrowserbaseSession> {
   const apiKey = getApiKey();
   const projectId = getProjectId();
   const viewport = opts?.viewport ?? DEFAULT_VIEWPORT;
+  if (opts?.requirePersistentContext && !opts.contextId) {
+    throw new BrowserbaseError('Persistent browser Context is required for this account', 409);
+  }
+  if (opts?.persistContext && !opts.contextId) {
+    throw new BrowserbaseError('Cannot persist a session without a browser Context', 400);
+  }
 
   const body: Record<string, unknown> = {
     projectId,
     keepAlive: opts?.keepAlive ?? true,
-    browserSettings: { viewport },
+    browserSettings: {
+      viewport,
+      solveCaptchas: false,
+      ...(opts?.contextId ? { context: { id: opts.contextId, persist: opts.persistContext ?? true } } : {}),
+    },
   ...(opts?.proxies ? { proxies: { type: 'browserbase' } } : {}),
   };
 
-  logger.info('Creating Browserbase session', { projectId, keepAlive: body.keepAlive, viewport });
+  logger.info('Creating Browserbase session', { keepAlive: body.keepAlive, viewport, persistentContext: !!opts?.contextId });
 
   let lastError: Error | null = null;
   for (let attempt = 0; attempt < 3; attempt++) {
@@ -169,7 +186,7 @@ async function createSession(opts?: {
     if (res.status === 402) throw new BrowserbaseError('Browserbase quota exceeded', 402);
     if (res.status === 429) {
       const waitMs = 10000 * (attempt + 1);
-      logger.warn('Browserbase rate limited, waiting before retry', { attempt: attempt + 1, waitMs, body: text.slice(0, 200) });
+      logger.warn('Browserbase rate limited, waiting before retry', { attempt: attempt + 1, waitMs });
       lastError = new BrowserbaseError('Browserbase rate limit exceeded', 429);
       await new Promise(r => setTimeout(r, waitMs));
       continue;
@@ -179,10 +196,50 @@ async function createSession(opts?: {
       await new Promise(resolve => setTimeout(resolve, TRANSIENT_RETRY_DELAY_MS * (attempt + 1)));
       continue;
     }
-    throw new BrowserbaseError(`Browserbase session creation failed: ${res.status} ${text}`, res.status);
+    throw new BrowserbaseError(`Browserbase session creation failed (${res.status})`, res.status);
   }
 
   throw lastError || new BrowserbaseError('Browserbase session creation failed after retries', 429);
+}
+
+async function createContext(): Promise<BrowserbaseContext> {
+  const res = await browserbaseFetch(`${BROWSERBASE_API_URL}/contexts`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-bb-api-key': getApiKey() },
+    body: JSON.stringify({ projectId: getProjectId() }),
+  });
+  if (!res.ok) throw new BrowserbaseError(`Browserbase Context creation failed (${res.status})`, res.status);
+  const data = await res.json() as { id?: string };
+  if (!data.id) throw new BrowserbaseError('Browserbase response missing Context id', 502);
+  return { id: data.id };
+}
+
+async function getContext(contextId: string): Promise<BrowserbaseContext> {
+  const res = await browserbaseFetch(`${BROWSERBASE_API_URL}/contexts/${encodeURIComponent(contextId)}`, {
+    headers: { 'x-bb-api-key': getApiKey() },
+  });
+  if (!res.ok) throw new BrowserbaseError(`Browserbase Context lookup failed (${res.status})`, res.status);
+  const data = await res.json() as { id?: string };
+  if (!data.id) throw new BrowserbaseError('Browserbase response missing Context id', 502);
+  return { id: data.id };
+}
+
+async function waitForSessionTerminal(sessionId: string, timeoutMs = 30000): Promise<'completed' | 'error'> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const state = await getSessionStatus(sessionId);
+    if (state === 'completed' || state === 'error') return state;
+    await new Promise(resolve => setTimeout(resolve, CONTEXT_SYNC_POLL_MS));
+  }
+  throw new BrowserbaseError('Browserbase session did not reach a terminal state before synchronization timeout', 504);
+}
+
+async function waitForContextSynchronization(sessionId: string, contextId: string, timeoutMs = 45000): Promise<void> {
+  const terminal = await waitForSessionTerminal(sessionId, timeoutMs);
+  if (terminal !== 'completed') throw new BrowserbaseError('Browserbase session ended with an error before Context synchronization', 502);
+  // Browserbase documents an asynchronous settle period after a persisted session closes.
+  await new Promise(resolve => setTimeout(resolve, 5000));
+  await getContext(contextId);
 }
 
 async function endSession(sessionId: string): Promise<void> {
@@ -209,9 +266,10 @@ async function getSessionStatus(sessionId: string): Promise<'running' | 'complet
     });
     if (!res.ok) return 'unknown';
     const data = await res.json() as { status?: string };
-    if (data.status === 'running') return 'running';
-    if (data.status === 'completed') return 'completed';
-    if (data.status === 'error') return 'error';
+    const status = data.status?.toLowerCase();
+    if (status === 'running' || status === 'pending') return 'running';
+    if (status === 'completed') return 'completed';
+    if (status === 'error' || status === 'timed_out') return 'error';
     return 'unknown';
   } catch {
     return 'unknown';
@@ -264,6 +322,10 @@ async function getLiveUrls(sessionId: string): Promise<{
 export const browserbase = {
   isConfigured,
   createSession,
+  createContext,
+  getContext,
+  waitForSessionTerminal,
+  waitForContextSynchronization,
   endSession,
   getSessionStatus,
   getDebugUrl,

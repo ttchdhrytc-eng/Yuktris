@@ -1,7 +1,7 @@
 import { chromium, Browser, BrowserContext, Page } from 'playwright';
 import { SupabaseClient } from '@supabase/supabase-js';
 import { logger } from './logger.js';
-import { browserbase, BrowserbaseError, BrowserbaseSession } from './browserbase.js';
+import { browserbase, BrowserbaseError, BrowserbaseSession, CreateSessionOptions } from './browserbase.js';
 
 const LINKEDIN_LOGIN_URL = 'https://www.linkedin.com/login';
 const LINKEDIN_FEED_URL = 'https://www.linkedin.com/feed';
@@ -164,7 +164,7 @@ export class LinkedInBrowser {
 
   // ── LAUNCH: Create Browserbase session + attach Playwright ────
 
-  async launch(onProgress?: ProgressCallback): Promise<void> {
+  async launch(onProgress?: ProgressCallback, sessionOptions: CreateSessionOptions = { keepAlive: true }): Promise<void> {
     this.cancellationReason = null;
     const useBrowserbase = browserbase.isConfigured();
 
@@ -180,7 +180,7 @@ export class LinkedInBrowser {
       if (onProgress) await onProgress('creating_session', 'Creating secure browser session...');
       logger.info('Creating Browserbase session');
 
-      this.bbSession = await browserbase.createSession({ keepAlive: true });
+      this.bbSession = await browserbase.createSession(sessionOptions);
 
       if (!this.bbSession?.id) {
         throw new Error('Browserbase session creation returned no session ID');
@@ -206,7 +206,7 @@ export class LinkedInBrowser {
         logger.warn('Browserbase CDP connection failed', { error: this.sanitizeError(msg) });
         await browserbase.endSession(this.bbSession.id).catch(() => {});
         this.bbSession = null;
-        if (this.localFallbackEnabled()) {
+        if (!sessionOptions.requirePersistentContext && this.localFallbackEnabled()) {
           await this.launchLocalChromium();
           return;
         }
@@ -227,7 +227,7 @@ export class LinkedInBrowser {
         logger.warn('Browserbase browser verification failed', { error: this.sanitizeError(msg) });
         await browserbase.endSession(this.bbSession.id).catch(() => {});
         this.bbSession = null;
-        if (this.localFallbackEnabled()) {
+        if (!sessionOptions.requirePersistentContext && this.localFallbackEnabled()) {
           await this.launchLocalChromium();
           return;
         }
@@ -240,7 +240,7 @@ export class LinkedInBrowser {
       const msg = err instanceof Error ? err.message : String(err);
       logger.warn('Browserbase launch failed', { error: this.sanitizeError(msg) });
       this.bbSession = null;
-      if (this.localFallbackEnabled()) {
+      if (!sessionOptions.requirePersistentContext && this.localFallbackEnabled()) {
         await this.launchLocalChromium();
         return;
       }

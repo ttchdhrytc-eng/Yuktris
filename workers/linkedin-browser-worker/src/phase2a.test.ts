@@ -137,7 +137,7 @@ const tests: Array<[string, () => void]> = [
   }],
   ['Browserbase login sessions use a creation-time desktop viewport', () => {
     assert.match(browserbase, /DEFAULT_VIEWPORT = \{ width: 1440, height: 900 \}/);
-    assert.match(browserbase, /browserSettings: \{ viewport \}/);
+    assert.match(browserbase, /browserSettings: \{[\s\S]{0,120}viewport/);
     assert.match(browserbase, /Creating Browserbase session[\s\S]*viewport/);
     const browserbaseContext = linkedin.match(/if \(this\.bbSession\)[\s\S]*?else \{\s*this\.context = await this\.browser\.newContext/)?.[0] ?? '';
     assert.doesNotMatch(browserbaseContext, /setViewportSize/);
