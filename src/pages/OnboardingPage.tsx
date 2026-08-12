@@ -23,7 +23,7 @@ import {
   type ActivationProgress,
 } from '@/services/activation';
 import { useConnectGoogle, useGoogleConnection } from '@/hooks/useGoogleAuth';
-import { useConnectLinkedIn, useLinkedInAccounts } from '@/hooks/useLinkedInBrowser';
+import { useConnectLinkedIn, useLinkedInAccounts, useLinkedInLoginAccess } from '@/hooks/useLinkedInBrowser';
 import { GOOGLE_SCOPES } from '@/types/google-auth';
 import { cn } from '@/lib/utils';
 
@@ -101,6 +101,7 @@ export function OnboardingPage() {
   const googleConnection = useGoogleConnection();
   const connectLinkedIn = useConnectLinkedIn();
   const linkedinAccounts = useLinkedInAccounts();
+  const linkedinLoginAccess = useLinkedInLoginAccess(linkedinAccountId);
   const { workspace, loading: wsLoading } = useWorkspace();
 
   const linkedinAccount = linkedinAccountId
@@ -114,6 +115,9 @@ export function OnboardingPage() {
     ['session_expired', 'session_invalid', 'disconnected'].includes(linkedinAccount.connection_state)
     || linkedinAccount.session_status === 'expired'
     || linkedinAccount.status === 'expired'
+    || (!!linkedinAccount.browser_connected_at
+      && ['pending', 'authenticating', 'requires_action'].includes(linkedinAccount.connection_state)
+      && Date.now() >= new Date(linkedinAccount.browser_connected_at).getTime() + 10 * 60 * 1000)
   );
   const linkedinFailed = !!linkedinAccount && (
     ['failed', 'restricted'].includes(linkedinAccount.connection_state)
@@ -402,6 +406,7 @@ export function OnboardingPage() {
               needsReconnect={linkedinExpired}
               connecting={connectLinkedIn.isPending}
               waiting={linkedinWaiting}
+              loginUrl={linkedinLoginAccess.data?.loginUrl ?? null}
               waitingMessage="Complete sign-in in the secure browser. This step will continue automatically after your LinkedIn identity and encrypted session are verified."
               error={connectLinkedIn.error
                 ? 'Failed to start LinkedIn connection. Please try again.'
@@ -783,7 +788,7 @@ export function OnboardingPage() {
 // GoogleConnectStep — Real OAuth verification
 // ============================================================
 
-function GoogleConnectStep({ icon: Icon, iconColor, iconBg, title, description, benefits, connected, needsReconnect, connecting, waiting = false, waitingMessage, error, onConnect, onReconnect, onBack, onNext }: {
+function GoogleConnectStep({ icon: Icon, iconColor, iconBg, title, description, benefits, connected, needsReconnect, connecting, waiting = false, waitingMessage, loginUrl, error, onConnect, onReconnect, onBack, onNext }: {
   icon: React.ComponentType<{ className?: string }>;
   iconColor: string;
   iconBg: string;
@@ -795,6 +800,7 @@ function GoogleConnectStep({ icon: Icon, iconColor, iconBg, title, description, 
   connecting: boolean;
   waiting?: boolean;
   waitingMessage?: string;
+  loginUrl?: string | null;
   error: string | null;
   onConnect: () => void;
   onReconnect: () => void;
@@ -845,12 +851,23 @@ function GoogleConnectStep({ icon: Icon, iconColor, iconBg, title, description, 
       )}
 
       {waiting && !connected && !needsReconnect && !error && (
-        <div className="flex items-center justify-center gap-3 rounded-xl border border-brand-500/20 bg-brand-500/10 p-4">
-          <RefreshCw className="h-5 w-5 animate-spin text-brand-400" />
-          <div>
-            <p className="text-sm font-medium text-brand-300">Waiting for LinkedIn sign-in</p>
-            <p className="mt-1 max-w-md text-xs leading-relaxed text-ink-400">{waitingMessage}</p>
+        <div className="space-y-3 rounded-xl border border-brand-500/20 bg-brand-500/10 p-4">
+          <div className="flex items-center justify-center gap-3">
+            <RefreshCw className="h-5 w-5 animate-spin text-brand-400" />
+            <div>
+              <p className="text-sm font-medium text-brand-300">{loginUrl ? 'LinkedIn sign-in ready' : 'Waiting for LinkedIn sign-in'}</p>
+              <p className="mt-1 max-w-md text-xs leading-relaxed text-ink-400">
+                {loginUrl ? 'Sign in directly to LinkedIn in the secure browser. Yuktris never sees or stores your LinkedIn password.' : waitingMessage}
+              </p>
+            </div>
           </div>
+          {loginUrl && (
+            <div className="flex justify-center">
+              <Button variant="glow" size="lg" onClick={() => window.open(loginUrl, '_blank', 'noopener,noreferrer')}>
+                <Linkedin className="h-4 w-4" /> Open secure LinkedIn login
+              </Button>
+            </div>
+          )}
         </div>
       )}
 

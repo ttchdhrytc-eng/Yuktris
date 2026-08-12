@@ -37,6 +37,26 @@ export function useLinkedInAccounts() {
   });
 }
 
+export function useLinkedInLoginAccess(accountId: string | null) {
+  const { workspace } = useWorkspace();
+  return useQuery<{ loginUrl: string; expiresAt: string } | null>({
+    queryKey: ['linkedin-login-access', workspace?.id, accountId],
+    queryFn: async () => {
+      if (!workspace || !accountId) return null;
+      const { data, error } = await supabase.rpc('get_linkedin_login_access', {
+        p_workspace_id: workspace.id,
+        p_account_id: accountId,
+      });
+      if (error) throw error;
+      const access = Array.isArray(data) ? data[0] : data;
+      if (!access?.login_url || !access?.expires_at) return null;
+      return { loginUrl: access.login_url as string, expiresAt: access.expires_at as string };
+    },
+    enabled: !!workspace && !!accountId,
+    refetchInterval: 2000,
+  });
+}
+
 export function useCreateLinkedInAccount() {
   const { workspace } = useWorkspace();
   const queryClient = useQueryClient();

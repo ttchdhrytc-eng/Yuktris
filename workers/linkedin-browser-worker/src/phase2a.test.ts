@@ -6,6 +6,7 @@ const root = resolve(process.cwd(), '..', '..');
 const read = (path: string) => readFileSync(resolve(root, path), 'utf8');
 const migration = read('supabase/migrations/20260810090000_phase2a_linkedin_connection_hardening.sql');
 const identityMigration = read('supabase/migrations/20260812150000_linkedin_post_auth_identity_binding.sql');
+const loginAccessMigration = read('supabase/migrations/20260812160000_linkedin_authorized_live_login_access.sql');
 const linkedin = read('workers/linkedin-browser-worker/src/linkedin.ts');
 const worker = read('workers/linkedin-browser-worker/src/worker.ts');
 const browserbase = read('workers/linkedin-browser-worker/src/browserbase.ts');
@@ -103,6 +104,28 @@ const tests: Array<[string, () => void]> = [
   ['LinkedIn start does not launch or derive Google identity', () => {
     const linkedinStep = onboardingPage.match(/STEP 2: LINKEDIN[\s\S]*?STEP 3: GMAIL/)?.[0] ?? '';
     assert.doesNotMatch(linkedinStep, /connectGoogle\.mutate|linkedinEmail.*google|setStep\('gmail'\).*onSuccess/);
+  }],
+  ['authorized workspace member can obtain only their active interactive login URL', () => {
+    assert.match(loginAccessMigration, /auth\.uid\(\) IS NULL OR NOT public\.is_workspace_member\(p_workspace_id\)/);
+    assert.match(loginAccessMigration, /a\.id=p_account_id AND a\.workspace_id=p_workspace_id/);
+    assert.match(loginAccessMigration, /i\.workspace_id=p_workspace_id[\s\S]*i\.account_id=p_account_id/);
+    assert.match(loginAccessMigration, /browserbase_session_id'=v_session_id/);
+    assert.match(loginAccessMigration, /debugger|browserbase_live_url/);
+    assert.match(loginAccessMigration, /\^https:\/\//);
+    assert.doesNotMatch(loginAccessMigration, /wsEndpoint|connectUrl[^|]/);
+  }],
+  ['different workspace and expired live sessions cannot obtain login access', () => {
+    assert.match(loginAccessMigration, /WHERE a\.id=p_account_id AND a\.workspace_id=p_workspace_id/);
+    assert.match(loginAccessMigration, /v_expires_at := v_connected_at \+ interval '10 minutes'/);
+    assert.match(loginAccessMigration, /IF now\(\) >= v_expires_at THEN RETURN/);
+    assert.match(loginAccessMigration, /REVOKE EXECUTE ON FUNCTION public\.get_linkedin_login_access\(uuid,uuid\) FROM PUBLIC, anon/);
+  }],
+  ['onboarding explicitly opens Browserbase login and keeps polling', () => {
+    assert.match(onboardingPage, /useLinkedInLoginAccess\(linkedinAccountId\)/);
+    assert.match(onboardingPage, /Open secure LinkedIn login/);
+    assert.match(onboardingPage, /window\.open\(loginUrl, '_blank', 'noopener,noreferrer'\)/);
+    assert.match(hook, /get_linkedin_login_access/);
+    assert.match(hook, /refetchInterval: 2000/);
   }],
   ['strict leases gate completion failure and waiting', () => {
     assert.ok((migration.match(/attempt_id\s*=\s*p_attempt_id AND lease_expires_at > now\(\)/g) ?? []).length >= 3);
