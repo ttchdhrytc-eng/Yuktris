@@ -23,7 +23,7 @@ import {
   type ActivationProgress,
 } from '@/services/activation';
 import { useConnectGoogle, useGoogleConnection } from '@/hooks/useGoogleAuth';
-import { useConnectLinkedIn, useLinkedInAccounts, useLinkedInLoginAccess } from '@/hooks/useLinkedInBrowser';
+import { useAuthInteractions, useConnectLinkedIn, useLinkedInAccounts, useLinkedInLoginAccess } from '@/hooks/useLinkedInBrowser';
 import { GOOGLE_SCOPES } from '@/types/google-auth';
 import { cn } from '@/lib/utils';
 
@@ -102,6 +102,7 @@ export function OnboardingPage() {
   const connectLinkedIn = useConnectLinkedIn();
   const linkedinAccounts = useLinkedInAccounts();
   const linkedinLoginAccess = useLinkedInLoginAccess(linkedinAccountId);
+  const linkedinAuthInteractions = useAuthInteractions(linkedinAccountId);
   const { workspace, loading: wsLoading } = useWorkspace();
 
   const linkedinAccount = linkedinAccountId
@@ -117,7 +118,7 @@ export function OnboardingPage() {
     || linkedinAccount.status === 'expired'
     || (!!linkedinAccount.browser_connected_at
       && ['pending', 'authenticating', 'requires_action'].includes(linkedinAccount.connection_state)
-      && Date.now() >= new Date(linkedinAccount.browser_connected_at).getTime() + 10 * 60 * 1000)
+      && Date.now() >= new Date(linkedinAccount.browser_connected_at).getTime() + 30 * 60 * 1000)
   );
   const linkedinFailed = !!linkedinAccount && (
     ['failed', 'restricted'].includes(linkedinAccount.connection_state)
@@ -125,6 +126,13 @@ export function OnboardingPage() {
   );
   const linkedinWaiting = !!linkedinAccountId && !connectLinkedIn.isPending
     && !linkedinConnected && !linkedinExpired && !linkedinFailed;
+  const linkedinChallenges = linkedinAuthInteractions.data
+    ?.filter((event) => event.interaction_type === 'challenge' && event.status === 'pending') ?? [];
+  const linkedinChallenge = linkedinChallenges[linkedinChallenges.length - 1] ?? null;
+  const latestLinkedinProgress = linkedinAuthInteractions.data
+    ?.filter((event) => event.interaction_type === 'progress')
+    .slice(-1)[0] ?? null;
+  const linkedinVerifyingIdentity = ['verifying_authentication', 'saving_session'].includes(latestLinkedinProgress?.step ?? '');
 
   const googleConnected = googleConnection.data?.account?.status === 'connected' && !googleConnection.data.needsReconnect;
   const googleNeedsReconnect = googleConnection.data?.needsReconnect ?? false;
@@ -407,6 +415,8 @@ export function OnboardingPage() {
               connecting={connectLinkedIn.isPending}
               waiting={linkedinWaiting}
               loginUrl={linkedinLoginAccess.data?.loginUrl ?? null}
+              securityCheckRequired={!!linkedinChallenge && linkedinAccount?.connection_state === 'requires_action'}
+              verifyingIdentity={linkedinVerifyingIdentity}
               waitingMessage="Complete sign-in in the secure browser. This step will continue automatically after your LinkedIn identity and encrypted session are verified."
               error={connectLinkedIn.error
                 ? 'Failed to start LinkedIn connection. Please try again.'
@@ -788,7 +798,7 @@ export function OnboardingPage() {
 // GoogleConnectStep — Real OAuth verification
 // ============================================================
 
-function GoogleConnectStep({ icon: Icon, iconColor, iconBg, title, description, benefits, connected, needsReconnect, connecting, waiting = false, waitingMessage, loginUrl, error, onConnect, onReconnect, onBack, onNext }: {
+function GoogleConnectStep({ icon: Icon, iconColor, iconBg, title, description, benefits, connected, needsReconnect, connecting, waiting = false, waitingMessage, loginUrl, securityCheckRequired = false, verifyingIdentity = false, error, onConnect, onReconnect, onBack, onNext }: {
   icon: React.ComponentType<{ className?: string }>;
   iconColor: string;
   iconBg: string;
@@ -801,6 +811,8 @@ function GoogleConnectStep({ icon: Icon, iconColor, iconBg, title, description, 
   waiting?: boolean;
   waitingMessage?: string;
   loginUrl?: string | null;
+  securityCheckRequired?: boolean;
+  verifyingIdentity?: boolean;
   error: string | null;
   onConnect: () => void;
   onReconnect: () => void;
@@ -855,16 +867,20 @@ function GoogleConnectStep({ icon: Icon, iconColor, iconBg, title, description, 
           <div className="flex items-center justify-center gap-3">
             <RefreshCw className="h-5 w-5 animate-spin text-brand-400" />
             <div>
-              <p className="text-sm font-medium text-brand-300">{loginUrl ? 'LinkedIn sign-in ready' : 'Waiting for LinkedIn sign-in'}</p>
+              <p className="text-sm font-medium text-brand-300">
+                {securityCheckRequired ? 'LinkedIn security verification required' : verifyingIdentity ? 'Verifying LinkedIn identity' : loginUrl ? 'LinkedIn sign-in ready' : 'Preparing secure browser'}
+              </p>
               <p className="mt-1 max-w-md text-xs leading-relaxed text-ink-400">
-                {loginUrl ? 'Sign in directly to LinkedIn in the secure browser. Yuktris never sees or stores your LinkedIn password.' : waitingMessage}
+                {securityCheckRequired
+                  ? 'LinkedIn needs an additional security check. Complete it directly in the same secure browser and keep it open; Yuktris remains passive and never collects verification codes.'
+                  : loginUrl ? 'Sign in directly to LinkedIn in the secure browser. Yuktris never sees or stores your LinkedIn password.' : waitingMessage}
               </p>
             </div>
           </div>
           {loginUrl && (
             <div className="flex justify-center">
               <Button variant="glow" size="lg" onClick={() => window.open(loginUrl, '_blank', 'noopener,noreferrer')}>
-                <Linkedin className="h-4 w-4" /> Open secure LinkedIn login
+                <Linkedin className="h-4 w-4" /> {securityCheckRequired ? 'Continue LinkedIn sign-in' : 'Open secure LinkedIn login'}
               </Button>
             </div>
           )}

@@ -3,6 +3,7 @@ import { logger } from './logger.js';
 const BROWSERBASE_API_URL = 'https://api.browserbase.com/v1';
 const BROWSERBASE_REQUEST_TIMEOUT_MS = 20000;
 const TRANSIENT_RETRY_DELAY_MS = 1500;
+const DEFAULT_VIEWPORT = { width: 1440, height: 900 } as const;
 
 async function browserbaseFetch(url: string, init: RequestInit = {}, timeoutMs = BROWSERBASE_REQUEST_TIMEOUT_MS): Promise<Response> {
   const controller = new AbortController();
@@ -56,17 +57,20 @@ async function createSession(opts?: {
   keepAlive?: boolean;
   timeoutMs?: number;
   proxies?: boolean;
+  viewport?: { width: number; height: number };
 }): Promise<BrowserbaseSession> {
   const apiKey = getApiKey();
   const projectId = getProjectId();
+  const viewport = opts?.viewport ?? DEFAULT_VIEWPORT;
 
   const body: Record<string, unknown> = {
     projectId,
     keepAlive: opts?.keepAlive ?? true,
+    browserSettings: { viewport },
   ...(opts?.proxies ? { proxies: { type: 'browserbase' } } : {}),
   };
 
-  logger.info('Creating Browserbase session', { projectId, keepAlive: body.keepAlive });
+  logger.info('Creating Browserbase session', { projectId, keepAlive: body.keepAlive, viewport });
 
   let lastError: Error | null = null;
   for (let attempt = 0; attempt < 3; attempt++) {

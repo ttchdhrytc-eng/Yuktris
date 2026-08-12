@@ -7,6 +7,7 @@ const read = (path: string) => readFileSync(resolve(root, path), 'utf8');
 const migration = read('supabase/migrations/20260810090000_phase2a_linkedin_connection_hardening.sql');
 const identityMigration = read('supabase/migrations/20260812150000_linkedin_post_auth_identity_binding.sql');
 const loginAccessMigration = read('supabase/migrations/20260812160000_linkedin_authorized_live_login_access.sql');
+const continuityMigration = read('supabase/migrations/20260812170000_linkedin_human_auth_continuity.sql');
 const linkedin = read('workers/linkedin-browser-worker/src/linkedin.ts');
 const worker = read('workers/linkedin-browser-worker/src/worker.ts');
 const browserbase = read('workers/linkedin-browser-worker/src/browserbase.ts');
@@ -95,7 +96,7 @@ const tests: Array<[string, () => void]> = [
     assert.match(onboardingPage, /session_status === 'connected'/);
     assert.match(onboardingPage, /status === 'active'/);
     assert.match(onboardingPage, /linkedinAccount\.profile_url/);
-    assert.match(onboardingPage, /Waiting for LinkedIn sign-in/);
+    assert.match(onboardingPage, /Preparing secure browser/);
     const startSuccess = onboardingPage.match(/onSuccess: \(\{ accountId \}\)[\s\S]*?onError:/)?.[0] ?? '';
     assert.doesNotMatch(startSuccess, /setStep\('gmail'\)/);
     assert.match(onboardingPage, /if \(step !== 'linkedin' \|\| !linkedinConnected/);
@@ -120,12 +121,66 @@ const tests: Array<[string, () => void]> = [
     assert.match(loginAccessMigration, /IF now\(\) >= v_expires_at THEN RETURN/);
     assert.match(loginAccessMigration, /REVOKE EXECUTE ON FUNCTION public\.get_linkedin_login_access\(uuid,uuid\) FROM PUBLIC, anon/);
   }],
+  ['challenge live access remains workspace-authorized and bounded to thirty minutes', () => {
+    assert.match(continuityMigration, /auth\.uid\(\) IS NULL OR NOT public\.is_workspace_member\(p_workspace_id\)/);
+    assert.match(continuityMigration, /a\.id=p_account_id AND a\.workspace_id=p_workspace_id/);
+    assert.match(continuityMigration, /interval '30 minutes'/);
+    assert.match(continuityMigration, /v_connection_state NOT IN \('pending','authenticating','requires_action'\)/);
+    assert.match(continuityMigration, /REVOKE EXECUTE ON FUNCTION public\.get_linkedin_login_access\(uuid,uuid\) FROM PUBLIC, anon/);
+  }],
   ['onboarding explicitly opens Browserbase login and keeps polling', () => {
     assert.match(onboardingPage, /useLinkedInLoginAccess\(linkedinAccountId\)/);
     assert.match(onboardingPage, /Open secure LinkedIn login/);
     assert.match(onboardingPage, /window\.open\(loginUrl, '_blank', 'noopener,noreferrer'\)/);
     assert.match(hook, /get_linkedin_login_access/);
     assert.match(hook, /refetchInterval: 2000/);
+  }],
+  ['Browserbase login sessions use a creation-time desktop viewport', () => {
+    assert.match(browserbase, /DEFAULT_VIEWPORT = \{ width: 1440, height: 900 \}/);
+    assert.match(browserbase, /browserSettings: \{ viewport \}/);
+    assert.match(browserbase, /Creating Browserbase session[\s\S]*viewport/);
+    const browserbaseContext = linkedin.match(/if \(this\.bbSession\)[\s\S]*?else \{\s*this\.context = await this\.browser\.newContext/)?.[0] ?? '';
+    assert.doesNotMatch(browserbaseContext, /setViewportSize/);
+  }],
+  ['onboarding gives passive security-check guidance in the same live session', () => {
+    assert.match(onboardingPage, /useAuthInteractions\(linkedinAccountId\)/);
+    assert.match(onboardingPage, /LinkedIn security verification required/);
+    assert.match(onboardingPage, /Yuktris remains passive and never collects verification codes/);
+    assert.match(onboardingPage, /Continue LinkedIn sign-in/);
+    assert.doesNotMatch(onboardingPage, /solveCaptcha|Submit Code|otp_code|captcha_solution/);
+  }],
+  ['challenge polling pins one page and does not focus or navigate it', () => {
+    assert.match(linkedin, /let pinnedChallengePage: Page \| null = null/);
+    assert.match(linkedin, /assessAuthentication\(pinnedChallengePage \?\? undefined, pinnedChallengePage === null\)/);
+    assert.match(linkedin, /detectChallengeDetailed\(pinnedChallengePage \?\? undefined\)/);
+    assert.match(linkedin, /if \(focusSelectedPage\) await selected\.bringToFront/);
+    const challengeWait = linkedin.match(/private async waitForAuthenticationWithChallenges[\s\S]*?private async detectChallengeDetailed/)?.[0] ?? '';
+    assert.doesNotMatch(challengeWait, /\.goto\(|\.reload\(|\.click\(|\.fill\(|\.type\(|\.press\(/);
+  }],
+  ['challenge state is real and human window is extended but bounded', () => {
+    assert.match(linkedin, /waiting_for_login: \['challenge_detected'/);
+    assert.match(linkedin, /challenge_detected: \['waiting_for_user'/);
+    assert.match(linkedin, /waiting_for_user: \['waiting_for_login', 'challenge_detected', 'verifying_authentication'/);
+    assert.match(linkedin, /HUMAN_CHALLENGE_EXTENSION_MS = 20 \* 60 \* 1000/);
+    assert.match(linkedin, /MAX_AUTH_ATTEMPT_LIFETIME_MS = 30 \* 60 \* 1000/);
+    assert.match(linkedin, /Math\.min\(now \+ HUMAN_CHALLENGE_EXTENSION_MS, absoluteDeadline\)/);
+    assert.match(worker, /step === 'challenge_detected' \|\| step === 'waiting_for_user'[\s\S]*connection_state: 'requires_action'/);
+  }],
+  ['active human challenge fails rather than replacing its browser session', () => {
+    const challengeWait = linkedin.match(/private async waitForAuthenticationWithChallenges[\s\S]*?private async detectChallengeDetailed/)?.[0] ?? '';
+    assert.match(challengeWait, /Secure LinkedIn browser session was lost/);
+    assert.match(challengeWait, /LinkedIn security-check page was closed/);
+    assert.doesNotMatch(challengeWait, /createSession|\.launch\(|newContext\(|newPage\(/);
+  }],
+  ['successful human login does not create an immediate second provider session', () => {
+    const connectFlow = linkedin.match(/async connect\([\s\S]*?async connectWithSession/)?.[0] ?? '';
+    assert.doesNotMatch(connectFlow, /const validator = new LinkedInBrowser|Starting session restore test|validator\.launch/);
+    assert.match(connectFlow, /const identity = await this\.verifyIdentity\(\)/);
+    assert.match(connectFlow, /const session = await this\.captureSession\(\)/);
+    const bind = worker.indexOf('await this.bindAuthenticatedIdentity(workspaceId, accountId, result.identity?.profileUrl)');
+    const save = worker.indexOf('await this.saveSession(workspaceId, accountId, result.session!)');
+    const connected = worker.indexOf("connection_state: 'connected'", save);
+    assert.ok(bind > 0 && save > bind && connected > save);
   }],
   ['strict leases gate completion failure and waiting', () => {
     assert.ok((migration.match(/attempt_id\s*=\s*p_attempt_id AND lease_expires_at > now\(\)/g) ?? []).length >= 3);

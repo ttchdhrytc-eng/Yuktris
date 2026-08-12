@@ -318,6 +318,11 @@ export class Worker {
     return async (step: ProgressStep, message: string, metadata?: Record<string, unknown>) => {
       logger.info('Progress', { step, message, account_id: accountId });
       try {
+        if (step === 'challenge_detected' || step === 'waiting_for_user') {
+          await this.updateAccount(accountId, { connection_state: 'requires_action', last_error: null });
+        } else if (step === 'waiting_for_login' || step === 'verifying_authentication' || step === 'saving_session') {
+          await this.updateAccount(accountId, { connection_state: 'authenticating', last_error: null });
+        }
         await this.client.rpc('insert_auth_interaction', {
           p_workspace_id: workspaceId,
           p_account_id: accountId,
