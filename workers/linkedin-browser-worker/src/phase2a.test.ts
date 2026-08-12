@@ -175,7 +175,7 @@ const tests: Array<[string, () => void]> = [
   ['successful human login does not create an immediate second provider session', () => {
     const connectFlow = linkedin.match(/async connect\([\s\S]*?async connectWithSession/)?.[0] ?? '';
     assert.doesNotMatch(connectFlow, /const validator = new LinkedInBrowser|Starting session restore test|validator\.launch/);
-    assert.match(connectFlow, /const identity = await this\.verifyIdentity\(\)/);
+    assert.match(connectFlow, /const identity = await this\.verifyIdentityWithRetry\(queueItemId, workspaceId, accountId\)/);
     assert.match(connectFlow, /const session = await this\.captureSession\(\)/);
     const bind = worker.indexOf('await this.bindAuthenticatedIdentity(workspaceId, accountId, result.identity?.profileUrl)');
     const save = worker.indexOf('await this.saveSession(workspaceId, accountId, result.session!)');

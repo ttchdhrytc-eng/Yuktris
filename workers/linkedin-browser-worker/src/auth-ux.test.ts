@@ -33,7 +33,7 @@ const tests: Array<[string, () => void]> = [
     assert.match(hook, /p_account_id: accountId/);
   }],
   ['identity_verified follows canonical identity and mismatch checks', () => {
-    const verify = linkedin.indexOf('const identity = await this.verifyIdentity()');
+    const verify = linkedin.indexOf('const identity = await this.verifyIdentityWithRetry(queueItemId, workspaceId, accountId)');
     const mismatch = linkedin.indexOf('const identityMismatch = this.getIdentityMismatch', verify);
     const emit = linkedin.indexOf("onProgress('identity_verified'", mismatch);
     const capture = linkedin.indexOf('const session = await this.captureSession()', emit);
@@ -63,7 +63,7 @@ const tests: Array<[string, () => void]> = [
     assert.match(accounts, /event\.queue_item_id === currentQueueItemId/);
   }],
   ['finishing state remains while durable backend finalizes', () => {
-    assert.match(modal, /LinkedIn connected\. Finishing secure setup/);
+    assert.match(modal, /Securing your LinkedIn connection/);
     const revoke = worker.indexOf('browserbase_session_id: null');
     const save = worker.indexOf('await this.saveSession', revoke);
     const connected = worker.indexOf("connection_state: 'connected'", save);

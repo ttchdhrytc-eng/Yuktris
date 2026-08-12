@@ -12,6 +12,7 @@
     "test:persistent-context": "npm run build && node dist/persistent-context.test.js",
     "test:persistent-context-a2": "npm run build && node dist/persistent-context-a2.test.js",
     "test:auth-ux": "npm run build && node dist/auth-ux.test.js",
+    "test:post-auth-runtime": "npm run build && node dist/post-auth-runtime.test.js",
     "install-browser": "echo 'No local browser needed — using Browserbase'"
   },
   "dependencies": {

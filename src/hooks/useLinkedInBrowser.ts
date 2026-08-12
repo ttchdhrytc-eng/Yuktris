@@ -602,10 +602,10 @@ export function useAuthInteractions(accountId: string | null) {
         .select('*')
         .eq('workspace_id', workspace.id)
         .eq('account_id', accountId)
-        .order('created_at', { ascending: true })
+        .order('created_at', { ascending: false })
         .limit(50);
       if (error) throw error;
-      return (data ?? []) as LinkedInAuthInteraction[];
+      return ((data ?? []) as LinkedInAuthInteraction[]).reverse();
     },
     enabled: !!workspace && !!accountId,
     refetchInterval: 2000,

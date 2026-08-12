@@ -33,13 +33,13 @@ export function SecureLinkedInAuthModal({ open, loginUrl, identityVerified, secu
             <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-[#0A66C2]/15"><Linkedin className="h-5 w-5 text-[#4b9ee8]" /></div>
             <div><h2 className="text-sm font-semibold text-ink-50">Secure LinkedIn sign-in</h2><p className="text-xs text-ink-400">Enter credentials only on linkedin.com. Yuktris never sees or stores your password.</p></div>
           </div>
-          <Button variant="ghost" size="sm" onClick={onCancel}><X className="h-4 w-4" /> Cancel</Button>
+          {!covered && <Button variant="ghost" size="sm" onClick={onCancel}><X className="h-4 w-4" /> Cancel</Button>}
         </header>
         <div className="relative min-h-0 flex-1 bg-maroon-950">
           {iframeMounted && safeUrl && <iframe title="LinkedIn secure authentication" src={safeUrl} className="h-full w-full border-0" sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-modals allow-downloads" allow="clipboard-read; clipboard-write" referrerPolicy="no-referrer" />}
           {(!safeUrl || covered) && <div className="absolute inset-0 z-10 flex items-center justify-center bg-maroon-950 px-6 text-center"><div className="max-w-md space-y-3">
             {covered ? <ShieldCheck className="mx-auto h-10 w-10 text-success-500" /> : <Loader2 className="mx-auto h-9 w-9 animate-spin text-brand-300" />}
-            <p className="text-base font-semibold text-ink-50">{covered ? 'LinkedIn connected. Finishing secure setup…' : 'Preparing secure LinkedIn sign-in…'}</p>
+            <p className="text-base font-semibold text-ink-50">{covered ? 'Securing your LinkedIn connection...' : 'Preparing secure LinkedIn sign-in...'}</p>
             <p className="text-sm text-ink-400">{covered ? 'You can safely remain in Yuktris while encrypted session setup completes.' : 'The secure LinkedIn authentication surface will appear here.'}</p>
           </div></div>}
         </div>

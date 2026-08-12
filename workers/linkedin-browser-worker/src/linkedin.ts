@@ -17,6 +17,8 @@ const TRANSIENT_RETRY_DELAY_MS = 1500;
 const HUMAN_CHALLENGE_EXTENSION_MS = 20 * 60 * 1000;
 const MAX_AUTH_ATTEMPT_LIFETIME_MS = 30 * 60 * 1000;
 const CHALLENGE_DISAPPEAR_GRACE_MS = 10 * 1000;
+const IDENTITY_RESOLUTION_ATTEMPTS = 4;
+const IDENTITY_RESOLUTION_DELAY_MS = 2000;
 
 async function withTimeout<T>(operation: Promise<T>, timeoutMs: number, message: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -44,6 +46,37 @@ export interface AuthenticationAssessment {
   confidence: 'high' | 'medium' | 'low';
   url: string;
   signals: string[];
+}
+
+export interface AuthenticationSignals {
+  isCheckpoint: boolean;
+  isLogin: boolean;
+  isAuthenticatedRoute: boolean;
+  loginForm: boolean;
+  checkpointControl: boolean;
+  globalNav: boolean;
+  meControl: boolean;
+  feedContent: boolean;
+  hasSessionCookie: boolean;
+}
+
+export function classifyLinkedInAuthentication(signals: AuthenticationSignals): Pick<AuthenticationAssessment, 'state' | 'confidence'> {
+  if (signals.isCheckpoint || signals.checkpointControl) return { state: 'checkpoint', confidence: 'high' };
+  if (signals.loginForm && !signals.globalNav) {
+    return { state: signals.isLogin ? 'unauthenticated' : 'login_in_progress', confidence: 'high' };
+  }
+  const strongUiSignal = signals.globalNav && signals.meControl;
+  const contentSignal = signals.globalNav && signals.feedContent;
+  // A LinkedIn session cookie plus an authenticated product route is strong
+  // evidence even when LinkedIn's frequently-changing feed DOM lacks legacy
+  // navigation selectors. A route alone is never sufficient.
+  if (signals.hasSessionCookie && (signals.isAuthenticatedRoute || strongUiSignal || contentSignal)) {
+    return { state: 'authenticated', confidence: 'high' };
+  }
+  if ((strongUiSignal || contentSignal) && !signals.isLogin) return { state: 'authenticated', confidence: 'medium' };
+  if (signals.isLogin && signals.hasSessionCookie) return { state: 'login_in_progress', confidence: 'medium' };
+  if (signals.isLogin) return { state: 'unauthenticated', confidence: 'medium' };
+  return { state: 'unknown', confidence: 'low' };
 }
 
 export interface IntendedLinkedInIdentity {
@@ -333,6 +366,14 @@ export class LinkedInBrowser {
     try { return new URL(url).hostname; } catch { return 'non-http'; }
   }
 
+  private safeOrigin(url: string): string {
+    try { return new URL(url).origin; } catch { return 'non-http'; }
+  }
+
+  private safePathname(url: string): string {
+    try { return new URL(url).pathname; } catch { return ''; }
+  }
+
   private selectBestPage(pages: Page[]): Page | null {
     const livePages = pages.filter(page => this.isUsablePage(page));
     if (livePages.length === 0) return null;
@@ -599,7 +640,7 @@ export class LinkedInBrowser {
       transition('verifying_identity');
 
       // ── Verify identity ────────────────────────────────────────
-      const identity = await this.verifyIdentity();
+      const identity = await this.verifyIdentityWithRetry(queueItemId, workspaceId, accountId);
       if (!identity) {
         transition('failed');
         return { success: false, error: 'Identity verification failed — could not read LinkedIn profile' };
@@ -609,8 +650,14 @@ export class LinkedInBrowser {
         transition('failed');
         return { success: false, error: identityMismatch, nonRetryable: true, authState: 'authenticated' };
       }
-      logger.info('Identity verified', { name: identity.profileName, url: identity.profileUrl });
+      logger.info('Identity verified', { canonical_identity_found: !!identity.profileUrl });
       if (onProgress) await onProgress('identity_verified', 'LinkedIn identity verified. Closing secure sign-in view...');
+      logger.info('Identity verified progress emitted', {
+        queue_item_id: queueItemId,
+        workspace_id: workspaceId,
+        account_id: accountId,
+        progress_step: 'identity_verified',
+      });
 
       // ── Capture session ────────────────────────────────────────
       transition('capturing_session');
@@ -718,6 +765,7 @@ export class LinkedInBrowser {
     const signals: string[] = [];
     const isCheckpointUrl = lowerUrl.includes('/checkpoint') || lowerUrl.includes('/challenge') || lowerUrl.includes('/captcha');
     const isLoginUrl = lowerUrl.includes('/login') || lowerUrl.includes('/uas/login') || lowerUrl.includes('/signin');
+    const isAuthenticatedRoute = /^\/(feed|mynetwork|jobs|messaging|notifications|in)(\/|$)/i.test(new URL(url).pathname);
 
     if (isCheckpointUrl) signals.push('checkpoint_url');
     if (isLoginUrl) signals.push('login_url');
@@ -762,21 +810,18 @@ export class LinkedInBrowser {
       return { state: isLoginUrl ? 'unauthenticated' : 'login_in_progress', confidence: 'high', url, signals };
     }
 
-    const strongUiSignal = selectorFlags.globalNav && selectorFlags.meControl;
-    const contentSignal = selectorFlags.globalNav && selectorFlags.feedContent;
-    if (hasSessionCookie && (strongUiSignal || contentSignal)) {
-      return { state: 'authenticated', confidence: 'high', url, signals };
-    }
-    if ((strongUiSignal || contentSignal) && !isLoginUrl) {
-      return { state: 'authenticated', confidence: 'medium', url, signals };
-    }
-    if (isLoginUrl && hasSessionCookie) {
-      return { state: 'login_in_progress', confidence: 'medium', url, signals };
-    }
-    if (isLoginUrl) {
-      return { state: 'unauthenticated', confidence: 'medium', url, signals };
-    }
-    return { state: 'unknown', confidence: 'low', url, signals };
+    if (isAuthenticatedRoute) signals.push('authenticated_route');
+    return { ...classifyLinkedInAuthentication({
+      isCheckpoint: isCheckpointUrl,
+      isLogin: isLoginUrl,
+      isAuthenticatedRoute,
+      loginForm: selectorFlags.loginForm,
+      checkpointControl: selectorFlags.checkpoint,
+      globalNav: selectorFlags.globalNav,
+      meControl: selectorFlags.meControl,
+      feedContent: selectorFlags.feedContent,
+      hasSessionCookie,
+    }), url, signals };
   }
 
   private async navigateWithRetry(page: Page, url: string, timeoutMs: number): Promise<void> {
@@ -841,6 +886,7 @@ export class LinkedInBrowser {
     let lastChallengeCheck = 0;
     let lastCancellationCheck = 0;
     let activeChallenge: ChallengeInfo | null = null;
+    let lastDiagnosticState = '';
     const CHALLENGE_CHECK_INTERVAL = 5000;
 
     while (Date.now() < absoluteDeadline) {
@@ -855,6 +901,21 @@ export class LinkedInBrowser {
       // selection, focus changes, navigation, reloads, clicks, or form input.
       const assessment = await this.assessAuthentication(pinnedChallengePage ?? undefined, pinnedChallengePage === null);
       const url = assessment.url;
+      const diagnosticState = `${assessment.state}:${assessment.confidence}:${assessment.signals.join(',')}`;
+      if (diagnosticState !== lastDiagnosticState) {
+        lastDiagnosticState = diagnosticState;
+        logger.info('Human authentication state observed', {
+          queue_item_id: queueItemId,
+          workspace_id: workspaceId,
+          account_id: accountId,
+          auth_state: assessment.state,
+          confidence: assessment.confidence,
+          origin: this.safeOrigin(url),
+          pathname: this.safePathname(url),
+          signals: assessment.signals,
+          challenge_pinned: !!pinnedChallengePage,
+        });
+      }
 
       if (assessment.state === 'authenticated') {
         logger.info('Authenticated state verified', { host: this.safeHostname(url), confidence: assessment.confidence, signals: assessment.signals });
@@ -1022,12 +1083,30 @@ export class LinkedInBrowser {
         profileHeadline: headline?.trim() || null,
       };
 
-      logger.info('Identity extracted', { name: identity.profileName, url: identity.profileUrl });
+      logger.info('Identity extracted', { canonical_identity_found: !!identity.profileUrl, method: 'linkedin_profile_redirect' });
       return identity;
     } catch (err) {
       logger.error('Identity verification failed', { error: String(err) });
       return null;
     }
+  }
+
+  private async verifyIdentityWithRetry(queueItemId?: string, workspaceId?: string, accountId?: string): Promise<LinkedInIdentity | null> {
+    for (let attempt = 1; attempt <= IDENTITY_RESOLUTION_ATTEMPTS; attempt++) {
+      const identity = await this.verifyIdentity();
+      logger.info('Canonical LinkedIn identity resolution attempt', {
+        queue_item_id: queueItemId,
+        workspace_id: workspaceId,
+        account_id: accountId,
+        attempt,
+        method: 'linkedin_profile_redirect',
+        canonical_identity_found: !!identity?.profileUrl,
+        pathname: this.page ? this.safePathname(this.page.url()) : '',
+      });
+      if (identity?.profileUrl) return identity;
+      if (attempt < IDENTITY_RESOLUTION_ATTEMPTS) await new Promise(resolve => setTimeout(resolve, IDENTITY_RESOLUTION_DELAY_MS));
+    }
+    return null;
   }
 
   private normalizeProfileUrl(value?: string | null): string | null {

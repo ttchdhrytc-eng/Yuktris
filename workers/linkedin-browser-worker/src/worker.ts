@@ -527,6 +527,7 @@ export class Worker {
     // captured. Revoke customer Live View access before backend finalization.
     await this.updateAccount(accountId, { browserbase_session_id: null, browser_connected_at: null });
     await this.linkedin.neutralizeVisiblePage();
+    logger.info('LinkedIn connection finalization stage', { queue_item_id: item.id, workspace_id: workspaceId, account_id: accountId, stage: 'live_view_revoked' });
     await onProgress('saving_session', 'Login successful. Encrypting and saving session...');
 
     // Persist the verified Browserbase identity before its encrypted session.
@@ -540,6 +541,7 @@ export class Worker {
       await this.queue.fail(item.id, 'Session save failed', Date.now() - startTime, true);
       return;
     }
+    logger.info('LinkedIn connection finalization stage', { queue_item_id: item.id, workspace_id: workspaceId, account_id: accountId, stage: 'encrypted_session_persisted' });
 
     await this.client.rpc('insert_auth_interaction', {
       p_workspace_id: workspaceId,
@@ -558,6 +560,7 @@ export class Worker {
       await this.linkedin.close();
       await this.linkedinContexts.synchronize(persistentContext, bbSessionId, this.activeContextLease.owner);
       this.activeContextLease = null;
+      logger.info('LinkedIn connection finalization stage', { queue_item_id: item.id, workspace_id: workspaceId, account_id: accountId, stage: 'persistent_context_synchronized' });
     }
 
     // STATE: AUTHENTICATED — only after session is saved AND verified
@@ -567,6 +570,7 @@ export class Worker {
       profile_url: result.identity?.profileUrl, profile_name: result.identity?.profileName,
       profile_headline: result.identity?.profileHeadline,
     });
+    logger.info('LinkedIn connection finalization stage', { queue_item_id: item.id, workspace_id: workspaceId, account_id: accountId, stage: 'account_connected' });
 
     await this.logSessionEvent(workspaceId, accountId, 'login_success', {
       profile_url: result.identity?.profileUrl, profile_name: result.identity?.profileName,
