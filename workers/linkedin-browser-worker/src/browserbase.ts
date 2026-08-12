@@ -324,7 +324,7 @@ async function getDebugUrl(sessionId: string): Promise<string> {
   return `https://www.browserbase.com/sessions/${sessionId}`;
 }
 
-async function getLiveUrls(sessionId: string): Promise<{
+async function getLiveUrls(sessionId: string, timeoutMs = 8_000): Promise<{
   debuggerUrl: string;
   debuggerFullscreenUrl: string;
   pages: Array<{ id: string; url: string; debuggerUrl: string; debuggerFullscreenUrl: string }>;
@@ -332,7 +332,7 @@ async function getLiveUrls(sessionId: string): Promise<{
   const apiKey = getApiKey();
   const res = await browserbaseFetch(`${BROWSERBASE_API_URL}/sessions/${sessionId}/debug`, {
     headers: { 'x-bb-api-key': apiKey },
-  });
+  }, timeoutMs);
   if (!res.ok) throw new BrowserbaseError(`Failed to fetch live URLs: ${res.status}`, res.status);
   const data = await res.json() as {
     debuggerUrl?: string;

@@ -132,6 +132,7 @@ export interface ConnectionResult {
   identityVerifiedAt?: number;
   stateCapturedAt?: number;
   authenticationDetectedAt?: number;
+  errorCode?: string;
 }
 
 export type ProgressStep =
@@ -142,6 +143,10 @@ export type ProgressStep =
   | 'checking_existing_session'
   | 'existing_session_authenticated'
   | 'auth_required'
+  | 'auth_surface_ready'
+  | 'live_view_disconnected'
+  | 'recovering_auth_surface'
+  | 'connection_failed'
   | 'opening_linkedin'
   | 'ready_for_login'
   | 'waiting_for_login'
@@ -298,6 +303,42 @@ export class LinkedInBrowser {
       const status = err instanceof BrowserbaseError ? err.statusCode : 503;
       throw new BrowserbaseError('Secure browser provider is unavailable', status);
     }
+  }
+
+  /** Reconcile the two independent browser transports without creating a session or Context. */
+  async recoverAuthSurface(onProgress?: ProgressCallback): Promise<{ liveUrl: string } | { errorCode: string; error: string }> {
+    const session = this.bbSession;
+    if (!session) return { errorCode: 'browserbase_session_terminated', error: 'The secure browser session is no longer available.' };
+    await onProgress?.('recovering_auth_surface', 'Reconnecting the secure LinkedIn sign-in window.', { lifecycle_stage: 'L6_provider_session_state_checked' });
+    const providerState = await browserbase.getSessionStatus(session.id);
+    logger.info('Browserbase auth surface recovery', { lifecycle_stage: 'L6_provider_session_state_checked', provider_state: providerState });
+    if (providerState !== 'running') {
+      const errorCode = providerState === 'unknown' ? 'browserbase_reattach_failed' : 'browserbase_session_terminated';
+      return { errorCode, error: 'The secure browser session ended. Please retry the connection.' };
+    }
+
+    if (!this.browser?.isConnected()) {
+      logger.info('Browserbase auth surface recovery', { lifecycle_stage: 'L7_reattach_attempted', transport: 'playwright_cdp' });
+      try {
+        this.browser = await withTimeout(chromium.connectOverCDP(session.wsUrl), CDP_CONNECT_TIMEOUT_MS, 'CDP reattach timed out');
+        const contexts = this.browser.contexts();
+        this.context = contexts.find(context => context.pages().some(page => this.isUsablePage(page) && this.isLinkedInUrl(page.url()))) ?? contexts[0] ?? null;
+        this.page = this.context ? this.selectBestPage(this.context.pages()) : null;
+        if (!this.context || !this.page) throw new Error('The existing browser page could not be recovered');
+      } catch (error) {
+        logger.warn('Browserbase CDP reattach failed', { lifecycle_stage: 'L8_reattach_failed', error: this.sanitizeError(error) });
+        return { errorCode: 'browserbase_reattach_failed', error: 'The secure browser could not be reconnected. Please retry.' };
+      }
+    }
+
+    logger.info('Browserbase auth surface recovery', { lifecycle_stage: 'L7_debugger_authorization_requested' });
+    const liveUrl = await this.refreshLiveUrl();
+    if (!liveUrl) return { errorCode: 'browserbase_live_view_failed', error: 'A secure sign-in window could not be authorized. Please retry.' };
+    logger.info('Browserbase auth surface recovery', { lifecycle_stage: 'L8_reattach_succeeded' });
+    await onProgress?.('auth_surface_ready', 'Secure LinkedIn sign-in is ready.', {
+      lifecycle_stage: 'L8_reattach_succeeded', browserbase_session_id: session.id, browserbase_live_url: liveUrl,
+    });
+    return { liveUrl };
   }
 
   cancel(reason = 'Operation cancelled'): void {
@@ -617,9 +658,11 @@ export class LinkedInBrowser {
       // After page.goto() navigates to LinkedIn, fetch the updated debug URL
       // from Browserbase so the frontend's "Open Browser" button opens the
       // live debugger view showing the actual LinkedIn page, not about:blank.
+      logger.info('LinkedIn auth lifecycle', { lifecycle_stage: 'L2_debugger_authorization_requested' });
       const refreshedLiveUrl = await this.refreshLiveUrl();
       if (refreshedLiveUrl && onProgress) {
-        await onProgress('ready_for_login', 'LinkedIn login page ready. Open the browser to complete sign-in.', {
+        await onProgress('auth_surface_ready', 'Secure LinkedIn sign-in is ready.', {
+          lifecycle_stage: 'L3_auth_surface_ready',
           browserbase_session_id: this.getSessionId(),
           browserbase_live_url: refreshedLiveUrl,
           login_url: LINKEDIN_LOGIN_URL,
@@ -641,6 +684,8 @@ export class LinkedInBrowser {
       if (authResult.cancelled) {
         transition('cancelled');
         return { success: false, cancelled: true, nonRetryable: true, error: 'LinkedIn connection was cancelled' };
+      } else if (this.bbSession) {
+        return { success: false, errorCode: 'browserbase_live_view_failed', error: 'A secure LinkedIn sign-in window could not be opened. Please retry.', retryable: true };
       }
 
       if (!authResult.authenticated) {
@@ -939,6 +984,7 @@ export class LinkedInBrowser {
     let challengeMissingSince: number | null = null;
     let lastChallengeCheck = 0;
     let lastCancellationCheck = 0;
+    let lastRecoveryCheck = 0;
     let activeChallenge: ChallengeInfo | null = null;
     let lastDiagnosticState = '';
     let challengeOccurrenceCount = 0;
@@ -956,7 +1002,13 @@ export class LinkedInBrowser {
     try {
     while (Date.now() < absoluteDeadline) {
       if (!this.browser?.isConnected()) {
-        return { authenticated: false, challenge: activeChallenge, cancelled: false, failure: 'Secure LinkedIn browser session was lost. Start a new connection attempt.' };
+        logger.warn('LinkedIn auth lifecycle', { lifecycle_stage: 'L5_cdp_disconnected' });
+        await onProgress?.('live_view_disconnected', 'The secure LinkedIn sign-in connection was interrupted.', { lifecycle_stage: 'L5_cdp_disconnected' });
+        const recovery = await this.recoverAuthSurface(onProgress);
+        if ('error' in recovery) {
+          await onProgress?.('connection_failed', recovery.error, { lifecycle_stage: 'L9_terminal_failure_published', error_code: recovery.errorCode });
+          return { authenticated: false, challenge: activeChallenge, cancelled: false, failure: recovery.error };
+        }
       }
       if (pinnedChallengePage?.isClosed()) {
         return { authenticated: false, challenge: activeChallenge, cancelled: false, failure: 'LinkedIn security-check page was closed. Start a new connection attempt.' };
@@ -1050,6 +1102,26 @@ export class LinkedInBrowser {
         lastCancellationCheck = now;
         const { data } = await this.client.from('browser_execution_queue').select('status').eq('id', queueItemId).maybeSingle();
         if (data?.status === 'cancelled') return { authenticated: false, challenge: activeChallenge, cancelled: true };
+      }
+
+      if (queueItemId && now - lastRecoveryCheck > 1000) {
+        lastRecoveryCheck = now;
+        const { data: recoveryRequest } = await this.client.from('linkedin_auth_interactions')
+          .select('id').eq('queue_item_id', queueItemId).eq('interaction_type', 'auth_surface_recovery')
+          .eq('status', 'pending').gt('expires_at', new Date().toISOString()).order('created_at', { ascending: true }).limit(1).maybeSingle();
+        if (recoveryRequest?.id) {
+          logger.info('LinkedIn auth lifecycle', { lifecycle_stage: 'L5_live_view_disconnect_reported', queue_item_id: queueItemId });
+          await onProgress?.('live_view_disconnected', 'The secure LinkedIn sign-in view was interrupted.', { lifecycle_stage: 'L5_live_view_disconnect_reported' });
+          const recovery = await this.recoverAuthSurface(onProgress);
+          await this.client.from('linkedin_auth_interactions').update({
+            status: 'completed', updated_at: new Date().toISOString(),
+            user_response: 'error' in recovery ? { outcome: 'failed', error_code: recovery.errorCode } : { outcome: 'recovered' },
+          }).eq('id', recoveryRequest.id);
+          if ('error' in recovery) {
+            await onProgress?.('connection_failed', recovery.error, { lifecycle_stage: 'L9_terminal_failure_published', error_code: recovery.errorCode });
+            return { authenticated: false, challenge: activeChallenge, cancelled: false, failure: recovery.error };
+          }
+        }
       }
 
       if (now - lastChallengeCheck > CHALLENGE_CHECK_INTERVAL) {

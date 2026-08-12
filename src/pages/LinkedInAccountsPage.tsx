@@ -18,7 +18,7 @@ import { useWorkspace } from '@/contexts/WorkspaceContext';
 import { timeAgo } from '@/lib/utils';
 import {
   useConnectLinkedIn, useTestLinkedInConnection, useDisconnectLinkedIn, useToggleDryRun,
-  useAuthInteractions, useCancelAuthInteraction, useLinkedInLoginAccess,
+  useAuthInteractions, useCancelAuthInteraction, useLinkedInLoginAccess, useRecoverLinkedInAuthSurface,
 } from '@/hooks/useLinkedInBrowser';
 import { SecureLinkedInAuthModal } from '@/components/linkedin/SecureLinkedInAuthModal';
 import type { LinkedInAuthInteraction } from '@/types/linkedin-browser-automation';
@@ -471,10 +471,12 @@ function AuthProgressPanel({ accountId, connectionState }: { accountId: string; 
 }
 
 function AccountAuthModal({ accountId, queueItemId, onClose }: { accountId: string; queueItemId: string | null; onClose: () => void }) {
-  const { data: loginAccess } = useLinkedInLoginAccess(accountId);
   const { data: interactions } = useAuthInteractions(accountId);
   const cancelInteraction = useCancelAuthInteraction();
   const currentQueueItemId = queueItemId ?? [...(interactions ?? [])].reverse().find((event) => event.queue_item_id)?.queue_item_id ?? null;
+  const { data: loginAccess } = useLinkedInLoginAccess(accountId, currentQueueItemId);
+  const recoverSurface = useRecoverLinkedInAuthSurface();
+  const latestProgress = [...(interactions ?? [])].reverse().find(event => event.queue_item_id === currentQueueItemId && event.interaction_type === 'progress');
   const identityVerified = interactions?.some(
     (event) => event.queue_item_id === currentQueueItemId && event.interaction_type === 'progress' && event.step === 'identity_verified' && event.status === 'completed'
   ) ?? false;
@@ -496,6 +498,10 @@ function AccountAuthModal({ accountId, queueItemId, onClose }: { accountId: stri
       identityVerified={identityVerified}
       securityCheckRequired={securityCheckRequired}
       repeatedSecurityChecks={repeatedSecurityChecks}
+      queueItemId={currentQueueItemId}
+      recovering={recoverSurface.isPending || latestProgress?.step === 'recovering_auth_surface'}
+      connectionFailed={latestProgress?.step === 'connection_failed'}
+      onRecover={() => { if (currentQueueItemId) recoverSurface.mutate({ accountId, queueItemId: currentQueueItemId }); }}
       onCancel={() => {
         if (cancellableInteraction) cancelInteraction.mutate(cancellableInteraction);
         onClose();

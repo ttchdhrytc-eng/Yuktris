@@ -511,22 +511,15 @@ export class Worker {
           await onProgress('existing_session_authenticated', 'Existing LinkedIn connection verified.');
         }
       } else {
-        liveUrl = await this.linkedin.refreshLiveUrl() ?? liveUrl;
-        await onProgress('auth_required', 'LinkedIn sign-in is required to continue.');
+        await onProgress('auth_required', 'LinkedIn sign-in is required to continue.', { lifecycle_stage: 'L0_auth_required' });
         await this.updateAccount(accountId, { browserbase_session_id: bbSessionId, browser_connected_at: new Date().toISOString() });
-        await onProgress('browser_connected', 'Secure browser ready. Complete LinkedIn sign-in in the browser window.', {
-          browserbase_session_id: bbSessionId, browserbase_live_url: liveUrl,
-        });
         result = await this.linkedin.connect(
           CONNECTION_TIMEOUT, onProgress, workspaceId, accountId, item.id, intendedIdentity, preflight.preserveCurrentPage,
         );
       }
     } else {
-      await onProgress('auth_required', 'LinkedIn sign-in is required to continue.');
+      await onProgress('auth_required', 'LinkedIn sign-in is required to continue.', { lifecycle_stage: 'L0_auth_required' });
       await this.updateAccount(accountId, { browserbase_session_id: bbSessionId, browser_connected_at: new Date().toISOString() });
-      await onProgress('browser_connected', 'Secure browser ready. Complete LinkedIn sign-in in the browser window.', {
-        browserbase_session_id: bbSessionId, browserbase_live_url: liveUrl,
-      });
       result = await this.linkedin.connect(CONNECTION_TIMEOUT, onProgress, workspaceId, accountId, item.id, intendedIdentity);
     }
 

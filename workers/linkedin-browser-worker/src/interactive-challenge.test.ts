@@ -55,7 +55,7 @@ const tests: Array<[string, () => void]> = [
   ['rechallenge UX explains provider verification and preserves Cancel', () => {
     assert.match(modal, /LinkedIn is requesting additional verification/);
     assert.match(modal, /cancel and try again later/);
-    assert.match(modal, /!covered && <Button[^>]+onClick=\{onCancel\}/);
+    assert.match(modal, /!covered && <div[\s\S]*?<Button[^>]+onClick=\{onCancel\}/);
   }],
   ['session configuration remains stable and fast path remains covered', () => {
     assert.match(browserbase, /solveCaptchas: false/);

@@ -87,7 +87,7 @@ const tests: Array<[string, () => void]> = [
   ['only human connect publishes Live View and access is revoked after capture', () => {
     const connectHandler = worker.match(/private async handleConnect[\s\S]*?private async handleTestConnection/)?.[0] ?? '';
     const rest = worker.replace(connectHandler, '');
-    assert.match(connectHandler, /browserbase_live_url: liveUrl/);
+    assert.match(linkedin, /auth_surface_ready[\s\S]*browserbase_live_url: refreshedLiveUrl/);
     assert.doesNotMatch(rest, /browserbase_live_url: liveUrl/);
     assert.match(worker, /browserbase_session_id: null, browser_connected_at: null/);
     assert.match(worker, /await this\.linkedin\.neutralizeVisiblePage\(\)/);

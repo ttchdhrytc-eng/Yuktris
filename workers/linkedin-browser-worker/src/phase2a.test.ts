@@ -130,7 +130,7 @@ const tests: Array<[string, () => void]> = [
     assert.match(continuityMigration, /REVOKE EXECUTE ON FUNCTION public\.get_linkedin_login_access\(uuid,uuid\) FROM PUBLIC, anon/);
   }],
   ['onboarding embeds authorized Browserbase login and keeps polling', () => {
-    assert.match(onboardingPage, /useLinkedInLoginAccess\(linkedinAccountId\)/);
+    assert.match(onboardingPage, /useLinkedInLoginAccess\(linkedinAccountId, linkedinQueueItemId\)/);
     assert.match(onboardingPage, /SecureLinkedInAuthModal/);
     assert.doesNotMatch(onboardingPage, /window\.open\(loginUrl/);
     assert.match(hook, /get_linkedin_login_access/);
@@ -167,9 +167,9 @@ const tests: Array<[string, () => void]> = [
     assert.match(linkedin, /Math\.min\(now \+ HUMAN_CHALLENGE_EXTENSION_MS, absoluteDeadline\)/);
     assert.match(worker, /step === 'challenge_detected' \|\| step === 'waiting_for_user'[\s\S]*connection_state: 'requires_action'/);
   }],
-  ['active human challenge fails rather than replacing its browser session', () => {
+  ['active human challenge only reattaches the same browser session', () => {
     const challengeWait = linkedin.match(/private async waitForAuthenticationWithChallenges[\s\S]*?private async detectChallengeDetailed/)?.[0] ?? '';
-    assert.match(challengeWait, /Secure LinkedIn browser session was lost/);
+    assert.match(challengeWait, /recoverAuthSurface/);
     assert.match(challengeWait, /LinkedIn security-check page was closed/);
     assert.doesNotMatch(challengeWait, /createSession|\.launch\(|newContext\(|newPage\(/);
   }],

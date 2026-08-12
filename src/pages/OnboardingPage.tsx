@@ -23,7 +23,7 @@ import {
   type ActivationProgress,
 } from '@/services/activation';
 import { useConnectGoogle, useGoogleConnection } from '@/hooks/useGoogleAuth';
-import { useAuthInteractions, useCancelAuthInteraction, useConnectLinkedIn, useLinkedInAccounts, useLinkedInConnectionAttempt, useLinkedInLoginAccess } from '@/hooks/useLinkedInBrowser';
+import { useAuthInteractions, useCancelAuthInteraction, useConnectLinkedIn, useLinkedInAccounts, useLinkedInConnectionAttempt, useLinkedInLoginAccess, useRecoverLinkedInAuthSurface } from '@/hooks/useLinkedInBrowser';
 import { SecureLinkedInAuthModal } from '@/components/linkedin/SecureLinkedInAuthModal';
 import { GOOGLE_SCOPES } from '@/types/google-auth';
 import { cn } from '@/lib/utils';
@@ -105,7 +105,8 @@ export function OnboardingPage() {
   const googleConnection = useGoogleConnection();
   const connectLinkedIn = useConnectLinkedIn();
   const linkedinAccounts = useLinkedInAccounts();
-  const linkedinLoginAccess = useLinkedInLoginAccess(linkedinAccountId);
+  const linkedinLoginAccess = useLinkedInLoginAccess(linkedinAccountId, linkedinQueueItemId);
+  const recoverLinkedinSurface = useRecoverLinkedInAuthSurface();
   const linkedinAuthInteractions = useAuthInteractions(linkedinAccountId);
   const linkedinAttempt = useLinkedInConnectionAttempt(linkedinQueueItemId);
   const cancelLinkedinAuth = useCancelAuthInteraction();
@@ -144,6 +145,8 @@ export function OnboardingPage() {
   const linkedinIdentityVerified = currentLinkedinInteractions.some(
     (event) => event.interaction_type === 'progress' && event.step === 'identity_verified' && event.status === 'completed'
   ) ?? false;
+  const linkedinSurfaceRecovering = latestLinkedinProgress?.step === 'recovering_auth_surface';
+  const linkedinSurfaceFailed = latestLinkedinProgress?.step === 'connection_failed';
   const linkedinAuthRequired = currentLinkedinInteractions.some(
     (event) => event.interaction_type === 'progress' && event.step === 'auth_required' && event.status === 'completed'
   );
@@ -158,13 +161,13 @@ export function OnboardingPage() {
   const cancellableLinkedinInteraction = [...(linkedinAuthInteractions.data ?? [])].reverse().find((event) => event.queue_item_id) ?? null;
 
   useEffect(() => {
-    const workerStarted = linkedinAttempt.data?.status === 'running' || currentLinkedinInteractions.length > 0 || linkedinConnected;
-    if (workerStarted) {
+    const usableSurfaceOrCompletion = !!linkedinLoginAccess.data?.loginUrl || linkedinIdentityVerified || linkedinConnected || linkedinPersistentFastPath;
+    if (usableSurfaceOrCompletion) {
       setLinkedinAttemptTimedOut(false);
       if (linkedinAttemptTimerRef.current) clearTimeout(linkedinAttemptTimerRef.current);
       linkedinAttemptTimerRef.current = null;
     }
-  }, [currentLinkedinInteractions.length, linkedinAttempt.data?.status, linkedinConnected]);
+  }, [linkedinLoginAccess.data?.loginUrl, linkedinIdentityVerified, linkedinConnected, linkedinPersistentFastPath]);
 
   useEffect(() => () => {
     if (linkedinAttemptTimerRef.current) clearTimeout(linkedinAttemptTimerRef.current);
@@ -526,6 +529,11 @@ export function OnboardingPage() {
               identityVerified={linkedinIdentityVerified}
               queueItemId={linkedinQueueItemId}
               securityCheckRequired={!!linkedinChallenge && linkedinAccount?.connection_state === 'requires_action'}
+              recovering={linkedinSurfaceRecovering || recoverLinkedinSurface.isPending}
+              connectionFailed={linkedinSurfaceFailed}
+              onRecover={() => {
+                if (linkedinAccountId && linkedinQueueItemId) recoverLinkedinSurface.mutate({ accountId: linkedinAccountId, queueItemId: linkedinQueueItemId });
+              }}
               onCancel={() => {
                 if (cancellableLinkedinInteraction) cancelLinkedinAuth.mutate(cancellableLinkedinInteraction);
                 setLinkedinAccountId(null);

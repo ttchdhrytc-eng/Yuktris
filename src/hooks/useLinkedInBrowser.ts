@@ -40,23 +40,39 @@ export function useLinkedInAccounts() {
   });
 }
 
-export function useLinkedInLoginAccess(accountId: string | null) {
+export function useLinkedInLoginAccess(accountId: string | null, queueItemId: string | null = null) {
   const { workspace } = useWorkspace();
   return useQuery<{ loginUrl: string; expiresAt: string } | null>({
-    queryKey: ['linkedin-login-access', workspace?.id, accountId],
+    queryKey: ['linkedin-login-access', workspace?.id, accountId, queueItemId],
     queryFn: async () => {
-      if (!workspace || !accountId) return null;
+      if (!workspace || !accountId || !queueItemId) return null;
       const { data, error } = await supabase.rpc('get_linkedin_login_access', {
         p_workspace_id: workspace.id,
         p_account_id: accountId,
+        p_queue_item_id: queueItemId,
       });
       if (error) throw error;
       const access = Array.isArray(data) ? data[0] : data;
       if (!access?.login_url || !access?.expires_at) return null;
       return { loginUrl: access.login_url as string, expiresAt: access.expires_at as string };
     },
-    enabled: !!workspace && !!accountId,
+    enabled: !!workspace && !!accountId && !!queueItemId,
     refetchInterval: 2000,
+  });
+}
+
+export function useRecoverLinkedInAuthSurface() {
+  const { workspace } = useWorkspace();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ accountId, queueItemId }: { accountId: string; queueItemId: string }) => {
+      if (!workspace) throw new Error('No workspace');
+      const { error } = await supabase.rpc('request_linkedin_auth_surface_recovery', {
+        p_workspace_id: workspace.id, p_account_id: accountId, p_queue_item_id: queueItemId,
+      });
+      if (error) throw error;
+    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['linkedin-login-access'] }),
   });
 }
 

@@ -27,7 +27,7 @@ import {
   useBrowserExecutionHistory, useBrowserExecutionFailures,
   useResolveExecutionFailure, useBrowserRetryQueue,
   useBrowserDeadLetterQueue,
-  useAuthInteractions, useCancelAuthInteraction, useLinkedInLoginAccess,
+  useAuthInteractions, useCancelAuthInteraction, useLinkedInLoginAccess, useRecoverLinkedInAuthSurface,
 } from '@/hooks/useLinkedInBrowser';
 import { SecureLinkedInAuthModal } from '@/components/linkedin/SecureLinkedInAuthModal';
 import type { LinkedInAuthInteraction } from '@/types/linkedin-browser-automation';
@@ -315,10 +315,10 @@ function AccountCard({
   }, [isConnecting, account.connection_state, onSetConnecting]);
 
   const interactions = useAuthInteractions(showPanel ? account.id : null);
-  const loginAccess = useLinkedInLoginAccess(showPanel ? account.id : null);
   const cancelInteraction = useCancelAuthInteraction();
+  const recoverSurface = useRecoverLinkedInAuthSurface();
 
-  const { progressSteps, challenge, identityVerified, authRequired, repeatedSecurityChecks, cancellableInteraction } = useMemo(() => {
+  const { progressSteps, challenge, identityVerified, authRequired, repeatedSecurityChecks, cancellableInteraction, currentQueueItemId, latestStep } = useMemo(() => {
     const items = interactions.data ?? [];
     const currentQueueItemId = [...items].reverse().find((item) => item.queue_item_id)?.queue_item_id ?? null;
     const currentItems = currentQueueItemId
@@ -341,8 +341,11 @@ function AccountCard({
       authRequired: currentItems.some((item) => item.interaction_type === 'progress' && item.step === 'auth_required' && item.status === 'completed'),
       repeatedSecurityChecks: currentItems.some((item) => item.interaction_type === 'progress' && item.step === 'provider_rechallenge' && item.status === 'completed'),
       cancellableInteraction: [...currentItems].reverse().find((item) => item.queue_item_id) ?? null,
+      currentQueueItemId,
+      latestStep: [...currentItems].reverse().find((item) => item.interaction_type === 'progress')?.step,
     };
   }, [interactions.data]);
+  const loginAccess = useLinkedInLoginAccess(showPanel ? account.id : null, currentQueueItemId);
 
   if (!showPanel) {
     return (
@@ -460,6 +463,10 @@ function AccountCard({
         identityVerified={identityVerified}
         securityCheckRequired={!!challenge && challenge.status === 'pending'}
         repeatedSecurityChecks={repeatedSecurityChecks}
+        queueItemId={currentQueueItemId}
+        recovering={recoverSurface.isPending || latestStep === 'recovering_auth_surface'}
+        connectionFailed={latestStep === 'connection_failed'}
+        onRecover={() => { if (currentQueueItemId) recoverSurface.mutate({ accountId: account.id, queueItemId: currentQueueItemId }); }}
         onCancel={() => {
           if (cancellableInteraction) cancelInteraction.mutate(cancellableInteraction);
           onSetConnecting(null);

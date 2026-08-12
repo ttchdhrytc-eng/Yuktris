@@ -57,7 +57,7 @@ const tests: Array<[string, () => void]> = [
     assert.match(modal, /iframeMounted && safeUrl/);
   }],
   ['cancel is available before verification and removed after cover', () => {
-    assert.match(modal, /!covered && <Button[^>]+onClick=\{onCancel\}/);
+    assert.match(modal, /!covered && <div[\s\S]*?<Button[^>]+onClick=\{onCancel\}/);
   }],
   ['persistence failure remains fail closed after identity verification', () => {
     const verified = worker.indexOf('browserbase_session_id: null');
