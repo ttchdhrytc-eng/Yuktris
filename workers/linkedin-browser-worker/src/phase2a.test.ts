@@ -95,6 +95,12 @@ const tests: Array<[string, () => void]> = [
   ['worker RPCs reject public roles', () => {
     assert.match(migration, /REVOKE EXECUTE ON FUNCTION public\.claim_queue_task[\s\S]*FROM PUBLIC, anon, authenticated/);
   }],
+  ['zero-workspace startup remains healthy and retries registration', () => {
+    assert.doesNotMatch(worker, /throw new Error\('No workspaces available for worker registration'\)/);
+    assert.match(worker, /await this\.ensureRegistered\(\)/);
+    assert.match(worker, /No workspaces available; worker will remain healthy and idle/);
+    assert.match(worker, /if \(!\(await this\.ensureRegistered\(\)\)\) return/);
+  }],
   ['transactional start enforces workspace membership', () => {
     assert.match(migration, /auth\.uid\(\) IS NULL OR NOT public\.is_workspace_member\(p_workspace_id\)/);
     assert.match(migration, /enqueue_linkedin_connection_test\(uuid,uuid\) FROM PUBLIC, anon/);

@@ -78,10 +78,11 @@ export class Worker {
     if (rpcError) throw new Error(`Supabase not accessible: ${rpcError.message}`);
     logger.info('Supabase connection verified');
 
-    // Get a workspace ID for worker registration
-    const { data: wsId, error: wsError } = await this.client.rpc('get_any_workspace_id');
-    if (wsError || !wsId) throw new Error('No workspaces available for worker registration');
-    this.workspaceId = wsId as string;
+    // browser_workers currently requires a workspace_id even though this worker
+    // consumes the global, workspace-scoped queue. An empty installation is a
+    // valid idle state, so defer the bookkeeping registration until a workspace
+    // exists instead of terminating the process.
+    await this.ensureRegistered();
 
     // Fix 9: Recover orphaned queue tasks from previous worker crash
     try {
@@ -102,9 +103,6 @@ export class Worker {
     } catch (err) {
       logger.warn('Session cleanup failed', { error: String(err) });
     }
-
-    // Register in browser_workers table
-    await this.register();
 
     // Start heartbeat
     this.heartbeatTimer = setInterval(() => this.heartbeat(), HEARTBEAT_INTERVAL);
@@ -151,9 +149,30 @@ export class Worker {
     logger.info('Worker registered', { id: this.workerId });
   }
 
+  private async ensureRegistered(): Promise<boolean> {
+    if (this.workspaceId) return true;
+
+    const { data: wsId, error } = await this.client.rpc('get_any_workspace_id');
+    if (error) throw new Error(`Unable to resolve workspace for worker registration: ${error.message}`);
+    if (!wsId) {
+      logger.warn('No workspaces available; worker will remain healthy and idle until one is created');
+      return false;
+    }
+
+    this.workspaceId = wsId as string;
+    try {
+      await this.register();
+      return true;
+    } catch (error) {
+      this.workspaceId = null;
+      throw error;
+    }
+  }
+
   private async heartbeat(): Promise<void> {
     const now = new Date().toISOString();
     try {
+      if (!(await this.ensureRegistered())) return;
       await this.client.rpc('heartbeat_browser_worker', {
         p_worker_id: this.workerId,
         p_status: this.running ? 'idle' : 'closing',
