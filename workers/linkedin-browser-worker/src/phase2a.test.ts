@@ -88,6 +88,22 @@ const tests: Array<[string, () => void]> = [
     assert.match(identityMigration, /REVOKE EXECUTE ON FUNCTION public\.bind_linkedin_account_identity\(uuid,uuid,text\) FROM PUBLIC, anon, authenticated/);
     assert.match(identityMigration, /GRANT EXECUTE ON FUNCTION public\.bind_linkedin_account_identity\(uuid,uuid,text\) TO service_role/);
   }],
+  ['onboarding waits for persisted authentication before advancing to Gmail', () => {
+    assert.match(onboardingPage, /useLinkedInAccounts\(\)/);
+    assert.match(onboardingPage, /connection_state === 'connected'/);
+    assert.match(onboardingPage, /session_status === 'connected'/);
+    assert.match(onboardingPage, /status === 'active'/);
+    assert.match(onboardingPage, /linkedinAccount\.profile_url/);
+    assert.match(onboardingPage, /Waiting for LinkedIn sign-in/);
+    const startSuccess = onboardingPage.match(/onSuccess: \(\{ accountId \}\)[\s\S]*?onError:/)?.[0] ?? '';
+    assert.doesNotMatch(startSuccess, /setStep\('gmail'\)/);
+    assert.match(onboardingPage, /if \(step !== 'linkedin' \|\| !linkedinConnected/);
+    assert.match(onboardingPage, /setStep\('gmail'\)/);
+  }],
+  ['LinkedIn start does not launch or derive Google identity', () => {
+    const linkedinStep = onboardingPage.match(/STEP 2: LINKEDIN[\s\S]*?STEP 3: GMAIL/)?.[0] ?? '';
+    assert.doesNotMatch(linkedinStep, /connectGoogle\.mutate|linkedinEmail.*google|setStep\('gmail'\).*onSuccess/);
+  }],
   ['strict leases gate completion failure and waiting', () => {
     assert.ok((migration.match(/attempt_id\s*=\s*p_attempt_id AND lease_expires_at > now\(\)/g) ?? []).length >= 3);
   }],
