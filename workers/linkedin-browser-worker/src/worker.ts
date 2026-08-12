@@ -523,6 +523,10 @@ export class Worker {
     }
 
     // ── Save encrypted session ──────────────────────────────────
+    // Authentication and canonical identity are verified and browser state is
+    // captured. Revoke customer Live View access before backend finalization.
+    await this.updateAccount(accountId, { browserbase_session_id: null, browser_connected_at: null });
+    await this.linkedin.neutralizeVisiblePage();
     await onProgress('saving_session', 'Login successful. Encrypting and saving session...');
 
     // Persist the verified Browserbase identity before its encrypted session.

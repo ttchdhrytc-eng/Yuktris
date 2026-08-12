@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo } from 'react';
 import {
   Linkedin, Plus, CheckCircle2, AlertTriangle, X, RefreshCw,
   ShieldCheck, Activity, Cpu, Globe, Clock, Zap, FlaskConical,
-  ChevronDown, ChevronUp, Camera, Heart, ExternalLink,
+  ChevronDown, ChevronUp, Heart,
 } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
 import { PageHeader } from '@/components/ui/PageHeader';
@@ -18,8 +18,9 @@ import { useWorkspace } from '@/contexts/WorkspaceContext';
 import { timeAgo } from '@/lib/utils';
 import {
   useConnectLinkedIn, useTestLinkedInConnection, useDisconnectLinkedIn, useToggleDryRun,
-  useAuthInteractions, useCancelAuthInteraction,
+  useAuthInteractions, useCancelAuthInteraction, useLinkedInLoginAccess,
 } from '@/hooks/useLinkedInBrowser';
+import { SecureLinkedInAuthModal } from '@/components/linkedin/SecureLinkedInAuthModal';
 import type { LinkedInAuthInteraction } from '@/types/linkedin-browser-automation';
 
 type ConnectionState =
@@ -52,6 +53,7 @@ const STEP_LABELS: Record<string, string> = {
   challenge_detected: 'Verification required',
   waiting_for_user: 'Waiting for verification in secure browser...',
   verifying_authentication: 'Verifying authentication...',
+  identity_verified: 'LinkedIn identity verified',
   saving_session: 'Saving session...',
   connected: 'Connected.',
   login_timeout: 'Login timed out',
@@ -68,6 +70,7 @@ const STEP_ICONS: Record<string, typeof Activity> = {
   ready_for_login: Linkedin,
   waiting_for_login: Clock,
   challenge_detected: AlertTriangle,
+  identity_verified: ShieldCheck,
   saving_session: ShieldCheck,
   connected: CheckCircle2,
   login_timeout: AlertTriangle,
@@ -97,6 +100,7 @@ export function LinkedInAccountsPage() {
   const [showConnect, setShowConnect] = useState(false);
   const [confirmDisconnect, setConfirmDisconnect] = useState<AccountRow | null>(null);
   const [authAccountId, setAuthAccountId] = useState<string | null>(null);
+  const [authQueueItemId, setAuthQueueItemId] = useState<string | null>(null);
 
   const { data: accounts, isLoading } = useQuery({
     queryKey: ['linkedin-accounts', workspace?.id],
@@ -126,12 +130,16 @@ export function LinkedInAccountsPage() {
       (a) => a.connection_state === 'authenticating' || a.connection_state === 'pending' || a.connection_state === 'requires_action'
     );
     if (inProgress) {
+      if (authAccountId !== inProgress.id) setAuthQueueItemId(null);
       setAuthAccountId(inProgress.id);
     } else if (authAccountId) {
       const stillExists = accounts.find((a) => a.id === authAccountId);
       if (stillExists && (stillExists.connection_state === 'connected' || stillExists.connection_state === 'failed' || stillExists.connection_state === 'disconnected' || stillExists.connection_state === 'cancelled')) {
         // Keep panel open for 5s after completion, then close
-        const timer = setTimeout(() => setAuthAccountId(null), 5000);
+        const timer = setTimeout(() => {
+          setAuthAccountId(null);
+          setAuthQueueItemId(null);
+        }, 5000);
         return () => clearTimeout(timer);
       }
     }
@@ -266,7 +274,14 @@ export function LinkedInAccountsPage() {
                     {(state === 'disconnected' || state === 'session_expired' || state === 'session_invalid' || state === 'failed' || state === 'cancelled') && (
                       <>
                         <button
-                          onClick={() => setShowConnect(true)}
+                          onClick={() => connect.mutate(
+                            { existingAccountId: acc.id },
+                            { onSuccess: (result) => {
+                              setAuthAccountId(result.accountId);
+                              setAuthQueueItemId(result.queueItemId);
+                            } }
+                          )}
+                          disabled={connect.isPending}
                           className="flex items-center gap-1.5 rounded-lg bg-gradient-to-r from-gold-400 to-gold-300 px-2.5 py-1.5 text-xs font-medium text-maroon-950 hover:bg-brand-300/20 transition-colors"
                         >
                           <RefreshCw className="h-3 w-3" />Reconnect
@@ -318,13 +333,21 @@ export function LinkedInAccountsPage() {
             connect.mutate(params, {
               onSuccess: (result) => {
                 setShowConnect(false);
-                if (result?.accountId) setAuthAccountId(result.accountId);
+                if (result?.accountId) {
+                  setAuthAccountId(result.accountId);
+                  setAuthQueueItemId(result.queueItemId);
+                }
               },
             });
           }}
           isConnecting={connect.isPending}
         />
       )}
+
+      {authAccountId && <AccountAuthModal accountId={authAccountId} queueItemId={authQueueItemId} onClose={() => {
+        setAuthAccountId(null);
+        setAuthQueueItemId(null);
+      }} />}
 
       {confirmDisconnect && (
         <Modal
@@ -360,7 +383,6 @@ export function LinkedInAccountsPage() {
 
 function AuthProgressPanel({ accountId, connectionState }: { accountId: string; connectionState: ConnectionState }) {
   const { data: interactions, isLoading } = useAuthInteractions(accountId);
-  const [showScreenshot, setShowScreenshot] = useState<LinkedInAuthInteraction | null>(null);
 
   const progressEvents = useMemo(() => {
     if (!interactions) return [];
@@ -370,20 +392,6 @@ function AuthProgressPanel({ accountId, connectionState }: { accountId: string; 
   const challengeEvent = useMemo(() => {
     if (!interactions) return null;
     return interactions.find((i) => i.interaction_type === 'challenge' && i.status === 'pending');
-  }, [interactions]);
-
-  const latestScreenshot = useMemo(() => {
-    if (!interactions) return null;
-    const screenshot = interactions.find((i) => i.screenshot_path);
-    return screenshot || null;
-  }, [interactions]);
-
-  const liveUrl = useMemo(() => {
-    if (!interactions) return null;
-    const urlEvent = interactions.find(
-      (i) => i.metadata?.browserbase_live_url
-    );
-    return (urlEvent?.metadata?.browserbase_live_url as string) || null;
   }, [interactions]);
 
   const isComplete = connectionState === 'connected';
@@ -436,19 +444,6 @@ function AuthProgressPanel({ accountId, connectionState }: { accountId: string; 
         <p className="text-xs text-ink-500">Waiting for progress updates...</p>
       )}
 
-      {/* Open LinkedIn Browser — live URL from Browserbase */}
-      {liveUrl && !isComplete && !isFailed && (
-        <a
-          href={liveUrl}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="flex items-center justify-center gap-2 rounded-lg bg-gradient-to-r from-gold-400 to-gold-300 px-4 py-3 text-sm font-semibold text-maroon-950 hover:bg-brand-300/20 transition-colors shadow-sm"
-        >
-          <ExternalLink className="h-4 w-4" />
-          Open LinkedIn Browser
-        </a>
-      )}
-
       {/* Challenge Notification */}
       {challengeEvent && (
         <ChallengeNotification
@@ -457,36 +452,34 @@ function AuthProgressPanel({ accountId, connectionState }: { accountId: string; 
         />
       )}
 
-      {/* Screenshot Viewer */}
-      {latestScreenshot?.screenshot_path && (
-        <button
-          onClick={() => setShowScreenshot(latestScreenshot)}
-          className="flex items-center gap-1.5 text-xs text-brand-300 hover:text-brand-300"
-        >
-          <Camera className="h-3.5 w-3.5" />
-          View browser screenshot
-        </button>
-      )}
-
-      {showScreenshot && (
-        <Modal open onClose={() => setShowScreenshot(null)} title="Browser Screenshot" description="Current state of the LinkedIn authentication browser">
-          <div className="space-y-3">
-            {showScreenshot.screenshot_path ? (
-              <img
-                src={`data:image/png;base64,${showScreenshot.screenshot_path}`}
-                alt="Browser screenshot"
-                className="w-full rounded-lg border border-gold-500/12"
-              />
-            ) : (
-              <p className="text-sm text-ink-500">No screenshot available</p>
-            )}
-            <div className="flex justify-end">
-              <Button variant="ghost" onClick={() => setShowScreenshot(null)}>Close</Button>
-            </div>
-          </div>
-        </Modal>
-      )}
     </div>
+  );
+}
+
+function AccountAuthModal({ accountId, queueItemId, onClose }: { accountId: string; queueItemId: string | null; onClose: () => void }) {
+  const { data: loginAccess } = useLinkedInLoginAccess(accountId);
+  const { data: interactions } = useAuthInteractions(accountId);
+  const cancelInteraction = useCancelAuthInteraction();
+  const currentQueueItemId = queueItemId ?? [...(interactions ?? [])].reverse().find((event) => event.queue_item_id)?.queue_item_id ?? null;
+  const identityVerified = interactions?.some(
+    (event) => event.queue_item_id === currentQueueItemId && event.interaction_type === 'progress' && event.step === 'identity_verified' && event.status === 'completed'
+  ) ?? false;
+  const securityCheckRequired = interactions?.some(
+    (event) => event.interaction_type === 'challenge' && event.status === 'pending'
+  ) ?? false;
+  const cancellableInteraction = [...(interactions ?? [])].reverse().find((event) => event.queue_item_id) ?? null;
+
+  return (
+    <SecureLinkedInAuthModal
+      open
+      loginUrl={loginAccess?.loginUrl ?? null}
+      identityVerified={identityVerified}
+      securityCheckRequired={securityCheckRequired}
+      onCancel={() => {
+        if (cancellableInteraction) cancelInteraction.mutate(cancellableInteraction);
+        onClose();
+      }}
+    />
   );
 }
 

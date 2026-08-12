@@ -23,7 +23,8 @@ import {
   type ActivationProgress,
 } from '@/services/activation';
 import { useConnectGoogle, useGoogleConnection } from '@/hooks/useGoogleAuth';
-import { useAuthInteractions, useConnectLinkedIn, useLinkedInAccounts, useLinkedInLoginAccess } from '@/hooks/useLinkedInBrowser';
+import { useAuthInteractions, useCancelAuthInteraction, useConnectLinkedIn, useLinkedInAccounts, useLinkedInLoginAccess } from '@/hooks/useLinkedInBrowser';
+import { SecureLinkedInAuthModal } from '@/components/linkedin/SecureLinkedInAuthModal';
 import { GOOGLE_SCOPES } from '@/types/google-auth';
 import { cn } from '@/lib/utils';
 
@@ -75,6 +76,7 @@ export function OnboardingPage() {
   const [progress, setProgress] = useState<ActivationProgress[]>([]);
   const [editing, setEditing] = useState<Record<string, string>>({});
   const [linkedinAccountId, setLinkedinAccountId] = useState<string | null>(null);
+  const [linkedinQueueItemId, setLinkedinQueueItemId] = useState<string | null>(null);
   const linkedinCompletionHandledRef = useRef(false);
   const creatingRef = useRef(false);
 
@@ -103,6 +105,7 @@ export function OnboardingPage() {
   const linkedinAccounts = useLinkedInAccounts();
   const linkedinLoginAccess = useLinkedInLoginAccess(linkedinAccountId);
   const linkedinAuthInteractions = useAuthInteractions(linkedinAccountId);
+  const cancelLinkedinAuth = useCancelAuthInteraction();
   const { workspace, loading: wsLoading } = useWorkspace();
 
   const linkedinAccount = linkedinAccountId
@@ -132,7 +135,11 @@ export function OnboardingPage() {
   const latestLinkedinProgress = linkedinAuthInteractions.data
     ?.filter((event) => event.interaction_type === 'progress')
     .slice(-1)[0] ?? null;
-  const linkedinVerifyingIdentity = ['verifying_authentication', 'saving_session'].includes(latestLinkedinProgress?.step ?? '');
+  const linkedinIdentityVerified = linkedinAuthInteractions.data?.some(
+    (event) => event.queue_item_id === linkedinQueueItemId && event.interaction_type === 'progress' && event.step === 'identity_verified' && event.status === 'completed'
+  ) ?? false;
+  const linkedinVerifyingIdentity = latestLinkedinProgress?.step === 'verifying_authentication';
+  const cancellableLinkedinInteraction = [...(linkedinAuthInteractions.data ?? [])].reverse().find((event) => event.queue_item_id) ?? null;
 
   const googleConnected = googleConnection.data?.account?.status === 'connected' && !googleConnection.data.needsReconnect;
   const googleNeedsReconnect = googleConnection.data?.needsReconnect ?? false;
@@ -150,8 +157,7 @@ export function OnboardingPage() {
   useEffect(() => {
     if (step !== 'linkedin' || !linkedinConnected || linkedinCompletionHandledRef.current) return;
     linkedinCompletionHandledRef.current = true;
-    toast.success('LinkedIn connected and authenticated successfully.');
-    setStep('gmail');
+    toast.success('LinkedIn connected successfully.');
   }, [linkedinConnected, step]);
 
   // Animate research stages during business analysis
@@ -398,7 +404,7 @@ export function OnboardingPage() {
 
           {/* STEP 2: LINKEDIN — Real browser-based connection */}
           {step === 'linkedin' && (
-            <GoogleConnectStep
+            <><GoogleConnectStep
               icon={Linkedin}
               iconColor="text-[#0A66C2]"
               iconBg="bg-[#0A66C2]/10"
@@ -432,9 +438,10 @@ export function OnboardingPage() {
                 connectLinkedIn.mutate(
                   { linkedinEmail: email.trim() || undefined },
                   {
-                    onSuccess: ({ accountId }) => {
+                    onSuccess: ({ accountId, queueItemId }) => {
                       linkedinCompletionHandledRef.current = false;
                       setLinkedinAccountId(accountId);
+                      setLinkedinQueueItemId(queueItemId);
                       toast.info('Complete LinkedIn sign-in in the secure browser.');
                     },
                     onError: (err) => {
@@ -444,12 +451,33 @@ export function OnboardingPage() {
                 );
               }}
               onReconnect={() => {
-                setLinkedinAccountId(null);
                 linkedinCompletionHandledRef.current = false;
+                if (!linkedinAccountId) return;
+                connectLinkedIn.mutate(
+                  { existingAccountId: linkedinAccountId },
+                  {
+                    onSuccess: ({ accountId, queueItemId }) => {
+                      setLinkedinAccountId(accountId);
+                      setLinkedinQueueItemId(queueItemId);
+                    },
+                    onError: (err) => toast.error(err instanceof Error ? err.message : 'Failed to reconnect LinkedIn.'),
+                  }
+                );
               }}
               onBack={goBack}
               onNext={goNext}
             />
+            <SecureLinkedInAuthModal
+              open={!!linkedinAccountId && !linkedinConnected && !linkedinFailed && !linkedinExpired && (linkedinWaiting || linkedinIdentityVerified)}
+              loginUrl={linkedinLoginAccess.data?.loginUrl ?? null}
+              identityVerified={linkedinIdentityVerified}
+              securityCheckRequired={!!linkedinChallenge && linkedinAccount?.connection_state === 'requires_action'}
+              onCancel={() => {
+                if (cancellableLinkedinInteraction) cancelLinkedinAuth.mutate(cancellableLinkedinInteraction);
+                setLinkedinAccountId(null);
+                setLinkedinQueueItemId(null);
+              }}
+            /></>
           )}
 
           {/* STEP 3: GMAIL — Real Google OAuth */}
@@ -877,13 +905,6 @@ function GoogleConnectStep({ icon: Icon, iconColor, iconBg, title, description, 
               </p>
             </div>
           </div>
-          {loginUrl && (
-            <div className="flex justify-center">
-              <Button variant="glow" size="lg" onClick={() => window.open(loginUrl, '_blank', 'noopener,noreferrer')}>
-                <Linkedin className="h-4 w-4" /> {securityCheckRequired ? 'Continue LinkedIn sign-in' : 'Open secure LinkedIn login'}
-              </Button>
-            </div>
-          )}
         </div>
       )}
 

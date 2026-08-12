@@ -11,8 +11,7 @@ import {
   UserCircle, KeyRound, ListOrdered, History, AlertTriangle,
   RotateCcw, Trash2, Smartphone, Activity, Settings,
   Plus, Shield, Clock, Zap, TrendingUp,
-  ExternalLink, Loader2, CheckCircle2, XCircle, AlertOctagon,
-  Monitor,
+  Loader2, CheckCircle2, XCircle, AlertOctagon,
 } from 'lucide-react';
 import { PageHeader } from '@/components/ui/PageHeader';
 import { Card } from '@/components/ui/Card';
@@ -28,8 +27,9 @@ import {
   useBrowserExecutionHistory, useBrowserExecutionFailures,
   useResolveExecutionFailure, useBrowserRetryQueue,
   useBrowserDeadLetterQueue,
-  useAuthInteractions, useCancelAuthInteraction,
+  useAuthInteractions, useCancelAuthInteraction, useLinkedInLoginAccess,
 } from '@/hooks/useLinkedInBrowser';
+import { SecureLinkedInAuthModal } from '@/components/linkedin/SecureLinkedInAuthModal';
 import type { LinkedInAuthInteraction } from '@/types/linkedin-browser-automation';
 
 type Tab = 'accounts' | 'sessions' | 'queue' | 'history' | 'failures' | 'retry' | 'dlq' | 'devices' | 'events' | 'behavior';
@@ -302,7 +302,7 @@ function AccountCard({
 }) {
   // Determine if this account is in an active connection flow
   const isActiveFlow = [
-    'creating_session', 'session_created', 'connecting_browser', 'connected',
+    'creating_session', 'session_created', 'connecting_browser',
     'opening_linkedin', 'ready_for_login', 'authenticated', 'requires_action',
   ].includes(account.connection_state);
   const showPanel = isConnecting || isActiveFlow;
@@ -315,28 +315,27 @@ function AccountCard({
   }, [isConnecting, account.connection_state, onSetConnecting]);
 
   const interactions = useAuthInteractions(showPanel ? account.id : null);
+  const loginAccess = useLinkedInLoginAccess(showPanel ? account.id : null);
   const cancelInteraction = useCancelAuthInteraction();
 
-  // Extract live URL and progress from interactions
-  const { liveUrl, progressSteps, challenge } = useMemo(() => {
+  const { progressSteps, challenge, identityVerified, cancellableInteraction } = useMemo(() => {
     const items = interactions.data ?? [];
-    let url: string | null = null;
     const steps: { step: string; message: string; timestamp: string }[] = [];
     let chal: LinkedInAuthInteraction | null = null;
 
     for (const item of items) {
       steps.push({ step: item.step, message: item.message, timestamp: item.created_at });
-      // Look for live URL in metadata
-      const meta = item.metadata as Record<string, unknown>;
-      if (meta?.browserbase_live_url && typeof meta.browserbase_live_url === 'string') {
-        url = meta.browserbase_live_url;
-      }
       // Look for pending challenge
       if (item.interaction_type === 'challenge' && item.status === 'pending') {
         chal = item;
       }
     }
-    return { liveUrl: url, progressSteps: steps, challenge: chal };
+    return {
+      progressSteps: steps,
+      challenge: chal,
+      identityVerified: items.some((item) => item.interaction_type === 'progress' && item.step === 'identity_verified' && item.status === 'completed'),
+      cancellableInteraction: [...items].reverse().find((item) => item.queue_item_id) ?? null,
+    };
   }, [interactions.data]);
 
   if (!showPanel) {
@@ -431,26 +430,6 @@ function AccountCard({
         })}
       </div>
 
-      {/* Live Browser URL Button */}
-      {liveUrl && account.connection_state !== 'connected' && (
-        <div className="mb-4 rounded-xl border border-gold-500/20 bg-gold-500/5 p-3">
-          <div className="flex items-center gap-2 mb-2">
-            <Monitor className="h-4 w-4 text-gold-400" />
-            <span className="text-xs font-medium text-ink-100">Secure browser ready</span>
-          </div>
-          <p className="text-xs text-ink-400 mb-3">Click below to open the browser and complete your LinkedIn login.</p>
-          <a
-            href={liveUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="flex items-center justify-center gap-2 w-full rounded-xl bg-gradient-to-r from-gold-400 to-gold-300 px-4 py-2.5 text-sm font-semibold text-maroon-950 hover:shadow-gold-lg transition-all duration-300 btn-gold-glow active:scale-[0.97]"
-          >
-            <ExternalLink className="h-4 w-4" />
-            Open Secure Browser
-          </a>
-        </div>
-      )}
-
       {/* Challenge UI */}
       {challenge && challenge.status === 'pending' && (
         <div className="mb-4 rounded-xl border border-warning-500/20 bg-warning-500/5 p-3">
@@ -468,6 +447,17 @@ function AccountCard({
           </button>
         </div>
       )}
+
+      <SecureLinkedInAuthModal
+        open={showPanel}
+        loginUrl={loginAccess.data?.loginUrl ?? null}
+        identityVerified={identityVerified}
+        securityCheckRequired={!!challenge && challenge.status === 'pending'}
+        onCancel={() => {
+          if (cancellableInteraction) cancelInteraction.mutate(cancellableInteraction);
+          onSetConnecting(null);
+        }}
+      />
 
       {/* Error Display */}
       {account.last_error && account.connection_state === 'failed' && (

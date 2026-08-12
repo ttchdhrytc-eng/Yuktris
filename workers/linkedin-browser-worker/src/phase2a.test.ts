@@ -100,7 +100,7 @@ const tests: Array<[string, () => void]> = [
     const startSuccess = onboardingPage.match(/onSuccess: \(\{ accountId \}\)[\s\S]*?onError:/)?.[0] ?? '';
     assert.doesNotMatch(startSuccess, /setStep\('gmail'\)/);
     assert.match(onboardingPage, /if \(step !== 'linkedin' \|\| !linkedinConnected/);
-    assert.match(onboardingPage, /setStep\('gmail'\)/);
+    assert.match(onboardingPage, /onNext=\{goNext\}/);
   }],
   ['LinkedIn start does not launch or derive Google identity', () => {
     const linkedinStep = onboardingPage.match(/STEP 2: LINKEDIN[\s\S]*?STEP 3: GMAIL/)?.[0] ?? '';
@@ -128,10 +128,10 @@ const tests: Array<[string, () => void]> = [
     assert.match(continuityMigration, /v_connection_state NOT IN \('pending','authenticating','requires_action'\)/);
     assert.match(continuityMigration, /REVOKE EXECUTE ON FUNCTION public\.get_linkedin_login_access\(uuid,uuid\) FROM PUBLIC, anon/);
   }],
-  ['onboarding explicitly opens Browserbase login and keeps polling', () => {
+  ['onboarding embeds authorized Browserbase login and keeps polling', () => {
     assert.match(onboardingPage, /useLinkedInLoginAccess\(linkedinAccountId\)/);
-    assert.match(onboardingPage, /Open secure LinkedIn login/);
-    assert.match(onboardingPage, /window\.open\(loginUrl, '_blank', 'noopener,noreferrer'\)/);
+    assert.match(onboardingPage, /SecureLinkedInAuthModal/);
+    assert.doesNotMatch(onboardingPage, /window\.open\(loginUrl/);
     assert.match(hook, /get_linkedin_login_access/);
     assert.match(hook, /refetchInterval: 2000/);
   }],
@@ -146,7 +146,7 @@ const tests: Array<[string, () => void]> = [
     assert.match(onboardingPage, /useAuthInteractions\(linkedinAccountId\)/);
     assert.match(onboardingPage, /LinkedIn security verification required/);
     assert.match(onboardingPage, /Yuktris remains passive and never collects verification codes/);
-    assert.match(onboardingPage, /Continue LinkedIn sign-in/);
+    assert.match(onboardingPage, /securityCheckRequired/);
     assert.doesNotMatch(onboardingPage, /solveCaptcha|Submit Code|otp_code|captcha_solution/);
   }],
   ['challenge polling pins one page and does not focus or navigate it', () => {

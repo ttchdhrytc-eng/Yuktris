@@ -108,6 +108,7 @@ export type ProgressStep =
   | 'challenge_detected'
   | 'waiting_for_user'
   | 'verifying_authentication'
+  | 'identity_verified'
   | 'saving_session'
   | 'connected'
   | 'login_timeout'
@@ -386,6 +387,14 @@ export class LinkedInBrowser {
     return this.page;
   }
 
+  /** Remove authenticated LinkedIn content from the customer-visible page after state capture. */
+  async neutralizeVisiblePage(): Promise<void> {
+    if (!this.page || this.page.isClosed()) return;
+    await this.page.goto('about:blank', { waitUntil: 'commit', timeout: 5_000 }).catch((error) => {
+      logger.warn('Could not neutralize the completed authentication page', { error: String(error) });
+    });
+  }
+
   // ── OPEN LINKEDIN: Navigate to login page + verify loaded ──────
 
   async openLinkedIn(onProgress?: ProgressCallback): Promise<void> {
@@ -588,7 +597,6 @@ export class LinkedInBrowser {
       if (onProgress) await onProgress('verifying_authentication', 'LinkedIn sign-in detected. Verifying authentication...');
       logger.info('Authentication detected, verifying identity');
       transition('verifying_identity');
-      if (onProgress) await onProgress('saving_session', 'Login detected. Verifying identity and saving session...');
 
       // ── Verify identity ────────────────────────────────────────
       const identity = await this.verifyIdentity();
@@ -602,6 +610,7 @@ export class LinkedInBrowser {
         return { success: false, error: identityMismatch, nonRetryable: true, authState: 'authenticated' };
       }
       logger.info('Identity verified', { name: identity.profileName, url: identity.profileUrl });
+      if (onProgress) await onProgress('identity_verified', 'LinkedIn identity verified. Closing secure sign-in view...');
 
       // ── Capture session ────────────────────────────────────────
       transition('capturing_session');
