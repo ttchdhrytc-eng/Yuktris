@@ -74,7 +74,8 @@ const tests: Array<[string, () => void]> = [
     assert.match(onboardingPage, /LinkedIn email \(optional\)/);
   }],
   ['authenticated identity is discovered, canonicalized, and persisted before session save', () => {
-    assert.match(linkedin, /https:\/\/www\.linkedin\.com\/in\/\$\{profileMatch\[1\]\}/);
+    assert.match(linkedin, /https:\/\/www\.linkedin\.com\/in\/\$\{match\[1\]\}/);
+    assert.match(linkedin, /canonicalPersonalProfileUrl/);
     const bind = worker.indexOf('await this.bindAuthenticatedIdentity(workspaceId, accountId, result.identity?.profileUrl)');
     const save = worker.indexOf('await this.saveSession(workspaceId, accountId, result.session!)');
     assert.ok(bind > 0 && bind < save);

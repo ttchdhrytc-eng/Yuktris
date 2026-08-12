@@ -19,6 +19,7 @@ const MAX_AUTH_ATTEMPT_LIFETIME_MS = 30 * 60 * 1000;
 const CHALLENGE_DISAPPEAR_GRACE_MS = 10 * 1000;
 const IDENTITY_RESOLUTION_ATTEMPTS = 4;
 const IDENTITY_RESOLUTION_DELAY_MS = 2000;
+const IDENTITY_NAVIGATION_TIMEOUT_MS = 10000;
 
 async function withTimeout<T>(operation: Promise<T>, timeoutMs: number, message: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -1172,42 +1173,108 @@ export class LinkedInBrowser {
 
   // ── Identity Verification ────────────────────────────────────────
 
-  private async verifyIdentity(): Promise<LinkedInIdentity | null> {
+  private canonicalPersonalProfileUrl(value: string): string | null {
+    try {
+      const parsed = new URL(value, 'https://www.linkedin.com');
+      if (!this.isLinkedInUrl(parsed.toString())) return null;
+      const match = parsed.pathname.match(/^\/in\/([A-Za-z0-9_%.-]+)\/?$/i);
+      if (!match || match[1].toLowerCase() === 'me') return null;
+      return `https://www.linkedin.com/in/${match[1]}`;
+    } catch {
+      return null;
+    }
+  }
+
+  private async verifyIdentity(attempt = 1, queueItemId?: string, workspaceId?: string, accountId?: string): Promise<LinkedInIdentity | null> {
     if (!this.page) return null;
+    const startedAt = Date.now();
+    const timing = (stage: string, method: string, stageStartedAt = startedAt, metadata: Record<string, unknown> = {}): void => {
+      const now = Date.now();
+      logger.info('Canonical LinkedIn identity timing', {
+        queue_item_id: queueItemId,
+        workspace_id: workspaceId,
+        account_id: accountId,
+        attempt,
+        stage,
+        method,
+        timestamp: new Date(now).toISOString(),
+        elapsed_ms: now - startedAt,
+        stage_duration_ms: now - stageStartedAt,
+        ...metadata,
+      });
+    };
+    timing('I0_identity_resolution_started', 'authenticated_navigation_dom');
 
     try {
-      await this.page.goto(LINKEDIN_PROFILE_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
-      await this.page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
+      const domStartedAt = Date.now();
+      timing('identity_fallback_started', 'authenticated_navigation_dom', domStartedAt);
+      const selfNavigationIdentity = await this.page.evaluate(() => {
+        const selectors = [
+          '.global-nav__me a[href*="/in/"]',
+          'a[data-control-name="identity_profile_photo"][href*="/in/"]',
+          'nav[aria-label="Primary"] a[href*="/in/"]',
+          'nav[aria-label="Main"] a[href*="/in/"]',
+        ];
+        for (const selector of selectors) {
+          const anchor = document.querySelector<HTMLAnchorElement>(selector);
+          if (anchor?.href) return { href: anchor.href, name: anchor.textContent?.trim() || null };
+        }
+        return null;
+      }).catch(() => null);
+      const domProfileUrl = selfNavigationIdentity?.href ? this.canonicalPersonalProfileUrl(selfNavigationIdentity.href) : null;
+      timing('identity_fallback_completed', 'authenticated_navigation_dom', domStartedAt, { canonical_identity_found: !!domProfileUrl });
+      if (domProfileUrl) {
+        const identity = { profileUrl: domProfileUrl, profileName: selfNavigationIdentity?.name || null, profileHeadline: null };
+        timing('I4_canonical_url_available', 'authenticated_navigation_dom', startedAt, { pathname: this.safePathname(domProfileUrl) });
+        timing('I5_identity_parsed', 'authenticated_navigation_dom');
+        timing('I6_identity_resolution_completed', 'authenticated_navigation_dom');
+        logger.info('Identity extracted', { canonical_identity_found: true, method: 'authenticated_navigation_dom', pathname: this.safePathname(domProfileUrl) });
+        return identity;
+      }
 
+      const navigationStartedAt = Date.now();
+      timing('identity_fallback_started', 'linkedin_profile_redirect', navigationStartedAt);
+      timing('I1_navigation_started', 'linkedin_profile_redirect', navigationStartedAt, { timeout_ms: IDENTITY_NAVIGATION_TIMEOUT_MS });
+      const response = await this.page.goto(LINKEDIN_PROFILE_URL, { waitUntil: 'commit', timeout: IDENTITY_NAVIGATION_TIMEOUT_MS });
+      timing('I2_navigation_response_received', 'linkedin_profile_redirect', navigationStartedAt, { response_received: !!response });
       const resolvedUrl = this.page.url();
-      const parsed = new URL(resolvedUrl);
-      const profileMatch = parsed.pathname.match(/^\/in\/([A-Za-z0-9_%.-]+)\/?$/i);
-      if (!this.isLinkedInUrl(resolvedUrl) || !profileMatch || profileMatch[1].toLowerCase() === 'me') {
-        logger.warn('Profile URL not resolved', { url: resolvedUrl });
+      timing('I3_redirect_resolved', 'linkedin_profile_redirect', navigationStartedAt, { origin: this.safeOrigin(resolvedUrl), pathname: this.safePathname(resolvedUrl) });
+      const profileUrl = this.canonicalPersonalProfileUrl(resolvedUrl);
+      if (!profileUrl) {
+        timing('identity_fallback_completed', 'linkedin_profile_redirect', navigationStartedAt, { canonical_identity_found: false });
+        logger.warn('Profile URL not resolved', { origin: this.safeOrigin(resolvedUrl), pathname: this.safePathname(resolvedUrl) });
         return null;
       }
-      const url = `https://www.linkedin.com/in/${profileMatch[1]}`;
+      timing('I4_canonical_url_available', 'linkedin_profile_redirect', navigationStartedAt, { pathname: this.safePathname(profileUrl) });
 
-      const profileName = await this.page.textContent('h1').catch(() => null);
-      const headline = await this.page.textContent('.text-body-medium, [class*="headline"]').catch(() => null);
+      // Canonical identity is established by LinkedIn's authenticated redirect.
+      // Profile presentation fields are optional and sampled without selector waits.
+      const presentation = await this.page.evaluate(() => ({
+        name: document.querySelector('h1')?.textContent?.trim() || null,
+        headline: document.querySelector('.text-body-medium, [class*="headline"]')?.textContent?.trim() || null,
+      })).catch(() => ({ name: null, headline: null }));
 
       const identity: LinkedInIdentity = {
-        profileUrl: url,
-        profileName: profileName?.trim() || null,
-        profileHeadline: headline?.trim() || null,
+        profileUrl,
+        profileName: presentation.name,
+        profileHeadline: presentation.headline,
       };
 
-      logger.info('Identity extracted', { canonical_identity_found: !!identity.profileUrl, method: 'linkedin_profile_redirect' });
+      timing('I5_identity_parsed', 'linkedin_profile_redirect');
+      timing('identity_fallback_completed', 'linkedin_profile_redirect', navigationStartedAt, { canonical_identity_found: true });
+      timing('I6_identity_resolution_completed', 'linkedin_profile_redirect');
+      logger.info('Identity extracted', { canonical_identity_found: true, method: 'linkedin_profile_redirect', pathname: this.safePathname(profileUrl) });
       return identity;
     } catch (err) {
-      logger.error('Identity verification failed', { error: String(err) });
+      timing('identity_fallback_completed', 'linkedin_profile_redirect', startedAt, { canonical_identity_found: false, failed: true });
+      logger.error('Identity verification failed', { error: this.sanitizeError(err), attempt });
       return null;
     }
   }
 
   private async verifyIdentityWithRetry(queueItemId?: string, workspaceId?: string, accountId?: string): Promise<LinkedInIdentity | null> {
     for (let attempt = 1; attempt <= IDENTITY_RESOLUTION_ATTEMPTS; attempt++) {
-      const identity = await this.verifyIdentity();
+      const identity = await this.verifyIdentity(attempt, queueItemId, workspaceId, accountId);
       logger.info('Canonical LinkedIn identity resolution attempt', {
         queue_item_id: queueItemId,
         workspace_id: workspaceId,
