@@ -525,12 +525,11 @@ function ChallengeNotification({ event, onResolved }: { event: LinkedInAuthInter
 
 function ConnectLinkedInModal({ onClose, onConnect, isConnecting }: {
   onClose: () => void;
-  onConnect: (params: { linkedinEmail: string; displayName?: string; profileUrl: string }) => void;
+  onConnect: (params: { linkedinEmail?: string; displayName?: string }) => void;
   isConnecting: boolean;
 }) {
   const [email, setEmail] = useState('');
   const [displayName, setDisplayName] = useState('');
-  const [expectedProfileUrl, setExpectedProfileUrl] = useState('');
 
   return (
     <Modal open onClose={onClose} title="Connect your existing LinkedIn account" description="Sign in directly inside the secure LinkedIn browser. Yuktris never receives your password or verification codes.">
@@ -544,7 +543,7 @@ function ConnectLinkedInModal({ onClose, onConnect, isConnecting }: {
                 </p>
               </div>
             </div>
-            <Field label="LinkedIn email / username" required>
+            <Field label="LinkedIn email / username (optional)">
               <input
                 type="email"
                 value={email}
@@ -561,20 +560,11 @@ function ConnectLinkedInModal({ onClose, onConnect, isConnecting }: {
                 className="w-full rounded-lg border border-gold-500/12 bg-maroon-900 px-3 py-2 text-sm text-ink-50 placeholder:text-ink-500 focus:border-brand-500 focus:outline-none"
               />
             </Field>
-            <Field label="LinkedIn profile URL" required>
-              <input
-                type="url"
-                value={expectedProfileUrl}
-                onChange={(e) => setExpectedProfileUrl(e.target.value)}
-                placeholder="https://www.linkedin.com/in/username"
-                className="w-full rounded-lg border border-gold-500/12 bg-maroon-900 px-3 py-2 text-sm text-ink-50 placeholder:text-ink-500 focus:border-brand-500 focus:outline-none"
-              />
-            </Field>
             <div className="flex justify-end gap-2 pt-2">
               <Button variant="ghost" onClick={onClose}>Cancel</Button>
               <Button
-                onClick={() => onConnect({ linkedinEmail: email, displayName: displayName || undefined, profileUrl: expectedProfileUrl })}
-                disabled={!email || !/^https:\/\/(?:[a-z]{2,3}\.)?linkedin\.com\/in\/[A-Za-z0-9_%.-]+\/?(?:[?#].*)?$/i.test(expectedProfileUrl.trim()) || isConnecting}
+                onClick={() => onConnect({ linkedinEmail: email.trim() || undefined, displayName: displayName || undefined })}
+                disabled={isConnecting}
               >
                 {isConnecting ? <Spinner className="h-4 w-4" /> : <Zap className="h-4 w-4" />}
                 Continue to LinkedIn

@@ -85,13 +85,13 @@ export function useConnectLinkedIn() {
   const { workspace } = useWorkspace();
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: async (params: { linkedinEmail: string; displayName?: string; profileUrl: string; existingAccountId?: string }) => {
+    mutationFn: async (params: { linkedinEmail?: string; displayName?: string; existingAccountId?: string }) => {
       if (!workspace) throw new Error('No workspace');
       const { data, error } = await supabase.rpc('start_linkedin_connection', {
         p_workspace_id: workspace.id,
-        p_linkedin_email: params.linkedinEmail,
+        p_linkedin_email: params.linkedinEmail?.trim() || null,
         p_display_name: params.displayName ?? null,
-        p_expected_profile_url: params.profileUrl,
+        p_expected_profile_url: null,
         p_existing_account_id: params.existingAccountId ?? null,
         p_idempotency_key: crypto.randomUUID(),
       });

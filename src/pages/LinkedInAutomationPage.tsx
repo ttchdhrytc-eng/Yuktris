@@ -109,7 +109,6 @@ function AccountsTab() {
   const [showForm, setShowForm] = useState(false);
   const [email, setEmail] = useState('');
   const [displayName, setDisplayName] = useState('');
-  const [profileUrl, setProfileUrl] = useState('');
   const [connectingAccountId, setConnectingAccountId] = useState<string | null>(null);
 
   const list = accounts.data ?? [];
@@ -138,13 +137,6 @@ function AccountsTab() {
             className="w-full rounded-lg border border-gold-500/12 bg-maroon-950/60 px-3 py-2 text-sm text-ink-50 placeholder:text-ink-600 input-luxury focus:outline-none"
           />
           <input
-            type="url"
-            placeholder="LinkedIn profile URL (required)"
-            value={profileUrl}
-            onChange={(e) => setProfileUrl(e.target.value)}
-            className="w-full rounded-lg border border-gold-500/12 bg-maroon-950/60 px-3 py-2 text-sm text-ink-50 placeholder:text-ink-600 input-luxury focus:outline-none"
-          />
-          <input
             placeholder="Optional display name"
             value={displayName}
             onChange={(e) => setDisplayName(e.target.value)}
@@ -154,16 +146,16 @@ function AccountsTab() {
             size="sm"
             onClick={() => {
               connect.mutate(
-                { linkedinEmail: email, displayName: displayName || undefined, profileUrl },
+                { linkedinEmail: email || undefined, displayName: displayName || undefined },
                 {
                   onSuccess: (data) => {
                     setConnectingAccountId(data.accountId);
                   },
                 },
               );
-              setEmail(''); setDisplayName(''); setProfileUrl(''); setShowForm(false);
+              setEmail(''); setDisplayName(''); setShowForm(false);
             }}
-            disabled={!email || !/^https:\/\/(?:[a-z]{2,3}\.)?linkedin\.com\/in\/[A-Za-z0-9_%.-]+\/?(?:[?#].*)?$/i.test(profileUrl.trim()) || connect.isPending}
+            disabled={connect.isPending}
             loading={connect.isPending}
           >
             Continue to LinkedIn

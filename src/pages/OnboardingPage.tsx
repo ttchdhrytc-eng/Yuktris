@@ -379,10 +379,10 @@ export function OnboardingPage() {
                   setStep('business');
                   return;
                 }
-                const email = prompt('Enter your LinkedIn email:');
-                if (!email) return;
+                const email = prompt('Enter your LinkedIn email (optional), or leave blank to continue:');
+                if (email === null) return;
                 connectLinkedIn.mutate(
-                  { linkedinEmail: email },
+                  { linkedinEmail: email.trim() || undefined },
                   {
                     onSuccess: () => {
                       toast.success('LinkedIn connection started. A secure browser will open for you to sign in.');

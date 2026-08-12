@@ -365,6 +365,7 @@ export class Worker {
         const reuseResult = await this.linkedin.connectWithSession(existingSession.session, TEST_CONNECTION_TIMEOUT, onProgress, intendedIdentity);
 
         if (reuseResult.success) {
+          await this.bindAuthenticatedIdentity(workspaceId, accountId, reuseResult.identity?.profileUrl);
           await this.updateAccount(accountId, {
             connection_state: 'connected', session_status: 'connected', status: 'active',
             last_validated_at: new Date().toISOString(), last_login_at: new Date().toISOString(), last_error: null,
@@ -478,6 +479,10 @@ export class Worker {
 
     // ── Save encrypted session ──────────────────────────────────
     await onProgress('saving_session', 'Login successful. Encrypting and saving session...');
+
+    // Persist the verified Browserbase identity before its encrypted session.
+    // First login binds the identity; subsequent logins must match it.
+    await this.bindAuthenticatedIdentity(workspaceId, accountId, result.identity?.profileUrl);
 
     const sessionId = await this.saveSession(workspaceId, accountId, result.session!);
     if (!sessionId) {
@@ -846,6 +851,16 @@ export class Worker {
       profileName: data.profile_name,
       linkedinEmail: data.linkedin_email,
     };
+  }
+
+  private async bindAuthenticatedIdentity(workspaceId: string, accountId: string, profileUrl?: string | null): Promise<void> {
+    if (!profileUrl) throw new Error('Authenticated LinkedIn identity has no personal profile URL');
+    const { error } = await this.client.rpc('bind_linkedin_account_identity', {
+      p_workspace_id: workspaceId,
+      p_account_id: accountId,
+      p_profile_url: profileUrl,
+    });
+    if (error) throw new Error(`Failed to bind authenticated LinkedIn identity: ${this.sanitizeError(error)}`);
   }
 
   private sanitizeError(error: unknown): string {

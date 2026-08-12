@@ -5,11 +5,13 @@ import { resolve } from 'node:path';
 const root = resolve(process.cwd(), '..', '..');
 const read = (path: string) => readFileSync(resolve(root, path), 'utf8');
 const migration = read('supabase/migrations/20260810090000_phase2a_linkedin_connection_hardening.sql');
+const identityMigration = read('supabase/migrations/20260812150000_linkedin_post_auth_identity_binding.sql');
 const linkedin = read('workers/linkedin-browser-worker/src/linkedin.ts');
 const worker = read('workers/linkedin-browser-worker/src/worker.ts');
 const browserbase = read('workers/linkedin-browser-worker/src/browserbase.ts');
 const hook = read('src/hooks/useLinkedInBrowser.ts');
 const accountsPage = read('src/pages/LinkedInAccountsPage.tsx');
+const onboardingPage = read('src/pages/OnboardingPage.tsx');
 
 const tests: Array<[string, () => void]> = [
   ['normal login requires verified auth before capture', () => {
@@ -58,16 +60,33 @@ const tests: Array<[string, () => void]> = [
     assert.match(migration, /DROP FUNCTION public\.set_queue_item_waiting\(uuid\)/);
   }],
   ['duplicate connection starts return before mutation and conflicting reuse is rejected', () => {
-    const duplicateReturn = migration.indexOf('RETURN QUERY SELECT v_existing_queue.account_id, v_existing_queue.id');
-    const firstAccountMutation = migration.indexOf('UPDATE public.linkedin_accounts SET account_name');
+    const duplicateReturn = identityMigration.indexOf('RETURN QUERY SELECT v_existing_queue.account_id, v_existing_queue.id');
+    const firstAccountMutation = identityMigration.indexOf('UPDATE public.linkedin_accounts SET account_name');
     assert.ok(duplicateReturn > 0 && duplicateReturn < firstAccountMutation);
-    assert.match(migration, /idempotency key conflicts with a different connection request/);
-    assert.match(migration, /pg_advisory_xact_lock/);
+    assert.match(identityMigration, /idempotency key conflicts with a different connection request/);
+    assert.match(identityMigration, /pg_advisory_xact_lock/);
   }],
-  ['profile identity is required, preserved, and conflict protected', () => {
-    assert.match(migration, /v_profile := coalesce\(v_existing_profile, v_profile\)/);
-    assert.match(migration, /A valid LinkedIn profile URL is required/);
-    assert.match(migration, /expected LinkedIn profile conflicts with the connected account/);
+  ['connection can start with pending profile identity', () => {
+    assert.doesNotMatch(identityMigration, /IF v_profile IS NULL THEN RAISE EXCEPTION 'A valid LinkedIn profile URL is required'/);
+    assert.match(hook, /p_expected_profile_url:\s*null/);
+    assert.match(onboardingPage, /LinkedIn email \(optional\)/);
+  }],
+  ['authenticated identity is discovered, canonicalized, and persisted before session save', () => {
+    assert.match(linkedin, /https:\/\/www\.linkedin\.com\/in\/\$\{profileMatch\[1\]\}/);
+    const bind = worker.indexOf('await this.bindAuthenticatedIdentity(workspaceId, accountId, result.identity?.profileUrl)');
+    const save = worker.indexOf('await this.saveSession(workspaceId, accountId, result.session!)');
+    assert.ok(bind > 0 && bind < save);
+    assert.match(identityMigration, /SET expected_profile_url=v_profile, profile_url=v_profile/);
+  }],
+  ['canonical identity cannot switch on reconnect', () => {
+    assert.match(identityMigration, /Authenticated LinkedIn profile does not match the account being connected/);
+    assert.match(worker, /loadIntendedIdentity/);
+    assert.match(linkedin, /Authenticated LinkedIn profile does not match the account being connected/);
+  }],
+  ['identity binding is workspace isolated and service-role only', () => {
+    assert.match(identityMigration, /WHERE id=p_account_id AND workspace_id=p_workspace_id/);
+    assert.match(identityMigration, /REVOKE EXECUTE ON FUNCTION public\.bind_linkedin_account_identity\(uuid,uuid,text\) FROM PUBLIC, anon, authenticated/);
+    assert.match(identityMigration, /GRANT EXECUTE ON FUNCTION public\.bind_linkedin_account_identity\(uuid,uuid,text\) TO service_role/);
   }],
   ['strict leases gate completion failure and waiting', () => {
     assert.ok((migration.match(/attempt_id\s*=\s*p_attempt_id AND lease_expires_at > now\(\)/g) ?? []).length >= 3);

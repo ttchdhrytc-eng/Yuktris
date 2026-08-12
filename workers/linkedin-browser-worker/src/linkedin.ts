@@ -942,11 +942,14 @@ export class LinkedInBrowser {
       await this.page.goto(LINKEDIN_PROFILE_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
       await this.page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
 
-      const url = this.page.url();
-      if (!url.includes('/in/') || url.includes('/in/me')) {
-        logger.warn('Profile URL not resolved', { url });
+      const resolvedUrl = this.page.url();
+      const parsed = new URL(resolvedUrl);
+      const profileMatch = parsed.pathname.match(/^\/in\/([A-Za-z0-9_%.-]+)\/?$/i);
+      if (!this.isLinkedInUrl(resolvedUrl) || !profileMatch || profileMatch[1].toLowerCase() === 'me') {
+        logger.warn('Profile URL not resolved', { url: resolvedUrl });
         return null;
       }
+      const url = `https://www.linkedin.com/in/${profileMatch[1]}`;
 
       const profileName = await this.page.textContent('h1').catch(() => null);
       const headline = await this.page.textContent('.text-body-medium, [class*="headline"]').catch(() => null);
