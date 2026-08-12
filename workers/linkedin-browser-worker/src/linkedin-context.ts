@@ -151,13 +151,14 @@ export class LinkedInContextService {
     if (error) throw new Error(`Context session attachment failed: ${error.message}`);
   }
 
-  async synchronize(context: ContextRecord, sessionId: string, owner: ContextLeaseOwner): Promise<void> {
+  async synchronize(context: ContextRecord, sessionId: string, owner: ContextLeaseOwner): Promise<{ terminalObservedAt: number; synchronizedAt: number }> {
     const ownership = { p_context_id: context.id, p_queue_item_id: owner.queueItemId, p_worker_id: owner.workerId, p_attempt_id: owner.attemptId };
     const begin = await this.client.rpc('begin_linkedin_browser_context_synchronization', ownership);
     if (begin.error) throw new Error(`Context synchronization start failed: ${begin.error.message}`);
-    await browserbase.waitForContextSynchronization(sessionId, context.provider_context_id!);
+    const timing = await browserbase.waitForContextSynchronization(sessionId, context.provider_context_id!);
     const complete = await this.client.rpc('complete_linkedin_browser_context_synchronization', ownership);
     if (complete.error) throw new Error(`Context synchronization completion failed: ${complete.error.message}`);
+    return timing;
   }
 
   async release(contextId: string, owner: ContextLeaseOwner): Promise<boolean> {

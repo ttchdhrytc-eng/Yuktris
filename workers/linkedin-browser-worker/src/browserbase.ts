@@ -4,7 +4,8 @@ const BROWSERBASE_API_URL = 'https://api.browserbase.com/v1';
 const BROWSERBASE_REQUEST_TIMEOUT_MS = 20000;
 const TRANSIENT_RETRY_DELAY_MS = 1500;
 const DEFAULT_VIEWPORT = { width: 1440, height: 900 } as const;
-const CONTEXT_SYNC_POLL_MS = 2000;
+const CONTEXT_SYNC_POLL_MS = 500;
+const CONTEXT_SETTLE_MS = 3000;
 
 async function browserbaseFetch(url: string, init: RequestInit = {}, timeoutMs = BROWSERBASE_REQUEST_TIMEOUT_MS): Promise<Response> {
   const controller = new AbortController();
@@ -236,27 +237,39 @@ async function deleteContext(contextId: string): Promise<'deleted' | 'not_found'
   throw new BrowserbaseError(`Browserbase Context deletion failed (${res.status})`, res.status);
 }
 
-async function waitForSessionTerminal(sessionId: string, timeoutMs = 30000): Promise<'completed' | 'error'> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const state = await getSessionStatus(sessionId);
+export async function pollForSessionTerminal(
+  getStatus: () => Promise<'running' | 'completed' | 'error' | 'unknown'>,
+  timeoutMs = 15000,
+  pollMs = CONTEXT_SYNC_POLL_MS,
+  now: () => number = Date.now,
+  wait: (ms: number) => Promise<void> = (ms) => new Promise(resolve => setTimeout(resolve, ms)),
+): Promise<'completed' | 'error'> {
+  const deadline = now() + timeoutMs;
+  while (now() < deadline) {
+    const state = await getStatus();
     if (state === 'completed' || state === 'error') return state;
-    await new Promise(resolve => setTimeout(resolve, CONTEXT_SYNC_POLL_MS));
+    await wait(pollMs);
   }
   throw new BrowserbaseError('Browserbase session did not reach a terminal state before synchronization timeout', 504);
 }
 
-async function waitForContextSynchronization(sessionId: string, contextId: string, timeoutMs = 45000): Promise<void> {
-  const terminal = await waitForSessionTerminal(sessionId, timeoutMs);
-  if (terminal !== 'completed') throw new BrowserbaseError('Browserbase session ended with an error before Context synchronization', 502);
-  // Browserbase documents an asynchronous settle period after a persisted session closes.
-  await new Promise(resolve => setTimeout(resolve, 5000));
-  await getContext(contextId);
+async function waitForSessionTerminal(sessionId: string, timeoutMs = 15000): Promise<'completed' | 'error'> {
+  return pollForSessionTerminal(() => getSessionStatus(sessionId), timeoutMs);
 }
 
-async function settleClosedContext(sessionId: string, contextId: string, timeoutMs = 45000): Promise<void> {
+async function waitForContextSynchronization(sessionId: string, contextId: string, timeoutMs = 15000): Promise<{ terminalObservedAt: number; synchronizedAt: number }> {
+  const terminal = await waitForSessionTerminal(sessionId, timeoutMs);
+  if (terminal !== 'completed') throw new BrowserbaseError('Browserbase session ended with an error before Context synchronization', 502);
+  const terminalObservedAt = Date.now();
+  // Browserbase documents an asynchronous settle period after a persisted session closes.
+  await new Promise(resolve => setTimeout(resolve, CONTEXT_SETTLE_MS));
+  await getContext(contextId);
+  return { terminalObservedAt, synchronizedAt: Date.now() };
+}
+
+async function settleClosedContext(sessionId: string, contextId: string, timeoutMs = 15000): Promise<void> {
   await waitForSessionTerminal(sessionId, timeoutMs);
-  await new Promise(resolve => setTimeout(resolve, 5000));
+  await new Promise(resolve => setTimeout(resolve, CONTEXT_SETTLE_MS));
   await getContext(contextId);
 }
 

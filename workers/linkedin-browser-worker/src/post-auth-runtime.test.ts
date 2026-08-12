@@ -53,7 +53,7 @@ const tests: Array<[string, () => void]> = [
   }],
   ['current queue identity event covers and unmounts immediately', () => {
     assert.match(modal, /setCovered\(true\)/);
-    assert.match(modal, /requestAnimationFrame\(\(\) => setIframeMounted\(false\)\)/);
+    assert.match(modal, /requestAnimationFrame\(\(\) => \{[\s\S]*setIframeMounted\(false\)/);
     assert.match(modal, /iframeMounted && safeUrl/);
   }],
   ['cancel is available before verification and removed after cover', () => {

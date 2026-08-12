@@ -523,17 +523,28 @@ export class Worker {
     }
 
     // ── Save encrypted session ──────────────────────────────────
+    const identityVerifiedAt = result.identityVerifiedAt ?? Date.now();
+    const logPostAuthStage = (stage: string, stageStartedAt = identityVerifiedAt): void => logger.info('LinkedIn post-auth latency', {
+      queue_item_id: item.id, workspace_id: workspaceId, account_id: accountId, stage,
+      timestamp: new Date().toISOString(), elapsed_from_identity_verified_ms: Date.now() - identityVerifiedAt,
+      stage_duration_ms: Date.now() - stageStartedAt,
+    });
+    logPostAuthStage('identity_verified');
+    if (result.stateCapturedAt) logPostAuthStage('authenticated_state_captured', result.identityVerifiedAt);
+
     // Authentication and canonical identity are verified and browser state is
     // captured. Revoke customer Live View access before backend finalization.
     await this.updateAccount(accountId, { browserbase_session_id: null, browser_connected_at: null });
     await this.linkedin.neutralizeVisiblePage();
-    logger.info('LinkedIn connection finalization stage', { queue_item_id: item.id, workspace_id: workspaceId, account_id: accountId, stage: 'live_view_revoked' });
+    logPostAuthStage('live_view_access_revoked');
     await onProgress('saving_session', 'Login successful. Encrypting and saving session...');
 
     // Persist the verified Browserbase identity before its encrypted session.
     // First login binds the identity; subsequent logins must match it.
     await this.bindAuthenticatedIdentity(workspaceId, accountId, result.identity?.profileUrl);
 
+    const persistenceStartedAt = Date.now();
+    logPostAuthStage('encrypted_session_persistence_started');
     const sessionId = await this.saveSession(workspaceId, accountId, result.session!);
     if (!sessionId) {
       await this.linkedin.close();
@@ -541,26 +552,26 @@ export class Worker {
       await this.queue.fail(item.id, 'Session save failed', Date.now() - startTime, true);
       return;
     }
-    logger.info('LinkedIn connection finalization stage', { queue_item_id: item.id, workspace_id: workspaceId, account_id: accountId, stage: 'encrypted_session_persisted' });
-
-    await this.client.rpc('insert_auth_interaction', {
-      p_workspace_id: workspaceId,
-      p_account_id: accountId,
-      p_queue_item_id: item.id,
-      p_interaction_type: 'session_saved',
-      p_step: 'saving_session',
-      p_message: 'Session encrypted and saved successfully.',
-      p_status: 'completed',
-      p_metadata: { session_id: sessionId },
-    });
+    logPostAuthStage('encrypted_session_persistence_completed', persistenceStartedAt);
 
     // Browserbase saves a persistent Context only after the provider session
     // closes and its asynchronous synchronization has settled.
     if (persistentContext && bbSessionId && this.activeContextLease) {
+      const releaseStartedAt = Date.now();
+      logPostAuthStage('browserbase_release_requested');
       await this.linkedin.close();
-      await this.linkedinContexts.synchronize(persistentContext, bbSessionId, this.activeContextLease.owner);
+      logPostAuthStage('browserbase_release_request_completed', releaseStartedAt);
+      const synchronizationStartedAt = Date.now();
+      logPostAuthStage('context_synchronization_started');
+      const synchronization = await this.linkedinContexts.synchronize(persistentContext, bbSessionId, this.activeContextLease.owner);
+      logger.info('LinkedIn post-auth latency', {
+        queue_item_id: item.id, workspace_id: workspaceId, account_id: accountId, stage: 'browserbase_session_terminal_observed',
+        timestamp: new Date(synchronization.terminalObservedAt).toISOString(),
+        elapsed_from_identity_verified_ms: synchronization.terminalObservedAt - identityVerifiedAt,
+        stage_duration_ms: synchronization.terminalObservedAt - synchronizationStartedAt,
+      });
+      logPostAuthStage('context_synchronization_completed', synchronizationStartedAt);
       this.activeContextLease = null;
-      logger.info('LinkedIn connection finalization stage', { queue_item_id: item.id, workspace_id: workspaceId, account_id: accountId, stage: 'persistent_context_synchronized' });
     }
 
     // STATE: AUTHENTICATED — only after session is saved AND verified
@@ -570,21 +581,28 @@ export class Worker {
       profile_url: result.identity?.profileUrl, profile_name: result.identity?.profileName,
       profile_headline: result.identity?.profileHeadline,
     });
-    logger.info('LinkedIn connection finalization stage', { queue_item_id: item.id, workspace_id: workspaceId, account_id: accountId, stage: 'account_connected' });
-
-    await this.logSessionEvent(workspaceId, accountId, 'login_success', {
-      profile_url: result.identity?.profileUrl, profile_name: result.identity?.profileName,
-    });
-    await this.logSessionEvent(workspaceId, accountId, 'validated', { session_id: sessionId });
+    logPostAuthStage('durable_account_connected');
 
     await onProgress('connected', 'LinkedIn connected successfully. Session encrypted and verified.');
-
-    await this.linkedin.close();
 
     await this.queue.complete(item.id, {
       connected: true, session_id: sessionId, identity: result.identity,
       duration_ms: Date.now() - startTime,
     }, Date.now() - startTime);
+
+    await Promise.allSettled([
+      this.client.rpc('insert_auth_interaction', {
+        p_workspace_id: workspaceId, p_account_id: accountId, p_queue_item_id: item.id,
+        p_interaction_type: 'session_saved', p_step: 'saving_session',
+        p_message: 'Session encrypted and saved successfully.', p_status: 'completed', p_metadata: { session_id: sessionId },
+      }),
+      this.logSessionEvent(workspaceId, accountId, 'login_success', {
+        profile_url: result.identity?.profileUrl, profile_name: result.identity?.profileName,
+      }),
+      this.logSessionEvent(workspaceId, accountId, 'validated', { session_id: sessionId }),
+    ]);
+
+    await this.linkedin.close();
 
     logger.info('LinkedIn account connected', { account_id: accountId, session_id: sessionId });
   }

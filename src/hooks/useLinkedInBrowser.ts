@@ -33,7 +33,10 @@ export function useLinkedInAccounts() {
       return (data ?? []) as LinkedInAccount[];
     },
     enabled: !!workspace,
-    refetchInterval: 10000,
+    refetchInterval: (query) => {
+      const accounts = query.state.data;
+      return accounts?.some((account) => ['pending', 'authenticating', 'requires_action'].includes(account.connection_state)) ? 1000 : 10000;
+    },
   });
 }
 

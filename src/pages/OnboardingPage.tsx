@@ -157,7 +157,9 @@ export function OnboardingPage() {
   useEffect(() => {
     if (step !== 'linkedin' || !linkedinConnected || linkedinCompletionHandledRef.current) return;
     linkedinCompletionHandledRef.current = true;
+    console.info('[linkedin-auth-timing]', { queueItemId: linkedinQueueItemId, stage: 'connected_state_observed', timestamp: new Date().toISOString() });
     toast.success('LinkedIn connected successfully.');
+    requestAnimationFrame(() => console.info('[linkedin-auth-timing]', { queueItemId: linkedinQueueItemId, stage: 'success_ui_rendered', timestamp: new Date().toISOString() }));
   }, [linkedinConnected, step]);
 
   // Animate research stages during business analysis
@@ -471,6 +473,7 @@ export function OnboardingPage() {
               open={!!linkedinAccountId && !linkedinConnected && !linkedinFailed && !linkedinExpired && (linkedinWaiting || linkedinIdentityVerified)}
               loginUrl={linkedinLoginAccess.data?.loginUrl ?? null}
               identityVerified={linkedinIdentityVerified}
+              queueItemId={linkedinQueueItemId}
               securityCheckRequired={!!linkedinChallenge && linkedinAccount?.connection_state === 'requires_action'}
               onCancel={() => {
                 if (cancellableLinkedinInteraction) cancelLinkedinAuth.mutate(cancellableLinkedinInteraction);

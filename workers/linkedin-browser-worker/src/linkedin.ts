@@ -128,6 +128,8 @@ export interface ConnectionResult {
   nonRetryable?: boolean;
   retryable?: boolean;
   cancelled?: boolean;
+  identityVerifiedAt?: number;
+  stateCapturedAt?: number;
 }
 
 export type ProgressStep =
@@ -413,13 +415,14 @@ export class LinkedInBrowser {
   }
 
   async close(): Promise<void> {
+    // keepAlive sessions survive CDP disconnects. Explicitly request release
+    // before closing Playwright so Browserbase can begin Context persistence
+    // immediately rather than waiting for the provider session timeout.
+    if (this.bbSession) await browserbase.endSession(this.bbSession.id);
     if (this.page) { await this.page.close().catch(() => {}); this.page = null; }
     if (this.context) { await this.context.close().catch(() => {}); this.context = null; }
     if (this.browser) { await this.browser.close().catch(() => {}); this.browser = null; }
-    if (this.bbSession) {
-      await browserbase.endSession(this.bbSession.id);
-      this.bbSession = null;
-    }
+    this.bbSession = null;
     logger.info('Browser closed');
   }
 
@@ -652,6 +655,7 @@ export class LinkedInBrowser {
       }
       logger.info('Identity verified', { canonical_identity_found: !!identity.profileUrl });
       if (onProgress) await onProgress('identity_verified', 'LinkedIn identity verified. Closing secure sign-in view...');
+      const identityVerifiedAt = Date.now();
       logger.info('Identity verified progress emitted', {
         queue_item_id: queueItemId,
         workspace_id: workspaceId,
@@ -662,13 +666,14 @@ export class LinkedInBrowser {
       // ── Capture session ────────────────────────────────────────
       transition('capturing_session');
       const session = await this.captureSession();
+      const stateCapturedAt = Date.now();
 
       // ── Test session restore ────────────────────────────────────
       // Session persistence and the final connected transition are owned by
       // Worker.handleConnect. Avoid a second cloud-browser login immediately
       // after human verification; the original session has already supplied
       // authenticated UI, canonical identity, and the authenticated cookie.
-      return { success: true, identity, session };
+      return { success: true, identity, session, identityVerifiedAt, stateCapturedAt };
     } catch (err) {
       try { transition('failed'); } catch { /* preserve the original failure */ }
       const msg = this.sanitizeError(err);

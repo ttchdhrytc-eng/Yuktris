@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Linkedin, Loader2, ShieldCheck, X } from 'lucide-react';
 import { Button } from '@/components/ui/Button';
 
-type Props = { open: boolean; loginUrl: string | null; identityVerified: boolean; securityCheckRequired: boolean; onCancel: () => void };
+type Props = { open: boolean; loginUrl: string | null; identityVerified: boolean; securityCheckRequired: boolean; queueItemId?: string | null; onCancel: () => void };
 
 function presentationUrl(value: string): string {
   const url = new URL(value);
@@ -11,7 +11,7 @@ function presentationUrl(value: string): string {
   return url.toString();
 }
 
-export function SecureLinkedInAuthModal({ open, loginUrl, identityVerified, securityCheckRequired, onCancel }: Props) {
+export function SecureLinkedInAuthModal({ open, loginUrl, identityVerified, securityCheckRequired, queueItemId, onCancel }: Props) {
   const [covered, setCovered] = useState(false);
   const [iframeMounted, setIframeMounted] = useState(true);
   const safeUrl = useMemo(() => { try { return loginUrl ? presentationUrl(loginUrl) : null; } catch { return null; } }, [loginUrl]);
@@ -19,8 +19,14 @@ export function SecureLinkedInAuthModal({ open, loginUrl, identityVerified, secu
   useEffect(() => {
     if (!open) { setCovered(false); setIframeMounted(true); return; }
     if (!identityVerified) return;
+    const observedAt = performance.now();
+    console.info('[linkedin-auth-timing]', { queueItemId, stage: 'identity_verified_observed', timestamp: new Date().toISOString() });
     setCovered(true);
-    const frame = requestAnimationFrame(() => setIframeMounted(false));
+    console.info('[linkedin-auth-timing]', { queueItemId, stage: 'iframe_covered', elapsedMs: performance.now() - observedAt });
+    const frame = requestAnimationFrame(() => {
+      setIframeMounted(false);
+      console.info('[linkedin-auth-timing]', { queueItemId, stage: 'iframe_unmounted', elapsedMs: performance.now() - observedAt });
+    });
     return () => cancelAnimationFrame(frame);
   }, [open, identityVerified]);
 

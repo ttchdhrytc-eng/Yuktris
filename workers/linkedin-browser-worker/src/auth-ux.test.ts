@@ -56,7 +56,7 @@ const tests: Array<[string, () => void]> = [
   }],
   ['identity verification immediately covers then unmounts iframe', () => {
     assert.match(modal, /setCovered\(true\)/);
-    assert.match(modal, /requestAnimationFrame\(\(\) => setIframeMounted\(false\)\)/);
+    assert.match(modal, /requestAnimationFrame\(\(\) => \{[\s\S]*setIframeMounted\(false\)/);
     assert.match(modal, /absolute inset-0 z-10/);
     assert.match(modal, /iframeMounted && safeUrl/);
     assert.match(onboarding, /event\.queue_item_id === linkedinQueueItemId/);
