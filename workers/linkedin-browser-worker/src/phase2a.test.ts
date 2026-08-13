@@ -163,7 +163,7 @@ const tests: Array<[string, () => void]> = [
     assert.match(linkedin, /challenge_detected: \['waiting_for_user'/);
     assert.match(linkedin, /waiting_for_user: \['waiting_for_login', 'challenge_detected', 'verifying_authentication'/);
     assert.match(linkedin, /HUMAN_CHALLENGE_EXTENSION_MS = 20 \* 60 \* 1000/);
-    assert.match(linkedin, /MAX_AUTH_ATTEMPT_LIFETIME_MS = 30 \* 60 \* 1000/);
+    assert.match(linkedin, /MAX_AUTH_ATTEMPT_LIFETIME_MS = DEFAULT_INTERACTIVE_AUTH_TIMEOUT_MS/);
     assert.match(linkedin, /Math\.min\(now \+ HUMAN_CHALLENGE_EXTENSION_MS, absoluteDeadline\)/);
     assert.match(worker, /step === 'challenge_detected' \|\| step === 'waiting_for_user'[\s\S]*connection_state: 'requires_action'/);
   }],

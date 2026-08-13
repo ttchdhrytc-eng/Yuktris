@@ -17,7 +17,7 @@ test('Browserbase API timeout bounds fail before a provider request', () => {
 test('LinkedIn connect sessions outlive the bounded 30-minute human challenge window', () => {
   const worker = readFileSync('src/worker.ts', 'utf8');
   const linkedin = readFileSync('src/linkedin.ts', 'utf8');
-  assert.match(worker, /BROWSERBASE_INTERACTIVE_SESSION_TIMEOUT_MS \|\| '2100000'/);
+  assert.match(worker, /interactiveBrowserSessionTimeoutMs\(\)/);
   assert.match(worker, /launchOptions = \{[\s\S]*timeoutMs: INTERACTIVE_BROWSER_SESSION_TIMEOUT_MS/);
-  assert.match(linkedin, /MAX_AUTH_ATTEMPT_LIFETIME_MS = 30 \* 60 \* 1000/);
+  assert.match(linkedin, /MAX_AUTH_ATTEMPT_LIFETIME_MS = DEFAULT_INTERACTIVE_AUTH_TIMEOUT_MS/);
 });

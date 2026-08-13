@@ -2,6 +2,7 @@ import { chromium, Browser, BrowserContext, Page } from 'playwright';
 import { SupabaseClient } from '@supabase/supabase-js';
 import { logger } from './logger.js';
 import { browserbase, BrowserbaseError, BrowserbaseSession, CreateSessionOptions } from './browserbase.js';
+import { DEFAULT_INTERACTIVE_AUTH_TIMEOUT_MS } from './interactive-auth-config.js';
 
 const LINKEDIN_LOGIN_URL = 'https://www.linkedin.com/login';
 const LINKEDIN_FEED_URL = 'https://www.linkedin.com/feed';
@@ -15,7 +16,7 @@ const TRANSIENT_RETRY_DELAY_MS = 1500;
 // Normal sign-in remains bounded by CONNECTION_TIMEOUT_MS. A verified human
 // challenge may extend that window, but never beyond the absolute lifetime.
 const HUMAN_CHALLENGE_EXTENSION_MS = 20 * 60 * 1000;
-const MAX_AUTH_ATTEMPT_LIFETIME_MS = 30 * 60 * 1000;
+const MAX_AUTH_ATTEMPT_LIFETIME_MS = DEFAULT_INTERACTIVE_AUTH_TIMEOUT_MS;
 const CHALLENGE_DISAPPEAR_GRACE_MS = 10 * 1000;
 const IDENTITY_RESOLUTION_ATTEMPTS = 4;
 const IDENTITY_RESOLUTION_DELAY_MS = 2000;

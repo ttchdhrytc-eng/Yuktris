@@ -6,12 +6,11 @@ import { encrypt, decrypt, getKeyId } from './session.js';
 import { browserbase, BrowserbaseError } from './browserbase.js';
 import { createHash } from 'node:crypto';
 import { ContextLeaseOwner, ContextRecord, LinkedInContextService, persistentContextsEnabled, sessionOptionsForAccount } from './linkedin-context.js';
+import { interactiveAuthTimeoutMs, interactiveBrowserSessionTimeoutMs } from './interactive-auth-config.js';
 
-const CONNECTION_TIMEOUT = parseInt(process.env.CONNECTION_TIMEOUT_MS || '600000', 10);
+const INTERACTIVE_AUTH_TIMEOUT_MS = interactiveAuthTimeoutMs();
 const TEST_CONNECTION_TIMEOUT = parseInt(process.env.TEST_CONNECTION_TIMEOUT_MS || '120000', 10);
-// Browserbase's project default is five minutes. Interactive authentication can
-// legitimately require up to 30 minutes when LinkedIn requests a human check.
-const INTERACTIVE_BROWSER_SESSION_TIMEOUT_MS = parseInt(process.env.BROWSERBASE_INTERACTIVE_SESSION_TIMEOUT_MS || '2100000', 10);
+const INTERACTIVE_BROWSER_SESSION_TIMEOUT_MS = interactiveBrowserSessionTimeoutMs();
 const HEARTBEAT_INTERVAL = parseInt(process.env.WORKER_HEARTBEAT_INTERVAL || '15000', 10);
 const POLL_INTERVAL = parseInt(process.env.QUEUE_POLL_INTERVAL || '3000', 10);
 const SESSION_HEARTBEAT_INTERVAL = parseInt(process.env.SESSION_HEARTBEAT_INTERVAL_MS || '120000', 10);
@@ -73,7 +72,8 @@ export class Worker {
       WORKER_PORT: process.env.WORKER_PORT || '3100',
       POLL_INTERVAL: POLL_INTERVAL,
       HEARTBEAT_INTERVAL: HEARTBEAT_INTERVAL,
-      CONNECTION_TIMEOUT: CONNECTION_TIMEOUT,
+      INTERACTIVE_AUTH_TIMEOUT_MS,
+      INTERACTIVE_BROWSER_SESSION_TIMEOUT_MS,
     });
 
     // Auto-detect browser provider (Fix 4): use Browserbase if configured, else local Chromium
@@ -555,13 +555,13 @@ export class Worker {
         await onProgress('auth_required', 'LinkedIn sign-in is required to continue.', { lifecycle_stage: 'L0_auth_required' });
         await this.updateAccount(accountId, { browserbase_session_id: bbSessionId, browser_connected_at: new Date().toISOString() });
         result = await this.linkedin.connect(
-          CONNECTION_TIMEOUT, onProgress, workspaceId, accountId, item.id, intendedIdentity, preflight.preserveCurrentPage, true,
+          INTERACTIVE_AUTH_TIMEOUT_MS, onProgress, workspaceId, accountId, item.id, intendedIdentity, preflight.preserveCurrentPage, true,
         );
       }
     } else {
       await onProgress('auth_required', 'LinkedIn sign-in is required to continue.', { lifecycle_stage: 'L0_auth_required' });
       await this.updateAccount(accountId, { browserbase_session_id: bbSessionId, browser_connected_at: new Date().toISOString() });
-      result = await this.linkedin.connect(CONNECTION_TIMEOUT, onProgress, workspaceId, accountId, item.id, intendedIdentity, preserveRestoredPage, false);
+      result = await this.linkedin.connect(INTERACTIVE_AUTH_TIMEOUT_MS, onProgress, workspaceId, accountId, item.id, intendedIdentity, preserveRestoredPage, false);
     }
 
     logger.info('handleConnect: linkedin.connect() returned', { account_id: accountId, success: result.success, requiresAction: result.requiresAction, error: result.error });
