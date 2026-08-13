@@ -413,6 +413,8 @@ export class Worker {
 
     // ── Try session reuse first ──────────────────────────────────
     const existingSession = usePersistentContext ? null : await this.loadSessionForAccount(accountId);
+    let reuseOpenBrowserForAuthentication = false;
+    let preserveRestoredPage = false;
     if (existingSession) {
       logger.info('Found existing session, attempting reuse', { account_id: accountId });
       await onProgress('creating_session', 'Existing session found. Attempting to restore...');
@@ -440,12 +442,33 @@ export class Worker {
           return;
         }
 
-        logger.info('Session reuse failed, proceeding to fresh login', { account_id: accountId });
-        await onProgress('creating_session', 'Previous session expired. Starting fresh login...');
-        await this.linkedin.close();
+        if (reuseResult.reuseExistingBrowser && reuseResult.requiresAction) {
+          reuseOpenBrowserForAuthentication = true;
+          preserveRestoredPage = reuseResult.preserveCurrentPage === true;
+          logger.info('Restored session requires human authentication in the same browser', {
+            account_id: accountId, authentication_state: reuseResult.authState,
+            preserve_current_page: preserveRestoredPage,
+          });
+        } else {
+          logger.warn('Restored session verification failed without changing authentication classification', {
+            account_id: accountId, authentication_state: reuseResult.authState,
+            identity_state: reuseResult.identityState, error_code: reuseResult.errorCode,
+          });
+          await onProgress('connection_failed', reuseResult.error || 'Existing LinkedIn connection could not be verified.', {
+            error_code: reuseResult.errorCode || 'existing_session_verification_failed',
+            authentication_state: reuseResult.authState || 'unknown', identity_state: reuseResult.identityState || 'unresolved',
+          });
+          await this.linkedin.close();
+          await this.updateAccount(accountId, { connection_state: 'failed', status: 'failed', last_error: reuseResult.error });
+          await this.queue.fail(item.id, reuseResult.error || 'Existing session verification failed', Date.now() - startTime, reuseResult.retryable === true);
+          return;
+        }
       } catch (err) {
-        logger.warn('Session reuse error, proceeding to fresh login', { error: this.sanitizeError(err) });
+        logger.warn('Session reuse error; failing without creating a second browser session', { error: this.sanitizeError(err) });
         await this.linkedin.close().catch(() => {});
+        await this.updateAccount(accountId, { connection_state: 'failed', status: 'failed', last_error: 'Existing LinkedIn session check failed' });
+        await this.queue.fail(item.id, 'Existing LinkedIn session check failed', Date.now() - startTime, true);
+        return;
       }
     }
 
@@ -454,7 +477,7 @@ export class Worker {
     logger.info('handleConnect: starting fresh login flow', { account_id: accountId });
 
     try {
-      await this.linkedin.launch(usePersistentContext ? undefined : onProgress, launchOptions);
+      if (!reuseOpenBrowserForAuthentication) await this.linkedin.launch(usePersistentContext ? undefined : onProgress, launchOptions);
     } catch (err) {
       const msg = this.sanitizeError(err);
       const retryable = err instanceof BrowserbaseError && ![401, 402, 403].includes(err.statusCode);
@@ -487,7 +510,7 @@ export class Worker {
 
     // ── Create browser context ──────────────────────────────────
     try {
-      await this.linkedin.newContext();
+      if (!reuseOpenBrowserForAuthentication) await this.linkedin.newContext();
     } catch (err) {
       const msg = this.sanitizeError(err);
       logger.error('handleConnect: context creation failed', { error: msg });
@@ -520,7 +543,7 @@ export class Worker {
     } else {
       await onProgress('auth_required', 'LinkedIn sign-in is required to continue.', { lifecycle_stage: 'L0_auth_required' });
       await this.updateAccount(accountId, { browserbase_session_id: bbSessionId, browser_connected_at: new Date().toISOString() });
-      result = await this.linkedin.connect(CONNECTION_TIMEOUT, onProgress, workspaceId, accountId, item.id, intendedIdentity);
+      result = await this.linkedin.connect(CONNECTION_TIMEOUT, onProgress, workspaceId, accountId, item.id, intendedIdentity, preserveRestoredPage);
     }
 
     logger.info('handleConnect: linkedin.connect() returned', { account_id: accountId, success: result.success, requiresAction: result.requiresAction, error: result.error });

@@ -44,8 +44,8 @@ const tests: Array<[string, () => void]> = [
   }],
   ['enqueue has a bounded abort and failure cannot leave checking active', () => {
     assert.match(hook, /AbortController[\s\S]*12_000[\s\S]*abortSignal/);
-    assert.match(onboarding, /linkedinAttemptTimedOut[\s\S]*15_000/);
-    assert.match(onboarding, /linkedinWaiting = [^\n]*activeLinkedinQueue[^\n]*!linkedinAttemptTimedOut/);
+    assert.match(onboarding, /linkedinAttemptTimeoutStage[\s\S]*'worker_claim'[\s\S]*15_000/);
+    assert.match(onboarding, /linkedinWaiting = [^\n]*activeLinkedinQueue[^\n]*!linkedinAttemptTimeoutStage/);
   }],
   ['no queue item cannot produce onboarding checking state', () => {
     assert.match(onboarding, /!!linkedinQueueItemId && activeLinkedinQueue/);

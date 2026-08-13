@@ -77,8 +77,9 @@ export function OnboardingPage() {
   const [editing, setEditing] = useState<Record<string, string>>({});
   const [linkedinAccountId, setLinkedinAccountId] = useState<string | null>(null);
   const [linkedinQueueItemId, setLinkedinQueueItemId] = useState<string | null>(null);
-  const [linkedinAttemptTimedOut, setLinkedinAttemptTimedOut] = useState(false);
+  const [linkedinAttemptTimeoutStage, setLinkedinAttemptTimeoutStage] = useState<'worker_claim' | 'existing_session_check' | 'auth_surface_preparation' | null>(null);
   const linkedinAttemptTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const linkedinWatchdogPhaseRef = useRef<'worker_claim' | 'existing_session_check' | 'auth_surface_preparation' | null>(null);
   const linkedinCompletionHandledRef = useRef(false);
   const creatingRef = useRef(false);
 
@@ -132,7 +133,7 @@ export function OnboardingPage() {
     || linkedinAccount.status === 'restricted'
   );
   const activeLinkedinQueue = !!linkedinAttempt.data && ['pending', 'retry', 'running', 'waiting'].includes(linkedinAttempt.data.status);
-  const linkedinWaiting = !!linkedinAccountId && !!linkedinQueueItemId && activeLinkedinQueue && !linkedinAttemptTimedOut && !connectLinkedIn.isPending
+  const linkedinWaiting = !!linkedinAccountId && !!linkedinQueueItemId && activeLinkedinQueue && !linkedinAttemptTimeoutStage && !connectLinkedIn.isPending
     && !linkedinConnected && !linkedinExpired && !linkedinFailed;
   const currentLinkedinInteractions = linkedinAuthInteractions.data
     ?.filter((event) => event.queue_item_id === linkedinQueueItemId) ?? [];
@@ -161,13 +162,28 @@ export function OnboardingPage() {
   const cancellableLinkedinInteraction = [...(linkedinAuthInteractions.data ?? [])].reverse().find((event) => event.queue_item_id) ?? null;
 
   useEffect(() => {
-    const usableSurfaceOrCompletion = !!linkedinLoginAccess.data?.loginUrl || linkedinIdentityVerified || linkedinConnected || linkedinPersistentFastPath;
-    if (usableSurfaceOrCompletion) {
-      setLinkedinAttemptTimedOut(false);
+    if (!linkedinQueueItemId) return;
+    const workerClaimed = linkedinAttempt.data?.status === 'running' || currentLinkedinInteractions.length > 0;
+    if (workerClaimed && linkedinWatchdogPhaseRef.current === 'worker_claim') {
+      setLinkedinAttemptTimeoutStage(null);
+      if (linkedinAttemptTimerRef.current) clearTimeout(linkedinAttemptTimerRef.current);
+      linkedinWatchdogPhaseRef.current = 'existing_session_check';
+      linkedinAttemptTimerRef.current = setTimeout(() => setLinkedinAttemptTimeoutStage('existing_session_check'), 30_000);
+    }
+    if (linkedinAuthRequired && !linkedinLoginAccess.data?.loginUrl && !linkedinIdentityVerified && linkedinWatchdogPhaseRef.current !== 'auth_surface_preparation') {
+      setLinkedinAttemptTimeoutStage(null);
+      if (linkedinAttemptTimerRef.current) clearTimeout(linkedinAttemptTimerRef.current);
+      linkedinWatchdogPhaseRef.current = 'auth_surface_preparation';
+      linkedinAttemptTimerRef.current = setTimeout(() => setLinkedinAttemptTimeoutStage('auth_surface_preparation'), 15_000);
+    }
+    if (linkedinLoginAccess.data?.loginUrl || linkedinIdentityVerified || linkedinConnected || linkedinPersistentFastPath || linkedinSurfaceFailed || linkedinFailed || ['failed', 'cancelled'].includes(linkedinAttempt.data?.status ?? '')) {
+      setLinkedinAttemptTimeoutStage(null);
       if (linkedinAttemptTimerRef.current) clearTimeout(linkedinAttemptTimerRef.current);
       linkedinAttemptTimerRef.current = null;
+      linkedinWatchdogPhaseRef.current = null;
     }
-  }, [linkedinLoginAccess.data?.loginUrl, linkedinIdentityVerified, linkedinConnected, linkedinPersistentFastPath]);
+  }, [linkedinQueueItemId, linkedinAttempt.data?.status, currentLinkedinInteractions.length, linkedinAuthRequired,
+    linkedinLoginAccess.data?.loginUrl, linkedinIdentityVerified, linkedinConnected, linkedinPersistentFastPath, linkedinSurfaceFailed]);
 
   useEffect(() => () => {
     if (linkedinAttemptTimerRef.current) clearTimeout(linkedinAttemptTimerRef.current);
@@ -472,8 +488,12 @@ export function OnboardingPage() {
                   ? 'Unable to confirm an active LinkedIn connection attempt. Please try again.'
                 : linkedinAttempt.data && ['failed', 'cancelled'].includes(linkedinAttempt.data.status)
                   ? (linkedinAttempt.data.error || `LinkedIn connection attempt ${linkedinAttempt.data.status}. Please try again.`)
-                : linkedinAttemptTimedOut
-                  ? 'The LinkedIn connection worker did not receive this attempt within 15 seconds. Please try again.'
+                : linkedinAttemptTimeoutStage === 'worker_claim'
+                  ? 'The LinkedIn connection worker did not claim this attempt within 15 seconds. Please try again.'
+                : linkedinAttemptTimeoutStage === 'existing_session_check'
+                  ? 'Checking the existing LinkedIn connection took too long. Please try again.'
+                : linkedinAttemptTimeoutStage === 'auth_surface_preparation'
+                  ? "We couldn't prepare the secure LinkedIn sign-in window within 15 seconds. Please retry."
                 : linkedinFailed ? (linkedinAccount?.last_error || 'LinkedIn authentication failed. Please try again.') : null}
               onConnect={() => {
                 console.info('[linkedin-queue-timing]', { stage: 'Q0_connect_clicked', timestamp: new Date().toISOString() });
@@ -488,9 +508,10 @@ export function OnboardingPage() {
                   { linkedinEmail: email.trim() || undefined },
                   {
                     onSuccess: ({ accountId, queueItemId }) => {
-                      setLinkedinAttemptTimedOut(false);
+                      setLinkedinAttemptTimeoutStage(null);
+                      linkedinWatchdogPhaseRef.current = 'worker_claim';
                       if (linkedinAttemptTimerRef.current) clearTimeout(linkedinAttemptTimerRef.current);
-                      linkedinAttemptTimerRef.current = setTimeout(() => setLinkedinAttemptTimedOut(true), 15_000);
+                      linkedinAttemptTimerRef.current = setTimeout(() => setLinkedinAttemptTimeoutStage('worker_claim'), 15_000);
                       linkedinCompletionHandledRef.current = false;
                       setLinkedinAccountId(accountId);
                       setLinkedinQueueItemId(queueItemId);
@@ -510,9 +531,10 @@ export function OnboardingPage() {
                   { existingAccountId: linkedinAccountId },
                   {
                     onSuccess: ({ accountId, queueItemId }) => {
-                      setLinkedinAttemptTimedOut(false);
+                      setLinkedinAttemptTimeoutStage(null);
+                      linkedinWatchdogPhaseRef.current = 'worker_claim';
                       if (linkedinAttemptTimerRef.current) clearTimeout(linkedinAttemptTimerRef.current);
-                      linkedinAttemptTimerRef.current = setTimeout(() => setLinkedinAttemptTimedOut(true), 15_000);
+                      linkedinAttemptTimerRef.current = setTimeout(() => setLinkedinAttemptTimeoutStage('worker_claim'), 15_000);
                       setLinkedinAccountId(accountId);
                       setLinkedinQueueItemId(queueItemId);
                     },

@@ -19,6 +19,7 @@
     "test:identity-latency": "npm run build && node dist/identity-latency.test.js",
     "test:connection-orchestration": "npm run build && node dist/connection-orchestration.test.js",
     "test:auth-surface-lifecycle": "npm run build && node --test dist/auth-surface-lifecycle.test.js",
+    "test:authenticated-identity-state": "npm run build && node --test dist/authenticated-identity-state.test.js",
     "install-browser": "echo 'No local browser needed — using Browserbase'"
   },
   "dependencies": {
