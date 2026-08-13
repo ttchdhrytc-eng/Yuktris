@@ -30,7 +30,7 @@ test('normal connect and test connection never claim or submit credentials', () 
   const testConnection = worker.match(/private async handleTestConnection[\s\S]*?private async handle/)?.[0] ?? '';
   assert.doesNotMatch(connect, /claimCredentials|markCredentialResult|credentials/);
   assert.doesNotMatch(testConnection, /claimCredentials|markCredentialResult|credentials/);
-  assert.match(connect, /this\.linkedin\.connect\([\s\S]*?preflight\.preserveCurrentPage, true,[\s\S]*?\);/);
+  assert.match(connect, /this\.linkedin\.connect\([\s\S]*?preflight\.preserveCurrentPage, false,[\s\S]*?\);/);
   assert.doesNotMatch(connect, /preflight\.preserveCurrentPage, true, credentials/);
 });
 
@@ -50,7 +50,7 @@ test('first connection is not marked connected before a new-session persistence 
   const synchronized = connect.indexOf('synchronizePersistentContext(proofContext', verification);
   const connected = connect.indexOf("connection_state: 'connected'", synchronized);
   assert.ok(proof > 0 && secondSession > proof && verification > secondSession && synchronized > verification && connected > synchronized);
-  assert.match(connect, /context_persistence_not_verified[\s\S]*queue\.fail/);
+  assert.match(connect, /second_session_not_authenticated[\s\S]*queue\.fail/);
 });
 
 test('one explicit intent maps to one idempotent queue', () => {

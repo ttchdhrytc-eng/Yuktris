@@ -11,16 +11,16 @@ const baseline = read('supabase/migrations/20260810080000_production_compatible_
 const restore = linkedin.match(/async connectWithSession[\s\S]*?async testConnection/)?.[0] ?? '';
 const handler = worker.match(/private async handleConnect[\s\S]*?private async handleTestConnection/)?.[0] ?? '';
 
-test('1 authenticated bound restore connects when in-me is unresolved', () => {
-  assert.match(restore, /if \(boundProfileUrl\)[\s\S]*success: true[\s\S]*identityState: 'unresolved'/);
+test('1 authenticated bound restore fails closed when self identity is unresolved', () => {
+  assert.match(restore, /if \(!identity\)[\s\S]*success: false[\s\S]*identityState: 'unresolved'/);
 });
 test('2 critical path performs only one fast identity attempt', () => {
   assert.match(restore, /verifyIdentity\(1,[\s\S]*FAST_REUSE_IDENTITY_TIMEOUT_MS/);
   assert.doesNotMatch(restore, /verifyIdentityWithRetry/);
 });
-test('3 unresolved bound identity remains usable and pending', () => {
-  assert.match(restore, /success: true[\s\S]*identityState: 'unresolved'/);
-  assert.match(worker, /Authenticated LinkedIn session restored\. Identity verification remains pending/);
+test('3 unresolved bound identity cannot mark connected', () => {
+  assert.match(restore, /success: false[\s\S]*identityState: 'unresolved'/);
+  assert.match(restore, /errorCode: 'identity_resolution_failed'/);
 });
 test('4 reliable resolved mismatch remains fail closed', () => assert.match(restore, /identityMismatch[\s\S]*nonRetryable: true[\s\S]*identityState: 'mismatch'/));
 test('5 authenticated existing session exposes no Live View', () => {

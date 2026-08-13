@@ -8,7 +8,7 @@ const linkedin = read('workers/linkedin-browser-worker/src/linkedin.ts');
 const worker = read('workers/linkedin-browser-worker/src/worker.ts');
 const fastPath = read('workers/linkedin-browser-worker/src/persistent-fast-path.test.ts');
 const challenge = read('workers/linkedin-browser-worker/src/interactive-challenge.test.ts');
-const start = linkedin.indexOf('private async verifyIdentity(');
+const start = linkedin.indexOf('private async verifyIdentity(', linkedin.indexOf('private async resolveAuthenticatedMeApiIdentity'));
 const end = linkedin.indexOf('private async verifyIdentityWithRetry', start);
 const resolver = linkedin.slice(start, end);
 
@@ -19,14 +19,14 @@ const tests: Array<[string, () => void]> = [
     assert.match(resolver, /document\.querySelector\('h1'\)/);
   }],
   ['authenticated self-navigation is attempted before profile navigation', () => {
-    const dom = resolver.indexOf("method: 'authenticated_navigation_dom'");
+    const dom = resolver.indexOf("'authenticated_navigation_dom'");
     const navigation = resolver.indexOf('this.page.goto(LINKEDIN_PROFILE_URL');
     assert.ok(dom > 0 && navigation > dom);
-    assert.match(resolver, /global-nav__me/);
+    assert.match(linkedin, /global-nav__me/);
   }],
   ['redirect identity requires a canonical personal LinkedIn URL', () => {
-    assert.match(linkedin, /canonicalPersonalProfileUrl[\s\S]*this\.isLinkedInUrl/);
-    assert.ok(linkedin.includes("match(/^\\/in\\/([A-Za-z0-9_%.-]+)"));
+    assert.match(linkedin, /canonicalIdentityUrl[\s\S]*hostname\.endsWith\('\.linkedin\.com'\)/);
+    assert.ok(linkedin.includes("^/in/([A-Za-z0-9_%.-]+)"));
     assert.match(linkedin, /toLowerCase\(\) === 'me'/);
   }],
   ['identity mismatch remains fail closed before capture', () => {

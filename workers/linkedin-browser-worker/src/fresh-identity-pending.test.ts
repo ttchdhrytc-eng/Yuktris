@@ -28,8 +28,8 @@ test('4 genuine auth-surface authorization failure retains its provider classifi
   assert.match(linkedin, /recoverAuthSurface[\s\S]*browserbase_live_view_failed/);
 });
 
-test('5 restored bound unresolved fallback remains unchanged', () => {
-  assert.match(restored, /canonicalPersonalProfileUrl\(intendedIdentity\.profileUrl\)[\s\S]*reuseBoundIdentity: true/);
+test('5 restored bound unresolved identity fails closed', () => {
+  assert.match(restored, /if \(!identity\)[\s\S]*errorCode: 'identity_resolution_failed'/);
 });
 
 test('6 incomplete authentication cannot report connected', () => {

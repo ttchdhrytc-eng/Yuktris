@@ -626,7 +626,7 @@ export class Worker {
         };
         const connection = this.linkedin.connect(
           INTERACTIVE_AUTH_TIMEOUT_MS, stagedProgress, workspaceId, accountId, item.id, intendedIdentity,
-          preflight.preserveCurrentPage, true,
+          preflight.preserveCurrentPage, false,
         );
         await withinStartupDeadline(Promise.race([ready, connection.then(() => undefined)]), startupStartedAt, 'linkedin_login_surface');
         result = await connection;
@@ -732,7 +732,21 @@ export class Worker {
       logPostAuthStage('browserbase_release_request_completed', releaseStartedAt);
       const synchronizationStartedAt = Date.now();
       logPostAuthStage('context_synchronization_started');
-      const synchronization = await this.linkedinContexts.synchronize(persistentContext, bbSessionId, this.activeContextLease.owner);
+      let synchronization;
+      try {
+        synchronization = await this.linkedinContexts.synchronize(persistentContext, bbSessionId, this.activeContextLease.owner);
+      } catch (error) {
+        const failure = 'The authenticated LinkedIn browser could not be persisted safely.';
+        logger.error('linkedin_context_persistence_failed', {
+          queue_item_id: item.id, workspace_id: workspaceId, account_id: accountId,
+          context_id: persistentContext.id, context_generation: persistentContext.generation,
+          error: this.sanitizeError(error), error_code: 'context_persistence_failed',
+        });
+        await this.updateAccount(accountId, { connection_state: 'failed', session_status: 'disconnected', status: 'error', last_error: failure });
+        await onProgress('connection_failed', failure, { error_code: 'context_persistence_failed' });
+        await this.queue.fail(item.id, failure, Date.now() - startTime, false);
+        return;
+      }
       logger.info('LinkedIn post-auth latency', {
         queue_item_id: item.id, workspace_id: workspaceId, account_id: accountId, stage: 'browserbase_session_terminal_observed',
         timestamp: new Date(synchronization.terminalObservedAt).toISOString(),
@@ -751,26 +765,48 @@ export class Worker {
         queue_item_id: item.id, workspace_id: workspaceId, account_id: accountId,
         context_id: persistentContext.id, context_generation: persistentContext.generation,
       });
-      const proofContext = await this.openPersistentContextForTask(item);
-      const proofSessionId = this.linkedin.getSessionId();
-      const proof = await this.linkedin.verifyPersistentAuthentication({
-        ...intendedIdentity, profileUrl: effectiveProfileUrl || intendedIdentity.profileUrl,
-      });
-      await this.synchronizePersistentContext(proofContext, proofSessionId);
+      let proofContext;
+      let proofSessionId: string | null = null;
+      let proof;
+      try {
+        proofContext = await this.openPersistentContextForTask(item);
+        proofSessionId = this.linkedin.getSessionId();
+        proof = await this.linkedin.verifyPersistentAuthentication({
+          ...intendedIdentity, profileUrl: effectiveProfileUrl || intendedIdentity.profileUrl,
+        });
+        await this.synchronizePersistentContext(proofContext, proofSessionId);
+      } catch (error) {
+        const failure = 'The second secure LinkedIn session could not be created or synchronized.';
+        logger.error('linkedin_second_session_failed', {
+          queue_item_id: item.id, workspace_id: workspaceId, account_id: accountId,
+          context_id: persistentContext.id, context_generation: persistentContext.generation,
+          error: this.sanitizeError(error), error_code: 'context_persistence_failed',
+        });
+        await this.linkedin.close().catch(() => {});
+        await this.updateAccount(accountId, { connection_state: 'failed', session_status: 'disconnected', status: 'error', last_error: failure });
+        await onProgress('connection_failed', failure, { error_code: 'context_persistence_failed' });
+        await this.queue.fail(item.id, failure, Date.now() - startTime, false);
+        return;
+      }
       if (!proof.success) {
         const proofError = proof.error || 'Persistent LinkedIn authentication could not be verified in a new secure session.';
+        const proofErrorCode = proof.identityState === 'mismatch'
+          ? 'second_session_identity_mismatch'
+          : proof.authState !== 'authenticated'
+            ? 'second_session_not_authenticated'
+            : 'identity_resolution_failed';
         await this.updateAccount(accountId, {
-          connection_state: proof.errorCode === 'checkpoint_required' ? 'requires_action' : 'session_expired',
+          connection_state: proof.errorCode === 'checkpoint_required' ? 'requires_action' : 'failed',
           session_status: 'disconnected', status: 'pending_login', last_error: proofError,
         });
         await onProgress('connection_failed', proofError, {
-          error_code: 'context_persistence_not_verified', authentication_state: proof.authState,
+          error_code: proofErrorCode, authentication_state: proof.authState,
         });
         await this.queue.fail(item.id, proofError, Date.now() - startTime, false);
         logger.warn('linkedin_persistence_proof_failed', {
           queue_item_id: item.id, workspace_id: workspaceId, account_id: accountId,
           context_id: proofContext.id, context_generation: proofContext.generation,
-          authentication_state: proof.authState, identity_state: proof.identityState,
+          authentication_state: proof.authState, identity_state: proof.identityState, error_code: proofErrorCode,
         });
         return;
       }

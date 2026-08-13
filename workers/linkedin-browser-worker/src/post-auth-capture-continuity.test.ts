@@ -51,9 +51,9 @@ test('8 unresolved unbound identity cannot connect', () => {
   assert.doesNotMatch(unresolved, /success: true/);
 });
 
-test('9 restored-session fast path has no current-attempt proof change', () => {
+test('9 restored-session fast path has no current-attempt proof change and fails unresolved identity', () => {
   assert.doesNotMatch(restored, /authenticationProof|post_auth_capture/);
-  assert.match(restored, /reuseBoundIdentity: true/);
+  assert.match(restored, /errorCode: 'identity_resolution_failed'/);
 });
 
 test('10 normal fresh attempt creates no second Browserbase session', () => {

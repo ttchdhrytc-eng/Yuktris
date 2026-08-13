@@ -42,10 +42,10 @@ test('bound-account deferral is disabled without persistent Context reuse', () =
   );
 });
 
-test('fresh persistent branch reuses binding and never invokes identity binding', () => {
+test('fresh persistent branch requires identity evidence and never silently defers', () => {
   const worker = readFileSync('src/worker.ts', 'utf8');
   const linkedin = readFileSync('src/linkedin.ts', 'utf8');
-  assert.match(worker, /preflight\.preserveCurrentPage, true/);
-  assert.match(linkedin, /identityDecision\.state === 'deferred'[\s\S]*reuseBoundIdentity: true/);
+  assert.match(worker, /preflight\.preserveCurrentPage, false/);
+  assert.match(linkedin, /if \(!identity\)[\s\S]*identity_resolution_pending/);
   assert.match(worker, /if \(!result\.reuseBoundIdentity\) await this\.bindAuthenticatedIdentity/);
 });

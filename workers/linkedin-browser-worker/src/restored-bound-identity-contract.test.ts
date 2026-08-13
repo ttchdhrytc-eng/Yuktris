@@ -10,14 +10,13 @@ const worker = read('workers/linkedin-browser-worker/src/worker.ts');
 const restore = linkedin.match(/async connectWithSession[\s\S]*?async testConnection/)?.[0] ?? '';
 const reuse = worker.match(/if \(reuseResult\.success\)[\s\S]*?logger\.info\('LinkedIn account connected via session reuse'/)?.[0] ?? '';
 
-test('1 unresolved fresh identity reuses a validated full bound URL and completes', () => {
-  assert.match(restore, /canonicalPersonalProfileUrl\(intendedIdentity\.profileUrl\)/);
-  assert.match(restore, /effectiveProfileUrl: boundProfileUrl, reuseBoundIdentity: true/);
-  assert.match(reuse, /updateAccount[\s\S]*connection_state: 'connected'[\s\S]*queue\.complete/);
+test('1 unresolved existing identity fails closed', () => {
+  assert.match(restore, /if \(!identity\)[\s\S]*identity_resolution_failed/);
+  assert.doesNotMatch(restore, /reuseBoundIdentity: true/);
 });
 test('2 matching fresh identity returns a verified effective URL', () => assert.match(restore, /effectiveProfileUrl: identity\.profileUrl[\s\S]*identityState: 'verified'/));
 test('3 resolved mismatch remains fail closed', () => assert.match(restore, /identityMismatch[\s\S]*nonRetryable: true[\s\S]*identityState: 'mismatch'/));
-test('4 unbound unresolved identity remains fail closed', () => assert.match(restore, /if \(boundProfileUrl\)[\s\S]*errorCode: 'identity_resolution_failed'/));
+test('4 unbound unresolved identity remains fail closed', () => assert.match(restore, /if \(!identity\)[\s\S]*errorCode: 'identity_resolution_failed'/));
 test('5 accepted bound fallback creates no Session B', () => assert.doesNotMatch(reuse, /linkedin\.launch|createSession/));
 test('6 accepted bound fallback never emits auth_required', () => assert.doesNotMatch(reuse, /auth_required/));
 test('7 connected progress follows all required persistence', () => {
