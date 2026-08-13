@@ -72,7 +72,7 @@ const tests: Array<[string, () => void]> = [
   ['connection can start with pending profile identity', () => {
     assert.doesNotMatch(identityMigration, /IF v_profile IS NULL THEN RAISE EXCEPTION 'A valid LinkedIn profile URL is required'/);
     assert.match(credentialMigration, /v_expected_profile text/);
-    assert.match(onboardingPage, /LinkedIn email or phone/);
+    assert.match(onboardingPage, /Sign in to LinkedIn once/);
   }],
   ['authenticated identity is discovered, canonicalized, and persisted before session save', () => {
     assert.match(linkedin, /https:\/\/www\.linkedin\.com\/in\/\$\{match\[1\]\}/);
@@ -131,7 +131,7 @@ const tests: Array<[string, () => void]> = [
     assert.match(continuityMigration, /REVOKE EXECUTE ON FUNCTION public\.get_linkedin_login_access\(uuid,uuid\) FROM PUBLIC, anon/);
   }],
   ['onboarding embeds authorized Browserbase login and keeps polling', () => {
-    assert.match(onboardingPage, /useLinkedInLoginAccess\(linkedinAccountId, linkedinQueueItemId, !!linkedinChallenge\)/);
+    assert.match(onboardingPage, /useLinkedInLoginAccess\(linkedinAccountId, linkedinQueueItemId,[\s\S]*auth_required/);
     assert.match(onboardingPage, /SecureLinkedInAuthModal/);
     assert.doesNotMatch(onboardingPage, /window\.open\(loginUrl/);
     assert.match(hook, /get_linkedin_login_access/);
@@ -219,7 +219,7 @@ const tests: Array<[string, () => void]> = [
   ['transactional start enforces workspace membership', () => {
     assert.match(migration, /auth\.uid\(\) IS NULL OR NOT public\.is_workspace_member\(p_workspace_id\)/);
     assert.match(migration, /enqueue_linkedin_connection_test\(uuid,uuid\) FROM PUBLIC, anon/);
-    assert.match(hook, /functions\.invoke\('linkedin-credentials'/);
+    assert.match(hook, /rpc\('start_linkedin_connection'/);
   }],
 ];
 

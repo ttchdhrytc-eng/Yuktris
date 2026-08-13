@@ -140,20 +140,23 @@ export function useConnectLinkedIn() {
   const { workspace } = useWorkspace();
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: async (params: { username?: string; password?: string; existingAccountId?: string; useStoredCredentials?: boolean }) => {
+    mutationFn: async (params: { existingAccountId?: string; operationId: string }) => {
       if (!workspace) throw new Error('No workspace');
-      const idempotencyKey = crypto.randomUUID();
+      const idempotencyKey = params.operationId;
+      if (!idempotencyKey) throw new Error('LinkedIn connection operation ID is required');
       const startedAt = performance.now();
       console.info('[linkedin-queue-timing]', {
         stage: 'Q1_enqueue_started', workspaceId: workspace.id,
         supabaseHost: new URL(import.meta.env.VITE_SUPABASE_URL).hostname,
         timestamp: new Date().toISOString(),
       });
-      const { data, error } = await supabase.functions.invoke('linkedin-credentials', {
-        body: params.useStoredCredentials
-          ? { action: 'connect_existing', workspace_id: workspace.id, account_id: params.existingAccountId, idempotency_key: idempotencyKey }
-          : { workspace_id: workspace.id, username: params.username, password: params.password,
-            existing_account_id: params.existingAccountId ?? null, idempotency_key: idempotencyKey },
+      const { data, error } = await supabase.rpc('start_linkedin_connection', {
+        p_workspace_id: workspace.id,
+        p_linkedin_email: null,
+        p_display_name: null,
+        p_expected_profile_url: null,
+        p_existing_account_id: params.existingAccountId ?? null,
+        p_idempotency_key: idempotencyKey,
       });
       if (error) throw error;
       const result = Array.isArray(data) ? data[0] : data;

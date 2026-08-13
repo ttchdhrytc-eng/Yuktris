@@ -1136,7 +1136,7 @@ export class LinkedInBrowser {
       transition('waiting_for_login');
       if (onProgress) await onProgress('waiting_for_login', credentials
         ? 'Signing in to LinkedIn securely...'
-        : 'Waiting for login. Complete LinkedIn sign-in in the browser window...');
+        : 'Sign in to LinkedIn once in the secure browser. Yuktris will remain passive.');
       if (credentialInteractionStarted && !credentialSubmissionProcessed) {
         const failure = 'LinkedIn did not process the sign-in submission. Please try again later.';
         if (onProgress) await onProgress('login_failed', failure, { error_code: 'login_submit_not_processed' });

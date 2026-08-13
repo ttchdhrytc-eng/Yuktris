@@ -581,39 +581,22 @@ export class Worker {
           await onProgress('existing_session_authenticated', 'Existing LinkedIn connection verified.');
         }
       } else {
-        await onProgress('auth_required', 'LinkedIn sign-in is required. Yuktris is preparing automatic authentication.', { lifecycle_stage: 'L0_auth_required' });
+        await onProgress('auth_required', 'Sign in to LinkedIn once in the secure browser.', { lifecycle_stage: 'L0_auth_required' });
         await this.updateAccount(accountId, { browserbase_session_id: bbSessionId, browser_connected_at: new Date().toISOString() });
-        let credentials = await this.claimCredentials(item);
-        if (!credentials) throw new Error('LinkedIn credentials are not configured or automatic login is rate limited');
-        try {
-          result = await this.linkedin.connect(
-            INTERACTIVE_AUTH_TIMEOUT_MS, onProgress, workspaceId, accountId, item.id, intendedIdentity,
-            preflight.preserveCurrentPage, true, credentials,
-          );
-        } finally {
-          credentials.username = '';
-          credentials.password = '';
-          credentials = null as unknown as { username: string; password: string };
-        }
+        result = await this.linkedin.connect(
+          INTERACTIVE_AUTH_TIMEOUT_MS, onProgress, workspaceId, accountId, item.id, intendedIdentity,
+          preflight.preserveCurrentPage, true,
+        );
       }
     } else {
-      await onProgress('auth_required', 'LinkedIn sign-in is required. Yuktris is preparing automatic authentication.', { lifecycle_stage: 'L0_auth_required' });
+      await onProgress('auth_required', 'Sign in to LinkedIn once in the secure browser.', { lifecycle_stage: 'L0_auth_required' });
       await this.updateAccount(accountId, { browserbase_session_id: bbSessionId, browser_connected_at: new Date().toISOString() });
-      let credentials = await this.claimCredentials(item);
-      if (!credentials) throw new Error('LinkedIn credentials are not configured or automatic login is rate limited');
-      try {
-        result = await this.linkedin.connect(INTERACTIVE_AUTH_TIMEOUT_MS, onProgress, workspaceId, accountId, item.id, intendedIdentity, preserveRestoredPage, false, credentials);
-      } finally {
-        credentials.username = '';
-        credentials.password = '';
-        credentials = null as unknown as { username: string; password: string };
-      }
+      result = await this.linkedin.connect(INTERACTIVE_AUTH_TIMEOUT_MS, onProgress, workspaceId, accountId, item.id, intendedIdentity, preserveRestoredPage);
     }
 
     logger.info('handleConnect: linkedin.connect() returned', { account_id: accountId, success: result.success, requiresAction: result.requiresAction, error: result.error });
 
     if (!result.success) {
-      await this.markCredentialResult(item, false, result.errorCode === 'invalid_credentials');
       if (result.errorCode === 'identity_resolution_pending' && result.authState === 'authenticated' && result.session) {
         const pendingError = result.error || 'LinkedIn identity verification is pending.';
         const sessionId = await this.saveSession(workspaceId, accountId, result.session);
@@ -725,7 +708,6 @@ export class Worker {
       profile_url: effectiveProfileUrl, profile_name: result.identity?.profileName,
       profile_headline: result.identity?.profileHeadline,
     });
-    await this.markCredentialResult(item, true);
     logPostAuthStage('durable_account_connected');
     if (usePersistentContext) logPersistentFastPath('P8_durable_connected');
 
@@ -765,25 +747,9 @@ export class Worker {
       const intendedIdentity = await this.loadIntendedIdentity(accountId, item.workspace_id);
       const context = await this.openPersistentContextForTask(item);
       const browserbaseSessionId = this.linkedin.getSessionId();
-      let result = await this.linkedin.verifyPersistentAuthentication(intendedIdentity);
-      if (!result.success && result.authState === 'unauthenticated') {
-        let credentials = await this.claimCredentials(item);
-        if (credentials) {
-          try {
-            result = await this.linkedin.connect(
-              INTERACTIVE_AUTH_TIMEOUT_MS, this.makeProgressCallback(item.workspace_id, accountId, item.id),
-              item.workspace_id, accountId, item.id, intendedIdentity, true, true, credentials,
-            );
-          } finally {
-            credentials.username = '';
-            credentials.password = '';
-            credentials = null as unknown as { username: string; password: string };
-          }
-        }
-      }
+      const result = await this.linkedin.verifyPersistentAuthentication(intendedIdentity);
       await this.synchronizePersistentContext(context, browserbaseSessionId);
       if (result.success) {
-        await this.markCredentialResult(item, true);
         await this.updateAccount(accountId, {
           connection_state: 'connected', session_status: 'connected', status: 'active',
           last_validated_at: new Date().toISOString(), last_error: null,
@@ -792,7 +758,6 @@ export class Worker {
         await this.logSessionEvent(item.workspace_id, accountId, 'validated', { test: true, persistent_context: true });
         await this.queue.complete(item.id, { healthy: true, identity: result.identity, persistent_context: true }, Date.now() - startTime);
       } else {
-        await this.markCredentialResult(item, false, result.errorCode === 'invalid_credentials');
         const checkpoint = result.errorCode === 'checkpoint_required';
         await this.updateAccount(accountId, { connection_state: checkpoint ? 'requires_action' : 'session_expired', last_error: result.error });
         logger.info(checkpoint ? 'linkedin_checkpoint_required' : 'linkedin_reauth_required', {

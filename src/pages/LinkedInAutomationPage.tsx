@@ -107,8 +107,6 @@ function AccountsTab() {
   const deleteAccount = useDeleteLinkedInAccount();
   const connect = useConnectLinkedIn();
   const [showForm, setShowForm] = useState(false);
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
   const [connectingAccountId, setConnectingAccountId] = useState<string | null>(null);
 
   const list = accounts.data ?? [];
@@ -125,42 +123,25 @@ function AccountsTab() {
       {showForm && (
         <Card className="p-4 mb-4 space-y-3">
           <div className="rounded-lg bg-gold-500/5 border border-gold-500/15 p-3">
-            <p className="text-xs text-ink-300 leading-relaxed">
-              Your password is encrypted immediately and used only for LinkedIn authentication. Verification codes remain inside the secure browser.
-            </p>
+            <p className="text-xs text-ink-300 leading-relaxed">Sign in directly on linkedin.com in the secure browser. Yuktris never sees or stores your password or verification codes.</p>
           </div>
-          <input
-            type="email"
-            placeholder="LinkedIn email / username"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            className="w-full rounded-lg border border-gold-500/12 bg-maroon-950/60 px-3 py-2 text-sm text-ink-50 placeholder:text-ink-600 input-luxury focus:outline-none"
-          />
-          <input
-            type="password"
-            autoComplete="current-password"
-            placeholder="LinkedIn password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            className="w-full rounded-lg border border-gold-500/12 bg-maroon-950/60 px-3 py-2 text-sm text-ink-50 placeholder:text-ink-600 input-luxury focus:outline-none"
-          />
           <Button
             size="sm"
             onClick={() => {
               connect.mutate(
-                { username: email.trim(), password },
+                { operationId: crypto.randomUUID() },
                 {
                   onSuccess: (data) => {
                     setConnectingAccountId(data.accountId);
                   },
                 },
               );
-              setEmail(''); setPassword(''); setShowForm(false);
+              setShowForm(false);
             }}
-            disabled={connect.isPending || !email.trim() || !password}
+            disabled={connect.isPending}
             loading={connect.isPending}
           >
-            Continue to LinkedIn
+            Open secure LinkedIn session
           </Button>
         </Card>
       )}
@@ -341,12 +322,13 @@ function AccountCard({
       challenge: chal,
       identityVerified: currentItems.some((item) => item.interaction_type === 'progress' && item.step === 'identity_verified' && item.status === 'completed'),
       repeatedSecurityChecks: currentItems.some((item) => item.interaction_type === 'progress' && item.step === 'provider_rechallenge' && item.status === 'completed'),
+      authRequired: currentItems.some((item) => item.interaction_type === 'progress' && item.step === 'auth_required' && item.status === 'completed'),
       cancellableInteraction: [...currentItems].reverse().find((item) => item.queue_item_id) ?? null,
       currentQueueItemId,
       latestStep: [...currentItems].reverse().find((item) => item.interaction_type === 'progress')?.step,
     };
   }, [interactions.data]);
-  const loginAccess = useLinkedInLoginAccess(showPanel ? account.id : null, currentQueueItemId, !!challenge);
+  const loginAccess = useLinkedInLoginAccess(showPanel ? account.id : null, currentQueueItemId, authRequired || !!challenge);
 
   if (!showPanel) {
     return (
@@ -459,7 +441,7 @@ function AccountCard({
       )}
 
       <SecureLinkedInAuthModal
-        open={showPanel && !!challenge}
+        open={showPanel && authRequired && account.connection_state !== 'connected'}
         loginUrl={loginAccess.data?.loginUrl ?? null}
         identityVerified={identityVerified}
         securityCheckRequired={!!challenge && challenge.status === 'pending'}

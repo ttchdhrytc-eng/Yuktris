@@ -12,7 +12,6 @@ import { Button } from '@/components/ui/Button';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { Spinner } from '@/components/ui/Spinner';
 import { Modal } from '@/components/ui/Modal';
-import { Field } from '@/components/ui/Field';
 import { supabase } from '@/lib/supabase';
 import { useWorkspace } from '@/contexts/WorkspaceContext';
 import { timeAgo } from '@/lib/utils';
@@ -338,8 +337,8 @@ export function LinkedInAccountsPage() {
       {showConnect && (
         <ConnectLinkedInModal
           onClose={() => { setShowConnect(false); setCredentialAccountId(null); }}
-          onConnect={(params) => {
-            connect.mutate({ ...params, existingAccountId: credentialAccountId ?? undefined }, {
+          onConnect={() => {
+            connect.mutate({ existingAccountId: credentialAccountId ?? undefined, operationId: crypto.randomUUID() }, {
               onSuccess: (result) => {
                 setShowConnect(false); setCredentialAccountId(null);
                 if (result?.accountId) {
@@ -472,7 +471,10 @@ function AccountAuthModal({ accountId, queueItemId, onClose }: { accountId: stri
   const challengeRequiredForAccess = interactions?.some(
     (event) => event.queue_item_id === currentQueueItemId && event.interaction_type === 'challenge' && event.status === 'pending'
   ) ?? false;
-  const { data: loginAccess } = useLinkedInLoginAccess(accountId, currentQueueItemId, challengeRequiredForAccess);
+  const authRequired = interactions?.some(
+    (event) => event.queue_item_id === currentQueueItemId && event.interaction_type === 'progress' && event.step === 'auth_required' && event.status === 'completed'
+  ) ?? false;
+  const { data: loginAccess } = useLinkedInLoginAccess(accountId, currentQueueItemId, authRequired || challengeRequiredForAccess);
   const recoverSurface = useRecoverLinkedInAuthSurface();
   const latestProgress = [...(interactions ?? [])].reverse().find(event => event.queue_item_id === currentQueueItemId && event.interaction_type === 'progress');
   const identityVerified = interactions?.some(
@@ -486,7 +488,7 @@ function AccountAuthModal({ accountId, queueItemId, onClose }: { accountId: stri
 
   return (
     <SecureLinkedInAuthModal
-      open={securityCheckRequired}
+      open={authRequired}
       loginUrl={loginAccess?.loginUrl ?? null}
       identityVerified={identityVerified}
       securityCheckRequired={securityCheckRequired}
@@ -538,48 +540,26 @@ function ChallengeNotification({ event, onResolved }: { event: LinkedInAuthInter
 
 function ConnectLinkedInModal({ onClose, onConnect, isConnecting }: {
   onClose: () => void;
-  onConnect: (params: { username: string; password: string }) => void;
+  onConnect: () => void;
   isConnecting: boolean;
 }) {
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-
   return (
-    <Modal open onClose={onClose} title="Connect your existing LinkedIn account" description="Your credentials are encrypted immediately. Yuktris asks you only when LinkedIn requires human verification.">
+    <Modal open onClose={onClose} title="Connect your existing LinkedIn account" description="Sign in once directly on linkedin.com in Yuktris's secure browser.">
       <div className="space-y-4">
         <>
             <div className="rounded-lg bg-brand-300/10 border border-brand-300/20 p-3">
               <div className="flex items-start gap-2">
                 <ShieldCheck className="h-4 w-4 text-brand-300 mt-0.5 flex-shrink-0" />
                 <p className="text-xs text-brand-300 leading-relaxed">
-                  Yuktris encrypts your LinkedIn credentials and never returns them. Enter OTP, 2FA, or CAPTCHA responses only inside the secure browser.
+                  Yuktris never sees or stores your password, OTP, 2FA, or CAPTCHA responses. Enter them only inside the secure browser.
                 </p>
               </div>
             </div>
-            <Field label="LinkedIn email or phone">
-              <input
-                type="email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                placeholder="your.email@company.com"
-                className="w-full rounded-lg border border-gold-500/12 bg-maroon-900 px-3 py-2 text-sm text-ink-50 placeholder:text-ink-500 focus:border-brand-500 focus:outline-none"
-              />
-            </Field>
-            <Field label="Password">
-              <input
-                type="password"
-                autoComplete="current-password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="LinkedIn password"
-                className="w-full rounded-lg border border-gold-500/12 bg-maroon-900 px-3 py-2 text-sm text-ink-50 placeholder:text-ink-500 focus:border-brand-500 focus:outline-none"
-              />
-            </Field>
             <div className="flex justify-end gap-2 pt-2">
               <Button variant="ghost" onClick={onClose}>Cancel</Button>
               <Button
-                onClick={() => onConnect({ username: email.trim(), password })}
-                disabled={isConnecting || !email.trim() || !password}
+                onClick={onConnect}
+                disabled={isConnecting}
               >
                 {isConnecting ? <Spinner className="h-4 w-4" /> : <Zap className="h-4 w-4" />}
                 Connect LinkedIn

@@ -46,15 +46,15 @@ const tests: Array<[string, () => void]> = [
     assert.match(verify, /getIdentityMismatch[\s\S]*identityState: 'mismatch'/);
     assert.doesNotMatch(verify, /captureSession/);
   }],
-  ['modal requires a current challenge rather than ordinary auth_required', () => {
+  ['manual V1 exposes Live View for ordinary auth_required and challenges', () => {
     assert.match(onboarding, /event\.queue_item_id === linkedinQueueItemId[\s\S]*event\.step === 'auth_required'/);
-    assert.match(onboarding, /open=\{[\s\S]*!!linkedinChallenge\}/);
-    assert.match(accounts, /open=\{securityCheckRequired\}/);
-    assert.match(automation, /open=\{showPanel && !!challenge\}/);
+    assert.match(onboarding, /open=\{[\s\S]*linkedinAuthRequired\}/);
+    assert.match(accounts, /open=\{authRequired\}/);
+    assert.match(automation, /open=\{showPanel && authRequired/);
   }],
   ['checking and interactive copy are distinct', () => {
     assert.match(onboarding, /Checking your LinkedIn session/);
-    assert.match(onboarding, /Signing in securely/);
+    assert.match(onboarding, /Sign in to LinkedIn once in the secure browser/);
   }],
   ['fast-path timing stages P0 through P10 are present', () => {
     for (let stage = 0; stage <= 8; stage++) assert.match(worker, new RegExp(`P${stage}_`));

@@ -35,7 +35,7 @@ test('18 recovery does not create a Context or session', () => {
 });
 test('19 recovery requests are authorized and idempotent', () => assert.match(migration, /is_workspace_member[\s\S]*interaction_type='auth_surface_recovery'[\s\S]*status='pending'/));
 test('20 provider error is replaced by Yuktris recovery UX', () => {
-  assert.match(modal, /We couldn't open the secure LinkedIn verification window/);
+  assert.match(modal, /We couldn't open the secure LinkedIn window/);
   assert.match(hook, /request_linkedin_auth_surface_recovery/);
 });
 test('debug API is hard bounded', () => assert.match(browserbase, /getLiveUrls\(sessionId: string, timeoutMs = 8_000\)/));
