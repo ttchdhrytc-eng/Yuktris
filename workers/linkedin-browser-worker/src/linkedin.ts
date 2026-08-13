@@ -206,6 +206,7 @@ export type ProgressStep =
   | 'live_view_disconnected'
   | 'recovering_auth_surface'
   | 'connection_failed'
+  | 'startup_failed'
   | 'opening_linkedin'
   | 'ready_for_login'
   | 'automatic_login_started'
@@ -1121,7 +1122,7 @@ export class LinkedInBrowser {
       // After page.goto() navigates to LinkedIn, fetch the updated debug URL
       // from Browserbase so the frontend's "Open Browser" button opens the
       // live debugger view showing the actual LinkedIn page, not about:blank.
-      const refreshedLiveUrl = credentials ? null : await this.refreshLiveUrl();
+      const refreshedLiveUrl = credentials ? null : await this.waitForLiveUrl();
       if (!credentials) logger.info('LinkedIn auth lifecycle', { lifecycle_stage: 'L2_debugger_authorization_requested' });
       if (refreshedLiveUrl && onProgress) {
         await onProgress('auth_surface_ready', 'Secure LinkedIn sign-in is ready.', {
@@ -1133,6 +1134,12 @@ export class LinkedInBrowser {
       }
 
       // ── Wait for authentication ────────────────────────────────
+      if (!credentials && !refreshedLiveUrl) {
+        await onProgress?.('startup_failed', 'The secure LinkedIn sign-in view could not be prepared.', {
+          error_code: 'auth_surface_unavailable',
+        });
+        throw new Error('The secure LinkedIn sign-in view is temporarily unavailable. No replacement session was created.');
+      }
       transition('waiting_for_login');
       if (onProgress) await onProgress('waiting_for_login', credentials
         ? 'Signing in to LinkedIn securely...'
@@ -1668,7 +1675,6 @@ export class LinkedInBrowser {
               : 'reassess_authentication',
         });
       }
-
       if (assessment.state === 'authenticated') {
         logger.info('Authenticated state verified after human authentication', {
           queue_item_id: queueItemId,
@@ -2081,6 +2087,16 @@ export class LinkedInBrowser {
       if (identity?.profileUrl) return identity;
       if (attempt < IDENTITY_RESOLUTION_ATTEMPTS) await new Promise(resolve => setTimeout(resolve, IDENTITY_RESOLUTION_DELAY_MS));
     }
+    return null;
+  }
+
+  private async waitForLiveUrl(timeoutMs = 20_000): Promise<string | null> {
+    const deadline = Date.now() + timeoutMs;
+    do {
+      const liveUrl = await this.refreshLiveUrl();
+      if (liveUrl) return liveUrl;
+      if (Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 1_000));
+    } while (Date.now() < deadline && this.browser?.isConnected());
     return null;
   }
 

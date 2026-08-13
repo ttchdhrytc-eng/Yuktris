@@ -8,6 +8,7 @@ import { createHash } from 'node:crypto';
 import { ContextLeaseOwner, ContextRecord, LinkedInContextService, persistentContextsEnabled, sessionOptionsForAccount } from './linkedin-context.js';
 import { interactiveAuthTimeoutMs, interactiveBrowserSessionTimeoutMs } from './interactive-auth-config.js';
 import { normalizeLinkedInAction, validateSalesNavigatorPayload } from './linkedin-agent-contract.js';
+import { CloudAgentStartupError, cloudAgentStartupTimeoutMs, withinStartupDeadline } from './startup-deadline.js';
 
 const INTERACTIVE_AUTH_TIMEOUT_MS = interactiveAuthTimeoutMs();
 const TEST_CONNECTION_TIMEOUT = parseInt(process.env.TEST_CONNECTION_TIMEOUT_MS || '120000', 10);
@@ -15,6 +16,8 @@ const INTERACTIVE_BROWSER_SESSION_TIMEOUT_MS = interactiveBrowserSessionTimeoutM
 const HEARTBEAT_INTERVAL = parseInt(process.env.WORKER_HEARTBEAT_INTERVAL || '15000', 10);
 const POLL_INTERVAL = parseInt(process.env.QUEUE_POLL_INTERVAL || '3000', 10);
 const SESSION_HEARTBEAT_INTERVAL = parseInt(process.env.SESSION_HEARTBEAT_INTERVAL_MS || '120000', 10);
+const MAX_CONCURRENT_ACCOUNTS = Math.max(1, Math.min(10, parseInt(process.env.LINKEDIN_WORKER_CONCURRENCY || '4', 10)));
+const CLOUD_AGENT_STARTUP_TIMEOUT_MS = cloudAgentStartupTimeoutMs();
 
 export class Worker {
   private client: SupabaseClient;
@@ -31,6 +34,7 @@ export class Worker {
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private sessionHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private currentTaskId: string | null = null;
+  private activeTasks = new Map<string, Promise<void>>();
   private workspaceId: string | null = null;
 
   constructor() {
@@ -241,16 +245,28 @@ export class Worker {
           await this.linkedinContexts.processOneDeletion(this.workerId);
         }
         logger.info(`Poll #${pollCount}: calling claimNext()`, { worker_id: this.workerId });
+        if (this.activeTasks.size >= MAX_CONCURRENT_ACCOUNTS) {
+          logger.info('Cloud agent concurrency capacity reached', { active_tasks: this.activeTasks.size, capacity: MAX_CONCURRENT_ACCOUNTS });
+          await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL));
+          continue;
+        }
         const item = await this.queue.claimNext();
         if (item) {
           if (item.action_type === 'linkedin_connect') logger.info('LinkedIn queue orchestration timing', {
             queue_item_id: item.id, workspace_id: item.workspace_id, account_id: item.account_id,
             stage: 'Q3_worker_claimed', timestamp: new Date().toISOString(),
           });
-          this.currentTaskId = item.id;
           logger.info(`Poll #${pollCount}: task claimed, processing`, { task_id: item.id, action: item.action_type });
-          await this.processTask(item);
-          this.currentTaskId = null;
+          // Each account task owns its own browser/controller state. Database
+          // Context leases still serialize the same account, while unrelated
+          // accounts no longer wait behind a 30-minute human login.
+          const taskWorker = new Worker();
+          taskWorker.workspaceId = this.workspaceId;
+          taskWorker.queue.rememberClaim(item);
+          const task = taskWorker.processTask(item).catch(error => {
+            logger.error('Concurrent task runner failed', { task_id: item.id, error: taskWorker.sanitizeError(error) });
+          }).finally(() => this.activeTasks.delete(item.id));
+          this.activeTasks.set(item.id, task);
         } else {
           logger.info(`Poll #${pollCount}: no tasks`, { worker_id: this.workerId });
         }
@@ -264,6 +280,11 @@ export class Worker {
 
   private async processTask(item: QueueItem): Promise<void> {
     const startTime = Date.now();
+    if (item.action_type === 'linkedin_connect' && startTime - new Date(item.created_at).getTime() > CLOUD_AGENT_STARTUP_TIMEOUT_MS) {
+      await this.queue.fail(item.id, 'Cloud LinkedIn Agent could not start within the infrastructure deadline', 0, false);
+      logger.warn('cloud_agent_startup_failed', { queue_item_id: item.id, stage: 'queue_wait', classification: 'startup_timeout' });
+      return;
+    }
     let leaseLost = false;
     let leaseRenewalFailures = 0;
     const leaseTimer = setInterval(() => {
@@ -329,9 +350,11 @@ export class Worker {
           await this.queue.fail(item.id, `Unknown action type: ${item.action_type}`, Date.now() - startTime, false);
       }
     } catch (err) {
-      const msg = this.sanitizeError(err);
+      const msg = err instanceof CloudAgentStartupError
+        ? 'Cloud LinkedIn Agent could not start within the infrastructure deadline'
+        : this.sanitizeError(err);
       const isBbError = err instanceof BrowserbaseError;
-      const isRetryable = isBbError && ![401, 402, 403].includes((err as BrowserbaseError).statusCode);
+      const isRetryable = !(err instanceof CloudAgentStartupError) && isBbError && ![401, 402, 403].includes((err as BrowserbaseError).statusCode);
       logger.error('Task processing error', { id: item.id, error: msg, browserbase_error: isBbError, retryable: isRetryable });
       await this.queue.fail(item.id, msg, Date.now() - startTime, isRetryable);
     } finally {
@@ -415,6 +438,7 @@ export class Worker {
   private async handleConnect(item: QueueItem, startTime: number): Promise<void> {
     const workspaceId = item.workspace_id;
     const accountId = item.account_id;
+    const startupStartedAt = Date.now();
     if (!accountId) {
       logger.error('handleConnect: missing account_id', { queue_item_id: item.id });
       await this.queue.fail(item.id, 'Missing account_id', Date.now() - startTime, false);
@@ -441,11 +465,11 @@ export class Worker {
       const owner: ContextLeaseOwner = {
         workspaceId, accountId, queueItemId: item.id, workerId: this.workerId, attemptId: item.attempt_id,
       };
-      persistentContext = await this.linkedinContexts.ensureProvisioned(owner);
-      persistentContext = await this.linkedinContexts.acquire(owner);
+      persistentContext = await withinStartupDeadline(this.linkedinContexts.ensureProvisioned(owner), startupStartedAt, 'context_provisioning');
+      persistentContext = await withinStartupDeadline(this.linkedinContexts.acquire(owner), startupStartedAt, 'context_lease');
       logPersistentFastPath('P1_context_lease_acquired');
       this.activeContextLease = { context: persistentContext, owner };
-      await this.linkedinContexts.reconcileBeforeSession(persistentContext, owner);
+      await withinStartupDeadline(this.linkedinContexts.reconcileBeforeSession(persistentContext, owner), startupStartedAt, 'context_reconciliation');
       launchOptions = {
         ...sessionOptionsForAccount(true, persistentContext),
         timeoutMs: INTERACTIVE_BROWSER_SESSION_TIMEOUT_MS,
@@ -531,7 +555,9 @@ export class Worker {
     logger.info('handleConnect: starting fresh login flow', { account_id: accountId });
 
     try {
-      if (!reuseOpenBrowserForAuthentication) await this.linkedin.launch(usePersistentContext ? undefined : onProgress, launchOptions);
+      if (!reuseOpenBrowserForAuthentication) await withinStartupDeadline(
+        this.linkedin.launch(usePersistentContext ? undefined : onProgress, launchOptions), startupStartedAt, 'provider_session_and_cdp',
+      );
     } catch (err) {
       const msg = this.sanitizeError(err);
       const retryable = err instanceof BrowserbaseError && ![401, 402, 403].includes(err.statusCode);
@@ -564,7 +590,7 @@ export class Worker {
 
     // ── Create browser context ──────────────────────────────────
     try {
-      if (!reuseOpenBrowserForAuthentication) await this.linkedin.newContext();
+      if (!reuseOpenBrowserForAuthentication) await withinStartupDeadline(this.linkedin.newContext(), startupStartedAt, 'browser_page');
     } catch (err) {
       const msg = this.sanitizeError(err);
       logger.error('handleConnect: context creation failed', { error: msg });
@@ -578,7 +604,9 @@ export class Worker {
     // ── Connect: open LinkedIn → wait for auth → verify → save ──
     let result;
     if (usePersistentContext) {
-      const preflight = await this.linkedin.checkExistingAuthenticatedSession(intendedIdentity);
+      const preflight = await withinStartupDeadline(
+        this.linkedin.checkExistingAuthenticatedSession(intendedIdentity), startupStartedAt, 'linkedin_classification',
+      );
       if (preflight.result) {
         result = preflight.result;
         if (result.success) {
@@ -590,10 +618,18 @@ export class Worker {
       } else {
         await onProgress('auth_required', 'Sign in to LinkedIn once in the secure browser.', { lifecycle_stage: 'L0_auth_required' });
         await this.updateAccount(accountId, { browserbase_session_id: bbSessionId, browser_connected_at: new Date().toISOString() });
-        result = await this.linkedin.connect(
-          INTERACTIVE_AUTH_TIMEOUT_MS, onProgress, workspaceId, accountId, item.id, intendedIdentity,
+        let startupReady!: () => void;
+        const ready = new Promise<void>(resolve => { startupReady = resolve; });
+        const stagedProgress: ProgressCallback = async (step, message, metadata) => {
+          await onProgress(step, message, metadata);
+          if (step === 'auth_surface_ready' || step === 'human_challenge_required') startupReady();
+        };
+        const connection = this.linkedin.connect(
+          INTERACTIVE_AUTH_TIMEOUT_MS, stagedProgress, workspaceId, accountId, item.id, intendedIdentity,
           preflight.preserveCurrentPage, true,
         );
+        await withinStartupDeadline(Promise.race([ready, connection.then(() => undefined)]), startupStartedAt, 'linkedin_login_surface');
+        result = await connection;
       }
     } else {
       await onProgress('auth_required', 'Sign in to LinkedIn once in the secure browser.', { lifecycle_stage: 'L0_auth_required' });

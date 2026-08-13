@@ -98,7 +98,7 @@ const tests: Array<[string, () => void]> = [
     assert.match(onboardingPage, /session_status === 'connected'/);
     assert.match(onboardingPage, /status === 'active'/);
     assert.match(onboardingPage, /linkedinAccount\.profile_url/);
-    assert.match(onboardingPage, /Preparing secure browser/);
+    assert.match(onboardingPage, /Starting Cloud LinkedIn Agent/);
     const startSuccess = onboardingPage.match(/onSuccess: \(\{ accountId \}\)[\s\S]*?onError:/)?.[0] ?? '';
     assert.doesNotMatch(startSuccess, /setStep\('gmail'\)/);
     assert.match(onboardingPage, /if \(step !== 'linkedin' \|\| !linkedinConnected/);

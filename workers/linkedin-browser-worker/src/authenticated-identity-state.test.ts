@@ -25,7 +25,7 @@ test('4 authenticated unresolved identity is not session expiry', () => {
 test('5 authenticated unresolved identity creates no second session', () => assert.match(handler, /identity_state: reuseResult\.identityState[\s\S]*linkedin\.close\(\)[\s\S]*queue\.fail[\s\S]*return/));
 test('6 authenticated unresolved identity never prompts for credentials', () => assert.doesNotMatch(restore, /auth_required|ready_for_login/));
 test('7 logged-out restore requests human authentication', () => assert.match(restore, /unauthenticated[\s\S]*requiresAction: true, reuseExistingBrowser: true/));
-test('8 logged-out restore reuses the same Browserbase session', () => assert.match(handler, /reuseOpenBrowserForAuthentication[\s\S]*if \(!reuseOpenBrowserForAuthentication\) await this\.linkedin\.launch/));
+test('8 logged-out restore reuses the same Browserbase session', () => assert.match(handler, /reuseOpenBrowserForAuthentication[\s\S]*if \(!reuseOpenBrowserForAuthentication\) await withinStartupDeadline\([\s\S]*this\.linkedin\.launch/));
 test('9 challenge restore preserves one passive page', () => assert.match(restore, /authState: 'checkpoint'[\s\S]*preserveCurrentPage: true/));
 test('10 identity mismatch remains fail closed', () => assert.match(restore, /identityState: 'mismatch'/));
 test('11 in-me is rejected without changing authenticated state', () => {
@@ -43,7 +43,7 @@ test('14 auth surface access remains current-session and queue scoped', () => {
 });
 test('15 auth surface recovery remains same queue scoped', () => assert.match(migration, /q\.id=p_queue_item_id[\s\S]*interaction_type='auth_surface_recovery'/));
 test('16 normal restore fallback has one session creation', () => {
-  assert.match(handler, /if \(!reuseOpenBrowserForAuthentication\) await this\.linkedin\.launch/);
+  assert.match(handler, /if \(!reuseOpenBrowserForAuthentication\) await withinStartupDeadline\([\s\S]*this\.linkedin\.launch/);
   assert.doesNotMatch(handler, /Previous session expired\. Starting fresh login/);
 });
 test('17 persistent Context fast path is unchanged', () => assert.match(handler, /checkExistingAuthenticatedSession[\s\S]*existing_session_authenticated/));

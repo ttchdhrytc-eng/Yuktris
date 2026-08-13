@@ -41,12 +41,15 @@ const STATE_META: Record<ConnectionState, { label: string; tone: 'success' | 'wa
 };
 
 const STEP_LABELS: Record<string, string> = {
+  checking_existing_session: 'Checking persistent LinkedIn session...',
   creating_session: 'Creating browser session...',
   session_created: 'Browser session created...',
   connecting_browser: 'Attaching to browser...',
   browser_connected: 'Secure browser ready',
   launching_browser: 'Launching browser...',
   opening_linkedin: 'Opening LinkedIn...',
+  auth_surface_ready: 'LinkedIn sign-in ready',
+  startup_failed: 'Cloud agent startup failed',
   ready_for_login: 'LinkedIn login page ready',
   waiting_for_login: 'Waiting for login...',
   challenge_detected: 'Verification required',

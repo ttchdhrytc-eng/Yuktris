@@ -460,7 +460,9 @@ export function OnboardingPage() {
               verifyingIdentity={linkedinVerifyingIdentity}
               waitingMessage={latestLinkedinProgress?.step === 'verifying_authentication' ? 'Verifying LinkedIn session...'
                 : linkedinAuthRequired ? 'Sign in to LinkedIn once in the secure browser.'
-                : 'Checking your LinkedIn session...'}
+                : latestLinkedinProgress?.step === 'opening_linkedin' ? 'Opening LinkedIn...'
+                : latestLinkedinProgress?.step === 'checking_existing_session' ? 'Checking the persistent LinkedIn session...'
+                : 'Starting Cloud LinkedIn Agent...'}
               error={connectLinkedIn.error
                 ? 'Failed to start LinkedIn connection. Please try again.'
                 : linkedinQueueItemId && linkedinAttempt.isFetched && !linkedinAttempt.data
@@ -960,7 +962,7 @@ function GoogleConnectStep({ icon: Icon, iconColor, iconBg, title, description, 
             <RefreshCw className="h-5 w-5 animate-spin text-brand-400" />
             <div>
               <p className="text-sm font-medium text-brand-300">
-                {securityCheckRequired ? 'LinkedIn security verification required' : verifyingIdentity ? 'Verifying LinkedIn identity' : loginUrl ? 'LinkedIn sign-in ready' : 'Preparing secure browser'}
+                {securityCheckRequired ? 'LinkedIn security verification required' : verifyingIdentity ? 'Verifying LinkedIn identity' : loginUrl ? 'LinkedIn sign-in ready' : 'Starting Cloud LinkedIn Agent...'}
               </p>
               <p className="mt-1 max-w-md text-xs leading-relaxed text-ink-400">
                 {securityCheckRequired

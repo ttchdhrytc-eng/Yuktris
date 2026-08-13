@@ -31,7 +31,7 @@ test('6 authenticated existing session opens no credential flow', () => {
   const successfulReuse = handler.match(/if \(reuseResult\.success\)[\s\S]*?return;/)?.[0] ?? '';
   assert.doesNotMatch(successfulReuse, /linkedin\.connect\(|ready_for_login/);
 });
-test('7 normal connection attempt has one Browserbase session maximum', () => assert.match(handler, /if \(!reuseOpenBrowserForAuthentication\) await this\.linkedin\.launch/));
+test('7 normal connection attempt has one Browserbase session maximum', () => assert.match(handler, /if \(!reuseOpenBrowserForAuthentication\) await withinStartupDeadline\([\s\S]*this\.linkedin\.launch/));
 test('8 orchestration states are not written to durable account status', () => {
   for (const state of ['checking_existing_session','identity_resolution_pending','identity_resolution_failed','auth_required','auth_surface_ready','recovering_auth_surface']) {
     assert.doesNotMatch(worker, new RegExp(`status: '${state}'`));

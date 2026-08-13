@@ -16,7 +16,7 @@ test('1 new accounts reserve one persistent Browserbase Context', () => {
   assert.match(context, /reserve_linkedin_browser_context/);
   assert.match(migration, /uq_linkedin_browser_contexts_active_account/);
 });
-test('2 the same account reuses its durable Context mapping', () => assert.match(context, /if \(reserved\.provider_context_id\) return reserved/));
+test('2 the same account reuses its durable Context mapping', () => assert.match(context, /if \(reserved\.provider_context_id\) return this\.ensureExecutionPreferences\(reserved\)/));
 test('3 mapping is database-backed and survives worker restart', () => assert.match(migration, /provider_context_id text/));
 test('4 persistent Context is the V1 default', () => assert.equal(persistentContextsEnabled({}), true));
 test('5 logged-out Context produces reauth_required', () => assert.match(linkedin, /errorCode: 'reauth_required'/));

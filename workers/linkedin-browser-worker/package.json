@@ -26,6 +26,7 @@
     "test:post-auth-capture": "npm run build && node --test dist/post-auth-capture-continuity.test.js",
     "test:linkedin-v1-stabilization": "npm run build && node --test dist/linkedin-v1-stabilization.test.js",
     "test:cloud-agent-v1": "npm run build && node --test dist/cloud-agent-v1.test.js dist/linkedin-agent-contract.test.js dist/manual-persistent-auth-v1.test.js",
+    "test:cloud-agent-startup": "npm run build && node --test dist/cloud-agent-startup.test.js",
     "install-browser": "echo 'No local browser needed — using Browserbase'"
   },
   "dependencies": {

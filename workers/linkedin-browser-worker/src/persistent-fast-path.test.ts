@@ -53,7 +53,7 @@ const tests: Array<[string, () => void]> = [
     assert.match(automation, /open=\{showPanel && authRequired/);
   }],
   ['checking and interactive copy are distinct', () => {
-    assert.match(onboarding, /Checking your LinkedIn session/);
+    assert.match(onboarding, /Checking the persistent LinkedIn session/);
     assert.match(onboarding, /Sign in to LinkedIn once in the secure browser/);
   }],
   ['fast-path timing stages P0 through P10 are present', () => {
