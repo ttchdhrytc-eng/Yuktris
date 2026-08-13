@@ -35,8 +35,14 @@ Deno.serve(async (req: Request) => {
   if (req.method !== "POST") return jsonError("Method not allowed", 405);
   let stage = "request_received";
   try {
-    const body = await req.json() as Record<string, unknown>;
+    let body: Record<string, unknown>;
+    try {
+      body = await req.json() as Record<string, unknown>;
+    } catch {
+      return jsonError("Invalid request body", 400);
+    }
     const workspaceId = typeof body.workspace_id === "string" ? body.workspace_id : "";
+    if (!isUuid(workspaceId)) return jsonError("Valid workspace is required", 400);
     const { userId } = await authorizeLinkedInWorkspace(req, workspaceId);
     stage = "workspace_authorized";
     if (!userId) throw new Error("Unauthorized");
@@ -57,8 +63,9 @@ Deno.serve(async (req: Request) => {
 
     if (body.action === "connect_existing") {
       const accountId = typeof body.account_id === "string" ? body.account_id : "";
-      if (!accountId) return jsonError("LinkedIn account is required", 400);
+      if (!isUuid(accountId)) return jsonError("Valid LinkedIn account is required", 400);
       const idempotencyKey = typeof body.idempotency_key === "string" ? body.idempotency_key : crypto.randomUUID();
+      stage = "stored_credentials_rpc_started";
       const { data, error } = await userClient.rpc("start_linkedin_connection_with_stored_credentials", {
         p_workspace_id: workspaceId, p_account_id: accountId, p_idempotency_key: idempotencyKey,
       });
@@ -80,6 +87,7 @@ Deno.serve(async (req: Request) => {
     password = "";
     const idempotencyKey = typeof body.idempotency_key === "string" ? body.idempotency_key : crypto.randomUUID();
     const existingAccountId = typeof body.existing_account_id === "string" ? body.existing_account_id : null;
+    if (existingAccountId && !isUuid(existingAccountId)) return jsonError("Valid LinkedIn account is required", 400);
     const { data, error } = await userClient.rpc("start_linkedin_connection_with_credentials", {
       p_workspace_id: workspaceId,
       p_encrypted_username: encryptedUsername,
@@ -101,12 +109,33 @@ Deno.serve(async (req: Request) => {
       credentials_configured: true,
     });
   } catch (error) {
-    const status = authorizationStatus(error);
+    const reconnectFailure = storedReconnectFailure(error);
+    const status = reconnectFailure?.status ?? authorizationStatus(error);
     const code = typeof error === "object" && error && "code" in error ? String((error as { code?: unknown }).code || "backend_error") : "backend_error";
     console.error("linkedin_credentials_request_failed", { stage: typeof stage === "string" ? stage : "unknown", code, status });
-    return jsonError(status === 500 ? "Unable to configure LinkedIn credentials" : (error as Error).message, status);
+    return jsonError(reconnectFailure?.message ?? (status === 500 ? "Unable to configure LinkedIn credentials" : (error as Error).message), status);
   }
 });
+
+function storedReconnectFailure(error: unknown): { status: number; message: string } | null {
+  const message = typeof error === "object" && error && "message" in error ? String((error as { message?: unknown }).message || "") : "";
+  const failures: Record<string, { status: number; message: string }> = {
+    "not authorized": { status: 403, message: "Forbidden" },
+    linkedin_account_not_found: { status: 404, message: "LinkedIn account not found" },
+    linkedin_credentials_missing: { status: 409, message: "LinkedIn credentials are not configured" },
+    linkedin_credentials_disabled: { status: 409, message: "LinkedIn credentials must be updated before reconnecting" },
+    linkedin_context_missing: { status: 409, message: "Persistent LinkedIn browser context is not configured" },
+    linkedin_context_unavailable: { status: 409, message: "Persistent LinkedIn browser context is unavailable" },
+    linkedin_context_leased: { status: 409, message: "LinkedIn account is currently in use" },
+    linkedin_connection_attempt_missing: { status: 503, message: "Unable to create LinkedIn connection attempt" },
+    linkedin_connection_queue_mismatch: { status: 503, message: "Unable to confirm LinkedIn connection attempt" },
+  };
+  return failures[message] ?? null;
+}
+
+function isUuid(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
 
 function jsonResponse(value: Record<string, unknown>): Response {
   return new Response(JSON.stringify(value), { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json", "Cache-Control": "no-store" } });
