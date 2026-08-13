@@ -19,8 +19,8 @@ test('2 OTP-completed authentication follows the same verified fresh path', () =
   assert.match(fresh, /waitForAuthenticationWithChallenges[\s\S]*authResult\.authenticated[\s\S]*fresh_authentication_verified/);
 });
 
-test('3 unresolved fresh identity is explicit and never a secure-window failure', () => {
-  assert.match(fresh, /if \(!identity\)[\s\S]*errorCode: 'identity_resolution_pending'/);
+test('3 unresolved unbound fresh identity is explicit and never a secure-window failure', () => {
+  assert.match(fresh, /identityDecision\.state === 'deferred'[\s\S]*if \(!identity\)[\s\S]*errorCode: 'identity_resolution_pending'/);
   assert.doesNotMatch(fresh, /else if \(this\.bbSession\)[\s\S]*browserbase_live_view_failed/);
 });
 
@@ -36,8 +36,8 @@ test('6 incomplete authentication cannot report connected', () => {
   assert.match(fresh, /if \(!authResult\.authenticated\)[\s\S]*success: false/);
 });
 
-test('7 fresh unresolved identity is captured but never bound or connected', () => {
-  const unresolved = fresh.match(/if \(!identity\)[\s\S]*?\n      \}/)?.[0] ?? '';
+test('7 unbound fresh unresolved identity is captured but never bound or connected', () => {
+  const unresolved = fresh.match(/if \(!identity\) \{[\s\S]*?errorCode: 'identity_resolution_pending'[\s\S]*?\n      \}/)?.[0] ?? '';
   assert.match(unresolved, /captureSession/);
   assert.doesNotMatch(unresolved, /bindAuthenticatedIdentity|success: true|identity_verified/);
   assert.match(handler, /identity_resolution_pending[\s\S]*saveSession[\s\S]*connection_state: 'requires_action'/);

@@ -555,13 +555,13 @@ export class Worker {
         await onProgress('auth_required', 'LinkedIn sign-in is required to continue.', { lifecycle_stage: 'L0_auth_required' });
         await this.updateAccount(accountId, { browserbase_session_id: bbSessionId, browser_connected_at: new Date().toISOString() });
         result = await this.linkedin.connect(
-          CONNECTION_TIMEOUT, onProgress, workspaceId, accountId, item.id, intendedIdentity, preflight.preserveCurrentPage,
+          CONNECTION_TIMEOUT, onProgress, workspaceId, accountId, item.id, intendedIdentity, preflight.preserveCurrentPage, true,
         );
       }
     } else {
       await onProgress('auth_required', 'LinkedIn sign-in is required to continue.', { lifecycle_stage: 'L0_auth_required' });
       await this.updateAccount(accountId, { browserbase_session_id: bbSessionId, browser_connected_at: new Date().toISOString() });
-      result = await this.linkedin.connect(CONNECTION_TIMEOUT, onProgress, workspaceId, accountId, item.id, intendedIdentity, preserveRestoredPage);
+      result = await this.linkedin.connect(CONNECTION_TIMEOUT, onProgress, workspaceId, accountId, item.id, intendedIdentity, preserveRestoredPage, false);
     }
 
     logger.info('handleConnect: linkedin.connect() returned', { account_id: accountId, success: result.success, requiresAction: result.requiresAction, error: result.error });

@@ -45,8 +45,9 @@ const tests: Array<[string, () => void]> = [
     assert.doesNotMatch(onboarding, /latestLinkedinProgress\?\.step === 'saving_session'/);
   }],
   ['identity mismatch cannot emit identity_verified', () => {
-    const mismatchReturn = linkedin.indexOf('return { success: false, error: identityMismatch');
-    const emit = linkedin.indexOf("onProgress('identity_verified'");
+    const freshConnect = linkedin.match(/async connect\([\s\S]*?async connectWithSession/)?.[0] ?? '';
+    const mismatchReturn = freshConnect.indexOf("identityDecision.state === 'mismatch'");
+    const emit = freshConnect.indexOf("onProgress('identity_verified'");
     assert.ok(mismatchReturn > 0 && emit > mismatchReturn);
   }],
   ['checkpoint remains visible and passive', () => {

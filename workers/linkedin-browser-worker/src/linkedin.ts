@@ -87,6 +87,39 @@ export interface IntendedLinkedInIdentity {
   linkedinEmail?: string | null;
 }
 
+export type FreshIdentityDecision =
+  | { state: 'verified'; effectiveProfileUrl: string }
+  | { state: 'deferred'; effectiveProfileUrl: string }
+  | { state: 'mismatch' }
+  | { state: 'unresolved' };
+
+function canonicalIdentityUrl(value?: string | null): string | null {
+  if (!value) return null;
+  try {
+    const parsed = new URL(value, 'https://www.linkedin.com');
+    const hostname = parsed.hostname.toLowerCase();
+    if (hostname !== 'linkedin.com' && hostname !== 'www.linkedin.com') return null;
+    const match = parsed.pathname.match(/^\/in\/([A-Za-z0-9_%.-]+)\/?$/i);
+    if (!match || match[1].toLowerCase() === 'me') return null;
+    return `https://www.linkedin.com/in/${match[1]}`;
+  } catch {
+    return null;
+  }
+}
+
+export function decideFreshIdentity(
+  resolvedProfileUrl?: string | null,
+  boundProfileUrl?: string | null,
+  allowBoundIdentityDeferral = false,
+): FreshIdentityDecision {
+  const resolved = canonicalIdentityUrl(resolvedProfileUrl);
+  const bound = canonicalIdentityUrl(boundProfileUrl);
+  if (resolved && bound && resolved.toLowerCase() !== bound.toLowerCase()) return { state: 'mismatch' };
+  if (resolved) return { state: 'verified', effectiveProfileUrl: resolved };
+  if (allowBoundIdentityDeferral && bound) return { state: 'deferred', effectiveProfileUrl: bound };
+  return { state: 'unresolved' };
+}
+
 type LoginFlowState = 'idle' | 'opening_browser' | 'waiting_for_login' | 'challenge_detected' | 'waiting_for_user' | 'verifying_authentication' | 'verifying_identity' | 'capturing_session' | 'connected' | 'failed' | 'cancelled';
 
 export interface LinkedInIdentity {
@@ -643,6 +676,7 @@ export class LinkedInBrowser {
     queueItemId?: string,
     intendedIdentity?: IntendedLinkedInIdentity,
     preserveCurrentPage = false,
+    allowBoundIdentityDeferral = false,
   ): Promise<ConnectionResult> {
     if (!this.page) throw new Error('No page — call newContext() first');
     let flowState: LoginFlowState = 'idle';
@@ -740,6 +774,41 @@ export class LinkedInBrowser {
         canonical_identity_found: !!identity?.profileUrl, canonical_profile_url: identity?.profileUrl ?? null,
         final_connect_classification: identity ? 'identity_verified' : 'identity_resolution_pending',
       });
+      const identityDecision = decideFreshIdentity(
+        identity?.profileUrl,
+        intendedIdentity?.profileUrl,
+        allowBoundIdentityDeferral,
+      );
+      if (identityDecision.state === 'mismatch') {
+        transition('failed');
+        return {
+          success: false, authState: 'authenticated', identityState: 'mismatch', nonRetryable: true,
+          error: 'Authenticated LinkedIn identity does not match the account already connected to this workspace',
+        };
+      }
+      if (!identity && identityDecision.state === 'deferred') {
+        transition('capturing_session');
+        const identityVerifiedAt = Date.now();
+        const session = await this.captureSession(authenticationProof, 'unresolved');
+        const deferredIdentity: LinkedInIdentity = {
+          profileUrl: identityDecision.effectiveProfileUrl,
+          profileName: intendedIdentity?.profileName || null,
+          profileHeadline: null,
+        };
+        logger.info('linkedin_identity_deferred', {
+          queue_item_id: queueItemId, workspace_id: workspaceId, account_id: accountId,
+          authentication_state: 'authenticated', identity_state: 'unresolved',
+          canonical_identity_bound: true, persistent_context_reused: true,
+          conflicting_identity_observed: false,
+        });
+        if (onProgress) await onProgress('identity_verified', 'Existing LinkedIn account identity confirmed. Closing secure sign-in view...');
+        return {
+          success: true, identity: deferredIdentity, session,
+          effectiveProfileUrl: identityDecision.effectiveProfileUrl, reuseBoundIdentity: true,
+          authState: 'authenticated', identityState: 'unresolved',
+          identityVerifiedAt, stateCapturedAt: Date.now(),
+        };
+      }
       if (!identity) {
         transition('capturing_session');
         const session = await this.captureSession(authenticationProof, 'unresolved');
