@@ -42,10 +42,10 @@ const tests: Array<[string, () => void]> = [
     assert.match(hook, /!result\?\.account_id \|\| !result\?\.queue_item_id/);
     assert.match(hook, /browser_execution_queue[\s\S]*\.eq\('id', result\.queue_item_id\)[\s\S]*action_type !== 'linkedin_connect'/);
   }],
-  ['enqueue has a bounded abort and failure cannot leave checking active', () => {
-    assert.match(hook, /Promise\.race[\s\S]*12_000/);
-    assert.match(onboarding, /linkedinAttemptTimeoutStage[\s\S]*'worker_claim'[\s\S]*15_000/);
-    assert.match(onboarding, /linkedinWaiting = [^\n]*activeLinkedinQueue[^\n]*!linkedinAttemptTimeoutStage/);
+  ['enqueue follows the backend response and failure cannot leave checking active', () => {
+    assert.doesNotMatch(hook, /Promise\.race|connection initialization timed out|12_000/);
+    assert.doesNotMatch(onboarding, /linkedinAttemptTimeoutStage|auth_surface_preparation/);
+    assert.match(onboarding, /linkedinWaiting = [^\n]*activeLinkedinQueue/);
   }],
   ['no queue item cannot produce onboarding checking state', () => {
     assert.match(onboarding, /!!linkedinQueueItemId && activeLinkedinQueue/);

@@ -469,15 +469,16 @@ function AccountAuthModal({ accountId, queueItemId, onClose }: { accountId: stri
   const { data: interactions } = useAuthInteractions(accountId);
   const cancelInteraction = useCancelAuthInteraction();
   const currentQueueItemId = queueItemId ?? [...(interactions ?? [])].reverse().find((event) => event.queue_item_id)?.queue_item_id ?? null;
-  const { data: loginAccess } = useLinkedInLoginAccess(accountId, currentQueueItemId);
+  const challengeRequiredForAccess = interactions?.some(
+    (event) => event.queue_item_id === currentQueueItemId && event.interaction_type === 'challenge' && event.status === 'pending'
+  ) ?? false;
+  const { data: loginAccess } = useLinkedInLoginAccess(accountId, currentQueueItemId, challengeRequiredForAccess);
   const recoverSurface = useRecoverLinkedInAuthSurface();
   const latestProgress = [...(interactions ?? [])].reverse().find(event => event.queue_item_id === currentQueueItemId && event.interaction_type === 'progress');
   const identityVerified = interactions?.some(
     (event) => event.queue_item_id === currentQueueItemId && event.interaction_type === 'progress' && event.step === 'identity_verified' && event.status === 'completed'
   ) ?? false;
-  const securityCheckRequired = interactions?.some(
-    (event) => event.queue_item_id === currentQueueItemId && event.interaction_type === 'challenge' && event.status === 'pending'
-  ) ?? false;
+  const securityCheckRequired = challengeRequiredForAccess;
   const repeatedSecurityChecks = interactions?.some(
     (event) => event.queue_item_id === currentQueueItemId && event.interaction_type === 'progress' && event.step === 'provider_rechallenge' && event.status === 'completed'
   ) ?? false;
@@ -485,7 +486,7 @@ function AccountAuthModal({ accountId, queueItemId, onClose }: { accountId: stri
 
   return (
     <SecureLinkedInAuthModal
-      open={securityCheckRequired || identityVerified}
+      open={securityCheckRequired}
       loginUrl={loginAccess?.loginUrl ?? null}
       identityVerified={identityVerified}
       securityCheckRequired={securityCheckRequired}

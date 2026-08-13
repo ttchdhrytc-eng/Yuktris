@@ -189,6 +189,8 @@ export type ProgressStep =
   | 'connection_failed'
   | 'opening_linkedin'
   | 'ready_for_login'
+  | 'automatic_login_started'
+  | 'credentials_submitted'
   | 'waiting_for_login'
   | 'challenge_detected'
   | 'human_challenge_required'
@@ -196,6 +198,7 @@ export type ProgressStep =
   | 'invalid_credentials'
   | 'waiting_for_user'
   | 'verifying_authentication'
+  | 'authentication_succeeded'
   | 'identity_resolution_pending'
   | 'identity_verified'
   | 'saving_session'
@@ -864,6 +867,7 @@ export class LinkedInBrowser {
   ): Promise<ConnectionResult> {
     if (!this.page) throw new Error('No page — call newContext() first');
     let flowState: LoginFlowState = 'idle';
+    let credentialInteractionStarted = false;
     const transition = (next: LoginFlowState): void => {
       const allowed: Record<LoginFlowState, LoginFlowState[]> = {
         idle: ['opening_browser', 'failed', 'cancelled'],
@@ -879,7 +883,11 @@ export class LinkedInBrowser {
         cancelled: [],
       };
       if (!allowed[flowState].includes(next)) throw new Error(`Invalid login transition ${flowState} -> ${next}`);
-      logger.info('LinkedIn login state transition', { from: flowState, to: next });
+      logger.info('LinkedIn login state transition', {
+        from: flowState, to: next, queue_item_id: queueItemId,
+        workspace_id: workspaceId, account_id: accountId,
+        browserbase_session_id: this.bbSession?.id ?? null,
+      });
       flowState = next;
     };
 
@@ -895,15 +903,26 @@ export class LinkedInBrowser {
         throw new Error('LinkedIn sign-in is temporarily unavailable. Please try again later.');
       } else if (loginSurface.state === 'login_ready' && credentials) {
         if (onProgress) await onProgress('ready_for_login', 'LinkedIn login page is ready. Signing in securely.');
+        credentialInteractionStarted = true;
+        if (onProgress) await onProgress('automatic_login_started', 'Signing in to LinkedIn securely.');
+        logger.info('LinkedIn automatic login started', {
+          queue_item_id: queueItemId, workspace_id: workspaceId, account_id: accountId,
+          browserbase_session_id: this.bbSession?.id ?? null,
+        });
         await this.submitLinkedInCredentials(credentials, loginSurface.probe);
+        if (onProgress) await onProgress('credentials_submitted', 'LinkedIn credentials submitted securely.');
+        logger.info('LinkedIn credentials submitted', {
+          queue_item_id: queueItemId, workspace_id: workspaceId, account_id: accountId,
+          browserbase_session_id: this.bbSession?.id ?? null,
+        });
       }
 
       // ── Refresh Live URL after navigation ───────────────────────
       // After page.goto() navigates to LinkedIn, fetch the updated debug URL
       // from Browserbase so the frontend's "Open Browser" button opens the
       // live debugger view showing the actual LinkedIn page, not about:blank.
-      logger.info('LinkedIn auth lifecycle', { lifecycle_stage: 'L2_debugger_authorization_requested' });
       const refreshedLiveUrl = credentials ? null : await this.refreshLiveUrl();
+      if (!credentials) logger.info('LinkedIn auth lifecycle', { lifecycle_stage: 'L2_debugger_authorization_requested' });
       if (refreshedLiveUrl && onProgress) {
         await onProgress('auth_surface_ready', 'Secure LinkedIn sign-in is ready.', {
           lifecycle_stage: 'L3_auth_surface_ready',
@@ -943,6 +962,7 @@ export class LinkedInBrowser {
       }
 
       transition('verifying_authentication');
+      if (onProgress) await onProgress('authentication_succeeded', 'LinkedIn authentication succeeded.');
       if (onProgress) await onProgress('verifying_authentication', 'LinkedIn sign-in detected. Verifying authentication...');
       if (!this.browser?.isConnected() || !this.context) {
         throw new Error('Authenticated LinkedIn browser disconnected before identity verification');
@@ -1055,9 +1075,13 @@ export class LinkedInBrowser {
     } catch (err) {
       try { transition('failed'); } catch { /* preserve the original failure */ }
       const msg = this.sanitizeError(err);
-      logger.error('Connection flow error', { error: msg });
+      logger.error('Connection flow error', {
+        error: msg, queue_item_id: queueItemId, workspace_id: workspaceId,
+        account_id: accountId, browserbase_session_id: this.bbSession?.id ?? null,
+        credential_interaction_started: credentialInteractionStarted,
+      });
       if (onProgress) await onProgress('login_failed', `Connection failed: ${msg}`);
-      return { success: false, error: msg };
+      return { success: false, error: msg, nonRetryable: credentialInteractionStarted };
     }
   }
 
@@ -1448,7 +1472,7 @@ export class LinkedInBrowser {
       if (assessment.state === 'unauthenticated' && assessment.signals.includes('invalid_credentials')) {
         if (!invalidCredentialsReported && onProgress) {
           invalidCredentialsReported = true;
-          await onProgress('invalid_credentials', 'LinkedIn reported that the sign-in details were not accepted. Check them directly in the secure LinkedIn browser and try again.');
+          await onProgress('invalid_credentials', 'LinkedIn reported that the configured sign-in details were not accepted. Update the saved credentials before reconnecting.');
         }
         return { authenticated: false, challenge: activeChallenge, cancelled: false,
           failure: 'LinkedIn rejected the configured credentials.', failureCode: 'invalid_credentials' };

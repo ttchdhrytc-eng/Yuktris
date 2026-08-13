@@ -131,7 +131,7 @@ const tests: Array<[string, () => void]> = [
     assert.match(continuityMigration, /REVOKE EXECUTE ON FUNCTION public\.get_linkedin_login_access\(uuid,uuid\) FROM PUBLIC, anon/);
   }],
   ['onboarding embeds authorized Browserbase login and keeps polling', () => {
-    assert.match(onboardingPage, /useLinkedInLoginAccess\(linkedinAccountId, linkedinQueueItemId\)/);
+    assert.match(onboardingPage, /useLinkedInLoginAccess\(linkedinAccountId, linkedinQueueItemId, !!linkedinChallenge\)/);
     assert.match(onboardingPage, /SecureLinkedInAuthModal/);
     assert.doesNotMatch(onboardingPage, /window\.open\(loginUrl/);
     assert.match(hook, /get_linkedin_login_access/);

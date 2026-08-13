@@ -21,7 +21,7 @@ test('6 worker failures publish queue failure', () => assert.match(worker, /queu
 test('7 lease loss cancels authentication', () => assert.match(worker, /leaseLost = true;[\s\S]*linkedin\.cancel/));
 test('8 login access is current queue scoped', () => assert.match(migration, /i\.queue_item_id=p_queue_item_id/));
 test('9 stale URL cannot cross provider sessions', () => assert.match(migration, /browserbase_session_id'=v_session_id/));
-test('10 frontend readiness is bounded at fifteen seconds', () => assert.match(modal, /15_000/));
+test('10 frontend verification view cannot time out the backend queue', () => assert.doesNotMatch(modal, /15_000|readinessTimedOut/));
 test('11 persistent fast path remains', () => assert.match(worker, /existing_session_authenticated/));
 test('12 interactive auth publishes auth_required', () => assert.match(worker, /onProgress\('auth_required'/));
 test('13 challenge observation remains passive', () => assert.match(linkedin, /worker_action: 'observe_only'/));
@@ -35,7 +35,7 @@ test('18 recovery does not create a Context or session', () => {
 });
 test('19 recovery requests are authorized and idempotent', () => assert.match(migration, /is_workspace_member[\s\S]*interaction_type='auth_surface_recovery'[\s\S]*status='pending'/));
 test('20 provider error is replaced by Yuktris recovery UX', () => {
-  assert.match(modal, /We couldn't open the secure LinkedIn sign-in window/);
+  assert.match(modal, /We couldn't open the secure LinkedIn verification window/);
   assert.match(hook, /request_linkedin_auth_surface_recovery/);
 });
 test('debug API is hard bounded', () => assert.match(browserbase, /getLiveUrls\(sessionId: string, timeoutMs = 8_000\)/));

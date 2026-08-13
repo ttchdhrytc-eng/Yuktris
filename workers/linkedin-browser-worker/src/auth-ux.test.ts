@@ -95,7 +95,7 @@ const tests: Array<[string, () => void]> = [
   }],
   ['customer UI and logs do not expose credentials cookies or provider endpoints', () => {
     assert.doesNotMatch(modal, /api[_-]?key|wsEndpoint|connectUrl|cookie/i);
-    assert.match(modal, /Yuktris never sees or stores your password/);
+    assert.match(modal, /Yuktris never collects verification codes/);
     assert.doesNotMatch(worker, /logger\.[a-z]+\([^\n]*(cookies_encrypted|storage_state_encrypted|browserbase_live_url)/i);
   }],
 ];

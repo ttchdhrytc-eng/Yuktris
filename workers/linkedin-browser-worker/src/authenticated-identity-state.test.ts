@@ -12,11 +12,11 @@ const migration = read('supabase/migrations/20260813190000_linkedin_auth_surface
 const restore = linkedin.match(/async connectWithSession[\s\S]*?async testConnection/)?.[0] ?? '';
 const handler = worker.match(/private async handleConnect[\s\S]*?private async handleTestConnection/)?.[0] ?? '';
 
-test('1 worker claim permanently ends receipt watchdog', () => {
-  assert.match(onboarding, /workerClaimed && linkedinWatchdogPhaseRef\.current === 'worker_claim'/);
-  assert.match(onboarding, /linkedinWatchdogPhaseRef\.current = 'existing_session_check'/);
+test('1 backend queue state replaces the obsolete receipt watchdog', () => {
+  assert.doesNotMatch(onboarding, /linkedinWatchdogPhaseRef|linkedinAttemptTimerRef/);
+  assert.match(onboarding, /activeLinkedinQueue/);
 });
-test('2 claimed attempt cannot later show worker receipt failure', () => assert.match(onboarding, /linkedinAttemptTimeoutStage === 'worker_claim'/));
+test('2 claimed attempt cannot be failed by a frontend timer', () => assert.doesNotMatch(onboarding, /linkedinAttemptTimeoutStage|worker did not claim/));
 test('3 authenticated and verified restore connects', () => assert.match(restore, /identityState: 'verified'/));
 test('4 authenticated unresolved identity is not session expiry', () => {
   assert.match(restore, /authState: 'authenticated', identityState: 'unresolved'/);

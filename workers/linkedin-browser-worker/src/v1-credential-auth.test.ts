@@ -11,6 +11,7 @@ const worker = fs.readFileSync(path.join(process.cwd(), 'src/worker.ts'), 'utf8'
 const linkedin = fs.readFileSync(path.join(process.cwd(), 'src/linkedin.ts'), 'utf8');
 const hook = fs.readFileSync(path.join(root, 'src/hooks/useLinkedInBrowser.ts'), 'utf8');
 const onboarding = fs.readFileSync(path.join(root, 'src/pages/OnboardingPage.tsx'), 'utf8');
+const storedReconnect = fs.readFileSync(path.join(root, 'supabase/migrations/20260813230000_linkedin_stored_credential_reconnect.sql'), 'utf8');
 
 test('credential table is ciphertext-only and browser roles have no table access', () => {
   assert.match(migration, /encrypted_username text NOT NULL/);
@@ -61,7 +62,23 @@ test('invalid credentials fail distinctly and challenges expose Live View condit
   assert.match(linkedin, /failureCode: 'invalid_credentials'/);
   assert.match(worker, /result\.errorCode === 'invalid_credentials'/);
   assert.match(linkedin, /challengeLiveUrl = await this\.refreshLiveUrl\(\)/);
-  assert.match(onboarding, /!!linkedinChallenge \|\| linkedinIdentityVerified/);
+  assert.match(onboarding, /open=.*!!linkedinChallenge/);
+  assert.match(onboarding, /useLinkedInLoginAccess\(linkedinAccountId, linkedinQueueItemId, !!linkedinChallenge\)/);
+});
+
+test('stored encrypted credentials can start one non-retrying explicit connection', () => {
+  assert.match(storedReconnect, /start_linkedin_connection_with_stored_credentials/);
+  assert.match(storedReconnect, /credentials_status IN \('configured','valid'\)/);
+  assert.match(storedReconnect, /NEW\.max_retries:=0/);
+  assert.match(endpoint, /body\.action === "connect_existing"/);
+  assert.match(hook, /useStoredCredentials/);
+  assert.match(onboarding, /Encrypted LinkedIn credentials are configured/);
+});
+
+test('automatic credential login has no frontend secure-window deadline', () => {
+  assert.doesNotMatch(onboarding, /auth_surface_preparation|secure LinkedIn sign-in window within 15 seconds/);
+  assert.doesNotMatch(onboarding, /linkedinAttemptTimeoutStage|linkedinAttemptTimerRef|linkedinWatchdogPhaseRef/);
+  assert.match(onboarding, /linkedinAuthRequired \? 'Signing in securely/);
 });
 
 test('V1 onboarding excludes Gmail and Calendar from step order', () => {

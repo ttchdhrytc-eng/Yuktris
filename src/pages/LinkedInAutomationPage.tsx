@@ -346,7 +346,7 @@ function AccountCard({
       latestStep: [...currentItems].reverse().find((item) => item.interaction_type === 'progress')?.step,
     };
   }, [interactions.data]);
-  const loginAccess = useLinkedInLoginAccess(showPanel ? account.id : null, currentQueueItemId);
+  const loginAccess = useLinkedInLoginAccess(showPanel ? account.id : null, currentQueueItemId, !!challenge);
 
   if (!showPanel) {
     return (
@@ -459,7 +459,7 @@ function AccountCard({
       )}
 
       <SecureLinkedInAuthModal
-        open={showPanel && (!!challenge || identityVerified)}
+        open={showPanel && !!challenge}
         loginUrl={loginAccess.data?.loginUrl ?? null}
         identityVerified={identityVerified}
         securityCheckRequired={!!challenge && challenge.status === 'pending'}

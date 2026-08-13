@@ -40,7 +40,7 @@ export function useLinkedInAccounts() {
   });
 }
 
-export function useLinkedInLoginAccess(accountId: string | null, queueItemId: string | null = null) {
+export function useLinkedInLoginAccess(accountId: string | null, queueItemId: string | null = null, verificationRequired = false) {
   const { workspace } = useWorkspace();
   return useQuery<{ loginUrl: string; expiresAt: string } | null>({
     queryKey: ['linkedin-login-access', workspace?.id, accountId, queueItemId],
@@ -56,8 +56,24 @@ export function useLinkedInLoginAccess(accountId: string | null, queueItemId: st
       if (!access?.login_url || !access?.expires_at) return null;
       return { loginUrl: access.login_url as string, expiresAt: access.expires_at as string };
     },
-    enabled: !!workspace && !!accountId && !!queueItemId,
+    enabled: !!workspace && !!accountId && !!queueItemId && verificationRequired,
     refetchInterval: 2000,
+  });
+}
+
+export function useLinkedInCredentialsConfigured(accountId: string | null) {
+  const { workspace } = useWorkspace();
+  return useQuery<boolean>({
+    queryKey: ['linkedin-credentials-configured', workspace?.id, accountId],
+    queryFn: async () => {
+      if (!workspace || !accountId) return false;
+      const { data, error } = await supabase.rpc('has_linkedin_credentials', {
+        p_workspace_id: workspace.id, p_account_id: accountId,
+      });
+      if (error) throw error;
+      return data === true;
+    },
+    enabled: !!workspace && !!accountId,
   });
 }
 
@@ -124,7 +140,7 @@ export function useConnectLinkedIn() {
   const { workspace } = useWorkspace();
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: async (params: { username: string; password: string; existingAccountId?: string }) => {
+    mutationFn: async (params: { username?: string; password?: string; existingAccountId?: string; useStoredCredentials?: boolean }) => {
       if (!workspace) throw new Error('No workspace');
       const idempotencyKey = crypto.randomUUID();
       const startedAt = performance.now();
@@ -133,13 +149,12 @@ export function useConnectLinkedIn() {
         supabaseHost: new URL(import.meta.env.VITE_SUPABASE_URL).hostname,
         timestamp: new Date().toISOString(),
       });
-      const { data, error } = await Promise.race([
-        supabase.functions.invoke('linkedin-credentials', {
-          body: { workspace_id: workspace.id, username: params.username, password: params.password,
+      const { data, error } = await supabase.functions.invoke('linkedin-credentials', {
+        body: params.useStoredCredentials
+          ? { action: 'connect_existing', workspace_id: workspace.id, account_id: params.existingAccountId, idempotency_key: idempotencyKey }
+          : { workspace_id: workspace.id, username: params.username, password: params.password,
             existing_account_id: params.existingAccountId ?? null, idempotency_key: idempotencyKey },
-        }),
-        new Promise<never>((_, reject) => window.setTimeout(() => reject(new Error('LinkedIn connection initialization timed out')), 12_000)),
-      ]);
+      });
       if (error) throw error;
       const result = Array.isArray(data) ? data[0] : data;
       if (!result?.account_id || !result?.queue_item_id) {

@@ -48,13 +48,13 @@ const tests: Array<[string, () => void]> = [
   }],
   ['modal requires a current challenge rather than ordinary auth_required', () => {
     assert.match(onboarding, /event\.queue_item_id === linkedinQueueItemId[\s\S]*event\.step === 'auth_required'/);
-    assert.match(onboarding, /open=\{[\s\S]*!!linkedinChallenge \|\| linkedinIdentityVerified/);
-    assert.match(accounts, /open=\{securityCheckRequired \|\| identityVerified\}/);
-    assert.match(automation, /open=\{showPanel && \(!!challenge \|\| identityVerified\)\}/);
+    assert.match(onboarding, /open=\{[\s\S]*!!linkedinChallenge\}/);
+    assert.match(accounts, /open=\{securityCheckRequired\}/);
+    assert.match(automation, /open=\{showPanel && !!challenge\}/);
   }],
   ['checking and interactive copy are distinct', () => {
-    assert.match(onboarding, /Checking your LinkedIn connection/);
-    assert.match(onboarding, /Preparing secure LinkedIn sign-in/);
+    assert.match(onboarding, /Checking your LinkedIn session/);
+    assert.match(onboarding, /Signing in securely/);
   }],
   ['fast-path timing stages P0 through P10 are present', () => {
     for (let stage = 0; stage <= 8; stage++) assert.match(worker, new RegExp(`P${stage}_`));

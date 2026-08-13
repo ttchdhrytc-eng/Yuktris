@@ -55,6 +55,20 @@ Deno.serve(async (req: Request) => {
       return jsonResponse({ credentials_configured: false, deleted: data === true });
     }
 
+    if (body.action === "connect_existing") {
+      const accountId = typeof body.account_id === "string" ? body.account_id : "";
+      if (!accountId) return jsonError("LinkedIn account is required", 400);
+      const idempotencyKey = typeof body.idempotency_key === "string" ? body.idempotency_key : crypto.randomUUID();
+      const { data, error } = await userClient.rpc("start_linkedin_connection_with_stored_credentials", {
+        p_workspace_id: workspaceId, p_account_id: accountId, p_idempotency_key: idempotencyKey,
+      });
+      if (error) throw error;
+      stage = "stored_credentials_queued";
+      const result = Array.isArray(data) ? data[0] : data;
+      return jsonResponse({ account_id: result?.account_id, queue_item_id: result?.queue_item_id,
+        queue_status: result?.queue_status, reused: result?.reused === true, credentials_configured: true });
+    }
+
     const username = typeof body.username === "string" ? body.username.trim() : "";
     let password = typeof body.password === "string" ? body.password : "";
     if (!username || !password || username.length > 320 || password.length > 1024) return jsonError("LinkedIn sign-in details are required", 400);
