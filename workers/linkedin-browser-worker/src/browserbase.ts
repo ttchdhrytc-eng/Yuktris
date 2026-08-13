@@ -6,6 +6,8 @@ const TRANSIENT_RETRY_DELAY_MS = 1500;
 const DEFAULT_VIEWPORT = { width: 1440, height: 900 } as const;
 const CONTEXT_SYNC_POLL_MS = 500;
 const CONTEXT_SETTLE_MS = 3000;
+const MIN_SESSION_TIMEOUT_SECONDS = 60;
+const MAX_SESSION_TIMEOUT_SECONDS = 21600;
 
 async function browserbaseFetch(url: string, init: RequestInit = {}, timeoutMs = BROWSERBASE_REQUEST_TIMEOUT_MS): Promise<Response> {
   const controller = new AbortController();
@@ -71,6 +73,7 @@ async function createSession(opts?: CreateSessionOptions): Promise<BrowserbaseSe
   const apiKey = getApiKey();
   const projectId = getProjectId();
   const viewport = opts?.viewport ?? DEFAULT_VIEWPORT;
+  const timeout = sessionTimeoutSeconds(opts?.timeoutMs);
   if (opts?.requirePersistentContext && !opts.contextId) {
     throw new BrowserbaseError('Persistent browser Context is required for this account', 409);
   }
@@ -81,6 +84,7 @@ async function createSession(opts?: CreateSessionOptions): Promise<BrowserbaseSe
   const body: Record<string, unknown> = {
     projectId,
     keepAlive: opts?.keepAlive ?? true,
+    ...(timeout ? { timeout } : {}),
     browserSettings: {
       viewport,
       solveCaptchas: false,
@@ -89,7 +93,7 @@ async function createSession(opts?: CreateSessionOptions): Promise<BrowserbaseSe
   ...(opts?.proxies ? { proxies: { type: 'browserbase' } } : {}),
   };
 
-  logger.info('Creating Browserbase session', { keepAlive: body.keepAlive, viewport, persistentContext: !!opts?.contextId });
+  logger.info('Creating Browserbase session', { keepAlive: body.keepAlive, timeoutSeconds: timeout ?? null, viewport, persistentContext: !!opts?.contextId });
 
   let lastError: Error | null = null;
   for (let attempt = 0; attempt < 3; attempt++) {
@@ -202,6 +206,15 @@ async function createSession(opts?: CreateSessionOptions): Promise<BrowserbaseSe
   }
 
   throw lastError || new BrowserbaseError('Browserbase session creation failed after retries', 429);
+}
+
+export function sessionTimeoutSeconds(timeoutMs?: number): number | undefined {
+  if (timeoutMs === undefined) return undefined;
+  const timeout = Math.ceil(timeoutMs / 1000);
+  if (!Number.isFinite(timeout) || timeout < MIN_SESSION_TIMEOUT_SECONDS || timeout > MAX_SESSION_TIMEOUT_SECONDS) {
+    throw new BrowserbaseError('Browserbase session timeout must be between 60 and 21600 seconds', 400);
+  }
+  return timeout;
 }
 
 async function createContext(): Promise<BrowserbaseContext> {

@@ -9,6 +9,9 @@ import { ContextLeaseOwner, ContextRecord, LinkedInContextService, persistentCon
 
 const CONNECTION_TIMEOUT = parseInt(process.env.CONNECTION_TIMEOUT_MS || '600000', 10);
 const TEST_CONNECTION_TIMEOUT = parseInt(process.env.TEST_CONNECTION_TIMEOUT_MS || '120000', 10);
+// Browserbase's project default is five minutes. Interactive authentication can
+// legitimately require up to 30 minutes when LinkedIn requests a human check.
+const INTERACTIVE_BROWSER_SESSION_TIMEOUT_MS = parseInt(process.env.BROWSERBASE_INTERACTIVE_SESSION_TIMEOUT_MS || '2100000', 10);
 const HEARTBEAT_INTERVAL = parseInt(process.env.WORKER_HEARTBEAT_INTERVAL || '15000', 10);
 const POLL_INTERVAL = parseInt(process.env.QUEUE_POLL_INTERVAL || '3000', 10);
 const SESSION_HEARTBEAT_INTERVAL = parseInt(process.env.SESSION_HEARTBEAT_INTERVAL_MS || '120000', 10);
@@ -394,7 +397,10 @@ export class Worker {
       workspaceId, accountId, persistentContextsEnabled(),
     );
     let persistentContext: ContextRecord | null = null;
-    let launchOptions = sessionOptionsForAccount(false);
+    let launchOptions = {
+      ...sessionOptionsForAccount(false),
+      timeoutMs: INTERACTIVE_BROWSER_SESSION_TIMEOUT_MS,
+    };
     if (usePersistentContext) {
       const owner: ContextLeaseOwner = {
         workspaceId, accountId, queueItemId: item.id, workerId: this.workerId, attemptId: item.attempt_id,
@@ -404,7 +410,10 @@ export class Worker {
       logPersistentFastPath('P1_context_lease_acquired');
       this.activeContextLease = { context: persistentContext, owner };
       await this.linkedinContexts.reconcileBeforeSession(persistentContext, owner);
-      launchOptions = sessionOptionsForAccount(true, persistentContext);
+      launchOptions = {
+        ...sessionOptionsForAccount(true, persistentContext),
+        timeoutMs: INTERACTIVE_BROWSER_SESSION_TIMEOUT_MS,
+      };
       await onProgress('checking_existing_session', 'Checking your LinkedIn connection...');
     }
 
