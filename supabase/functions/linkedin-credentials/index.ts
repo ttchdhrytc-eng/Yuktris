@@ -33,10 +33,12 @@ async function encrypt(value: string, key: CryptoKey): Promise<string> {
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") return new Response(null, { status: 200, headers: corsHeaders });
   if (req.method !== "POST") return jsonError("Method not allowed", 405);
+  let stage = "request_received";
   try {
     const body = await req.json() as Record<string, unknown>;
     const workspaceId = typeof body.workspace_id === "string" ? body.workspace_id : "";
     const { userId } = await authorizeLinkedInWorkspace(req, workspaceId);
+    stage = "workspace_authorized";
     if (!userId) throw new Error("Unauthorized");
 
     const url = Deno.env.get("SUPABASE_URL")!;
@@ -57,8 +59,10 @@ Deno.serve(async (req: Request) => {
     let password = typeof body.password === "string" ? body.password : "";
     if (!username || !password || username.length > 320 || password.length > 1024) return jsonError("LinkedIn sign-in details are required", 400);
     const key = await encryptionKey();
+    stage = "encryption_initialized";
     const encryptedUsername = await encrypt(username, key);
     const encryptedPassword = await encrypt(password, key);
+    stage = "credentials_encrypted";
     password = "";
     const idempotencyKey = typeof body.idempotency_key === "string" ? body.idempotency_key : crypto.randomUUID();
     const existingAccountId = typeof body.existing_account_id === "string" ? body.existing_account_id : null;
@@ -73,6 +77,7 @@ Deno.serve(async (req: Request) => {
       p_idempotency_key: idempotencyKey,
     });
     if (error) throw error;
+    stage = "credentials_persisted_and_queued";
     const result = Array.isArray(data) ? data[0] : data;
     return jsonResponse({
       account_id: result?.account_id,
@@ -83,6 +88,8 @@ Deno.serve(async (req: Request) => {
     });
   } catch (error) {
     const status = authorizationStatus(error);
+    const code = typeof error === "object" && error && "code" in error ? String((error as { code?: unknown }).code || "backend_error") : "backend_error";
+    console.error("linkedin_credentials_request_failed", { stage: typeof stage === "string" ? stage : "unknown", code, status });
     return jsonError(status === 500 ? "Unable to configure LinkedIn credentials" : (error as Error).message, status);
   }
 });

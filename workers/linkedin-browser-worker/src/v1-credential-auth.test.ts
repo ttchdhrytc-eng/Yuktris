@@ -5,6 +5,7 @@ import path from 'node:path';
 
 const root = path.resolve(process.cwd(), '../..');
 const migration = fs.readFileSync(path.join(root, 'supabase/migrations/20260813210000_linkedin_v1_encrypted_credentials.sql'), 'utf8');
+const rpcFix = fs.readFileSync(path.join(root, 'supabase/migrations/20260813220000_fix_linkedin_credential_rpc_ambiguity.sql'), 'utf8');
 const endpoint = fs.readFileSync(path.join(root, 'supabase/functions/linkedin-credentials/index.ts'), 'utf8');
 const worker = fs.readFileSync(path.join(process.cwd(), 'src/worker.ts'), 'utf8');
 const linkedin = fs.readFileSync(path.join(process.cwd(), 'src/linkedin.ts'), 'utf8');
@@ -30,6 +31,12 @@ test('queue ownership gates service-role credential retrieval and retries', () =
   assert.match(migration, /q\.worker_id=p_worker_id AND q\.attempt_id=p_attempt_id AND q\.lease_expires_at>now\(\)/);
   assert.match(migration, /last_attempt_at < now\(\)-interval '60 seconds'/);
   assert.doesNotMatch(migration, /action_params[^\n]*(encrypted_password|password)/);
+});
+
+test('credential transaction qualifies output-column names and remains atomic', () => {
+  assert.match(rpcFix, /c\.workspace_id=p_workspace_id AND c\.account_id=v_start\.account_id/);
+  assert.match(rpcFix, /ON CONFLICT ON CONSTRAINT linkedin_credentials_workspace_id_account_id_key/);
+  assert.match(rpcFix, /start_linkedin_connection[\s\S]*INSERT INTO public\.linkedin_credentials[\s\S]*RETURN QUERY/);
 });
 
 test('authenticated Context bypasses decryption while logged-out Context uses credentials once', () => {
