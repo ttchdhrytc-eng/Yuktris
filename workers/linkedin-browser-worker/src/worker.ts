@@ -557,6 +557,35 @@ export class Worker {
     logger.info('handleConnect: linkedin.connect() returned', { account_id: accountId, success: result.success, requiresAction: result.requiresAction, error: result.error });
 
     if (!result.success) {
+      if (result.errorCode === 'identity_resolution_pending' && result.authState === 'authenticated' && result.session) {
+        const pendingError = result.error || 'LinkedIn identity verification is pending.';
+        const sessionId = await this.saveSession(workspaceId, accountId, result.session);
+        if (!sessionId) {
+          await this.linkedin.close();
+          await this.updateAccount(accountId, { connection_state: 'failed', status: 'error', session_status: 'disconnected', last_error: 'Session save failed — cookies were not persisted' });
+          await this.queue.fail(item.id, 'Session save failed', Date.now() - startTime, true);
+          return;
+        }
+        logger.info('fresh_session_persisted', {
+          account_id: accountId, browserbase_session_id: bbSessionId,
+          authentication_state: 'authenticated', identity_state: 'unresolved',
+          canonical_identity_found: false, final_connect_classification: 'identity_resolution_pending',
+        });
+        await this.updateAccount(accountId, { browserbase_session_id: null, browser_connected_at: null });
+        await this.linkedin.close();
+        if (persistentContext && bbSessionId && this.activeContextLease) {
+          await this.linkedinContexts.synchronize(persistentContext, bbSessionId, this.activeContextLease.owner);
+          this.activeContextLease = null;
+        }
+        await this.updateAccount(accountId, {
+          connection_state: 'requires_action', status: 'pending_login', session_status: 'disconnected', last_error: pendingError,
+        });
+        await onProgress('identity_resolution_pending', pendingError, {
+          error_code: result.errorCode, authentication_state: 'authenticated', identity_state: 'unresolved',
+        });
+        await this.queue.fail(item.id, pendingError, Date.now() - startTime, true);
+        return;
+      }
       await this.linkedin.close();
 
       const isNonRetryable = (result as { nonRetryable?: boolean }).nonRetryable === true;

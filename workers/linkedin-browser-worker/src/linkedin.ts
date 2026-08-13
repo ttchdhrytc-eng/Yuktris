@@ -691,8 +691,6 @@ export class LinkedInBrowser {
       if (authResult.cancelled) {
         transition('cancelled');
         return { success: false, cancelled: true, nonRetryable: true, error: 'LinkedIn connection was cancelled' };
-      } else if (this.bbSession) {
-        return { success: false, errorCode: 'browserbase_live_view_failed', error: 'A secure LinkedIn sign-in window could not be opened. Please retry.', retryable: true };
       }
 
       if (!authResult.authenticated) {
@@ -707,14 +705,39 @@ export class LinkedInBrowser {
 
       transition('verifying_authentication');
       if (onProgress) await onProgress('verifying_authentication', 'LinkedIn sign-in detected. Verifying authentication...');
-      logger.info('Authentication detected, verifying identity');
+      logger.info('fresh_authentication_verified', {
+        account_id: accountId, browserbase_session_id: this.bbSession?.id ?? null,
+        authentication_state: 'authenticated', identity_state: 'unresolved',
+        canonical_identity_found: false, final_connect_classification: 'identity_resolution_started',
+      });
       transition('verifying_identity');
 
       // ── Verify identity ────────────────────────────────────────
+      logger.info('fresh_identity_resolution_started', {
+        account_id: accountId, browserbase_session_id: this.bbSession?.id ?? null,
+        authentication_state: 'authenticated', identity_state: 'unresolved',
+      });
       const identity = await this.verifyIdentityWithRetry(queueItemId, workspaceId, accountId);
+      logger.info('fresh_identity_resolution_result', {
+        account_id: accountId, browserbase_session_id: this.bbSession?.id ?? null,
+        authentication_state: 'authenticated', identity_state: identity ? 'verified' : 'unresolved',
+        canonical_identity_found: !!identity?.profileUrl, canonical_profile_url: identity?.profileUrl ?? null,
+        final_connect_classification: identity ? 'identity_verified' : 'identity_resolution_pending',
+      });
       if (!identity) {
-        transition('failed');
-        return { success: false, error: 'Identity verification failed — could not read LinkedIn profile' };
+        transition('capturing_session');
+        const session = await this.captureSession();
+        logger.warn('fresh_identity_pending', {
+          account_id: accountId, browserbase_session_id: this.bbSession?.id ?? null,
+          authentication_state: 'authenticated', identity_state: 'unresolved',
+          canonical_identity_found: false, final_connect_classification: 'identity_resolution_pending',
+        });
+        return {
+          success: false, session, authState: 'authenticated', identityState: 'unresolved',
+          errorCode: 'identity_resolution_pending', retryable: true,
+          error: 'LinkedIn is authenticated, but its canonical personal profile URL is still being verified. Please retry identity verification.',
+          stateCapturedAt: Date.now(),
+        };
       }
       const identityMismatch = this.getIdentityMismatch(identity, intendedIdentity);
       if (identityMismatch) {
@@ -735,6 +758,12 @@ export class LinkedInBrowser {
       transition('capturing_session');
       const session = await this.captureSession();
       const stateCapturedAt = Date.now();
+      logger.info('fresh_connect_success', {
+        account_id: accountId, browserbase_session_id: this.bbSession?.id ?? null,
+        authentication_state: 'authenticated', identity_state: 'verified',
+        canonical_identity_found: true, canonical_profile_url: identity.profileUrl,
+        final_connect_classification: 'success',
+      });
 
       // ── Test session restore ────────────────────────────────────
       // Session persistence and the final connected transition are owned by
