@@ -247,6 +247,66 @@ export async function resolveFirstInteractiveLocator(
   return null;
 }
 
+export type LoginSurfaceProbe<TControl = Locator> = {
+  authentication: AuthenticationAssessment;
+  username: TControl | null;
+  password: TControl | null;
+  submit: TControl | null;
+  consentBlocking?: boolean;
+  connected: boolean;
+};
+
+export type LoginSurfaceResolution<TControl = Locator> =
+  | { state: 'login_ready'; probe: LoginSurfaceProbe<TControl> }
+  | { state: 'authenticated'; probe: LoginSurfaceProbe<TControl> }
+  | { state: 'verification_required'; probe: LoginSurfaceProbe<TControl> }
+  | { state: 'unavailable'; probe: LoginSurfaceProbe<TControl> | null; reason: 'timeout' | 'disconnected' | 'browser_error' };
+
+export async function resolveLinkedInLoginSurface<TControl>(options: {
+  probe: () => Promise<LoginSurfaceProbe<TControl>>;
+  navigate: () => Promise<void>;
+  acceptConsent?: () => Promise<boolean>;
+  timeoutMs?: number;
+  pollMs?: number;
+}): Promise<LoginSurfaceResolution<TControl>> {
+  const deadline = Date.now() + (options.timeoutMs ?? 20_000);
+  let navigated = false;
+  let consentHandled = false;
+  let lastProbe: LoginSurfaceProbe<TControl> | null = null;
+
+  while (Date.now() < deadline) {
+    try {
+      lastProbe = await options.probe();
+    } catch {
+      return { state: 'unavailable', probe: lastProbe, reason: 'browser_error' };
+    }
+    if (!lastProbe.connected) return { state: 'unavailable', probe: lastProbe, reason: 'disconnected' };
+    if (lastProbe.authentication.state === 'authenticated') return { state: 'authenticated', probe: lastProbe };
+    if (lastProbe.authentication.state === 'checkpoint') return { state: 'verification_required', probe: lastProbe };
+    if (lastProbe.username && lastProbe.password && lastProbe.submit) return { state: 'login_ready', probe: lastProbe };
+
+    if (lastProbe.consentBlocking && !consentHandled && options.acceptConsent) {
+      try {
+        consentHandled = await options.acceptConsent();
+      } catch {
+        return { state: 'unavailable', probe: lastProbe, reason: 'browser_error' };
+      }
+      if (consentHandled) continue;
+    }
+    if (!navigated) {
+      try {
+        await options.navigate();
+      } catch {
+        return { state: 'unavailable', probe: lastProbe, reason: 'browser_error' };
+      }
+      navigated = true;
+      continue;
+    }
+    await new Promise(resolve => setTimeout(resolve, options.pollMs ?? 250));
+  }
+  return { state: 'unavailable', probe: lastProbe, reason: 'timeout' };
+}
+
 interface CurrentAttemptAuthenticationProof {
   queueItemId?: string;
   accountId?: string;
@@ -697,24 +757,91 @@ export class LinkedInBrowser {
 
   // ── CONNECTION FLOW: open LinkedIn → wait for auth → verify ────
 
-  private async submitLinkedInCredentials(credentials: LinkedInLoginCredentials): Promise<void> {
+  private async navigateToLinkedInLogin(onProgress?: ProgressCallback): Promise<void> {
+    const page = await this.ensureActivePage(false);
+    if (onProgress) await onProgress('opening_linkedin', 'Opening LinkedIn login page...');
+    logger.info('LinkedIn login surface navigation started', {
+      origin: this.safeOrigin(page.url()), pathname: this.safePathname(page.url()),
+    });
+    await this.navigateWithRetry(page, LINKEDIN_LOGIN_URL, PAGE_LOAD_TIMEOUT_MS);
+    await page.waitForLoadState('domcontentloaded', { timeout: 10_000 }).catch(() => {});
+    logger.info('LinkedIn login surface navigation completed', {
+      origin: this.safeOrigin(page.url()), pathname: this.safePathname(page.url()),
+    });
+  }
+
+  private async probeLinkedInLoginSurface(): Promise<LoginSurfaceProbe> {
+    const page = this.page;
+    if (!page || page.isClosed() || !this.browser?.isConnected()) {
+      return {
+        authentication: { state: 'unknown', confidence: 'low', url: '', signals: ['playwright_disconnected'] },
+        username: null, password: null, submit: null, connected: false,
+      };
+    }
+    const [authentication, username, password, submit, consentBlocking, title] = await Promise.all([
+      this.assessAuthentication(page, false),
+      resolveFirstInteractiveLocator(page, [
+        '#username', 'input[name="session_key"]', 'input[autocomplete="username"]',
+        'input[type="email"]', 'input[autocomplete="email"]',
+      ], { editable: true, timeoutMs: 1 }),
+      resolveFirstInteractiveLocator(page, [
+        '#password', 'input[name="session_password"]', 'input[type="password"]', 'input[autocomplete="current-password"]',
+      ], { editable: true, timeoutMs: 1 }),
+      resolveFirstInteractiveLocator(page, [
+        'button[type="submit"]', 'button:has-text("Sign in")', 'button[data-litms-control-urn*="login-submit"]',
+      ], { timeoutMs: 1 }),
+      page.locator('button[action-type="ACCEPT"], button[data-tracking-control-name="ga-cookie.consent.accept.v4"]').all()
+        .then(async controls => (await Promise.all(controls.map(control => control.isVisible().catch(() => false)))).some(Boolean))
+        .catch(() => false),
+      page.title().catch(() => ''),
+    ]);
+    logger.info('LinkedIn login surface assessed', {
+      origin: this.safeOrigin(authentication.url), pathname: this.safePathname(authentication.url),
+      title_category: /sign in/i.test(title) ? 'signin' : /security|verification|checkpoint|challenge/i.test(title) ? 'verification' : title ? 'other' : 'empty',
+      authentication_state: authentication.state, username_usable: !!username, password_usable: !!password,
+      submit_usable: !!submit, consent_blocking: consentBlocking,
+      page_count: this.context?.pages().filter(candidate => !candidate.isClosed()).length ?? 0,
+      selected_page_host: this.safeHostname(page.url()), playwright_connected: this.browser.isConnected(),
+      authenticated_cookie_present: authentication.signals.includes('session_cookie'),
+    });
+    return { authentication, username, password, submit, consentBlocking, connected: true };
+  }
+
+  private async acceptLinkedInConsent(): Promise<boolean> {
+    if (!this.page) return false;
+    const consent = await resolveFirstInteractiveLocator(this.page, [
+      'button[action-type="ACCEPT"]', 'button[data-tracking-control-name="ga-cookie.consent.accept.v4"]',
+    ], { timeoutMs: 1 });
+    if (!consent) return false;
+    await consent.click({ timeout: 5_000 });
+    logger.info('LinkedIn deterministic consent interstitial accepted');
+    return true;
+  }
+
+  private async ensureLinkedInLoginSurface(onProgress?: ProgressCallback): Promise<LoginSurfaceResolution> {
+    const resolution = await resolveLinkedInLoginSurface({
+      probe: () => this.probeLinkedInLoginSurface(),
+      navigate: () => this.navigateToLinkedInLogin(onProgress),
+      acceptConsent: () => this.acceptLinkedInConsent(),
+      timeoutMs: 20_000,
+      pollMs: 250,
+    });
+    logger.info('LinkedIn login surface resolution completed', {
+      result: resolution.state,
+      reason: resolution.state === 'unavailable' ? resolution.reason : undefined,
+      origin: resolution.probe ? this.safeOrigin(resolution.probe.authentication.url) : '',
+      pathname: resolution.probe ? this.safePathname(resolution.probe.authentication.url) : '',
+    });
+    return resolution;
+  }
+
+  private async submitLinkedInCredentials(credentials: LinkedInLoginCredentials, probe: LoginSurfaceProbe): Promise<void> {
     if (!this.page) throw new Error('LinkedIn login page is unavailable');
     try {
-      const username = await resolveFirstInteractiveLocator(this.page, [
-        '#username', 'input[name="session_key"]', 'input[autocomplete="username"]',
-      ], { editable: true });
-      if (!username) throw new Error('username_control_unavailable');
-      const password = await resolveFirstInteractiveLocator(this.page, [
-        '#password', 'input[name="session_password"]', 'input[type="password"]', 'input[autocomplete="current-password"]',
-      ], { editable: true });
-      if (!password) throw new Error('password_control_unavailable');
-      const submit = await resolveFirstInteractiveLocator(this.page, [
-        'button[type="submit"]', 'button:has-text("Sign in")', 'button[data-litms-control-urn*="login-submit"]',
-      ]);
-      if (!submit) throw new Error('submit_control_unavailable');
-      await username.fill(credentials.username);
-      await password.fill(credentials.password);
-      await submit.click({ timeout: 10_000 });
+      if (!probe.username || !probe.password || !probe.submit) throw new Error('login_controls_unavailable');
+      await probe.username.fill(credentials.username);
+      await probe.password.fill(credentials.password);
+      await probe.submit.click({ timeout: 10_000 });
       logger.info('LinkedIn credential login submitted', { credentials_decryption_attempted: true });
     } catch (error) {
       const diagnosticCode = error instanceof Error && /^[a-z_]+$/.test(error.message)
@@ -759,13 +886,16 @@ export class LinkedInBrowser {
     try {
       // ── Open LinkedIn login page ────────────────────────────────
       transition('opening_browser');
-      const initialAssessment = await this.assessAuthentication(undefined, false);
-      if (initialAssessment.state !== 'authenticated' && initialAssessment.state !== 'checkpoint') {
-        await this.openLinkedIn(onProgress);
-      }
-      const loginAssessment = await this.assessAuthentication(undefined, false);
-      if (credentials && loginAssessment.state !== 'authenticated' && loginAssessment.state !== 'checkpoint') {
-        await this.submitLinkedInCredentials(credentials);
+      const loginSurface = await this.ensureLinkedInLoginSurface(onProgress);
+      if (loginSurface.state === 'verification_required') {
+        if (onProgress) await onProgress('human_challenge_required', 'LinkedIn needs an additional security check. Complete it in the secure browser.');
+      } else if (loginSurface.state === 'unavailable') {
+        const diagnosticCode = loginSurface.reason === 'disconnected' ? 'login_surface_disconnected' : 'login_surface_unavailable';
+        logger.warn('LinkedIn login surface unavailable', { diagnostic_code: diagnosticCode });
+        throw new Error('LinkedIn sign-in is temporarily unavailable. Please try again later.');
+      } else if (loginSurface.state === 'login_ready' && credentials) {
+        if (onProgress) await onProgress('ready_for_login', 'LinkedIn login page is ready. Signing in securely.');
+        await this.submitLinkedInCredentials(credentials, loginSurface.probe);
       }
 
       // ── Refresh Live URL after navigation ───────────────────────

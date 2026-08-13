@@ -46,9 +46,9 @@ test('authenticated Context bypasses decryption while logged-out Context uses cr
 });
 
 test('authenticated and challenge states never autofill credentials', () => {
-  assert.match(linkedin, /initialAssessment\.state !== 'authenticated' && initialAssessment\.state !== 'checkpoint'/);
-  assert.match(linkedin, /loginAssessment\.state !== 'authenticated' && loginAssessment\.state !== 'checkpoint'/);
-  assert.match(linkedin, /if \(credentials && loginAssessment[\s\S]*submitLinkedInCredentials/);
+  assert.match(linkedin, /loginSurface\.state === 'verification_required'/);
+  assert.match(linkedin, /loginSurface\.state === 'login_ready' && credentials/);
+  assert.match(linkedin, /submitLinkedInCredentials\(credentials, loginSurface\.probe\)/);
 });
 
 test('raw locator errors cannot reach frontend-visible task errors', () => {
