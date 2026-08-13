@@ -9,6 +9,7 @@ import { ContextLeaseOwner, ContextRecord, LinkedInContextService, persistentCon
 import { interactiveAuthTimeoutMs, interactiveBrowserSessionTimeoutMs } from './interactive-auth-config.js';
 import { normalizeLinkedInAction, validateSalesNavigatorPayload } from './linkedin-agent-contract.js';
 import { CloudAgentStartupError, cloudAgentStartupTimeoutMs, withinStartupDeadline } from './startup-deadline.js';
+import { finalizeLinkedInWrite, LINKEDIN_WRITE_ACTIONS, preflightLinkedInWrite } from './linkedin-execution-safety.js';
 
 const INTERACTIVE_AUTH_TIMEOUT_MS = interactiveAuthTimeoutMs();
 const TEST_CONNECTION_TIMEOUT = parseInt(process.env.TEST_CONNECTION_TIMEOUT_MS || '120000', 10);
@@ -959,6 +960,7 @@ export class Worker {
       }
     }
     let result: { success: boolean; data?: Record<string, unknown>; error?: string };
+    let writeAuditId: string | null = null;
 
     try {
       logger.info('linkedin_job_started', { queue_item_id: item.id, workspace_id: item.workspace_id, account_id: accountId, action: item.action_type });
@@ -1001,6 +1003,25 @@ export class Worker {
       }
 
       const page = this.linkedin.getPage();
+      if (LINKEDIN_WRITE_ACTIONS.has(item.action_type)) {
+        const preflight = await preflightLinkedInWrite(this.client, item);
+        logger.info('linkedin_write_preflight', {
+          queue_item_id: item.id, workspace_id: item.workspace_id, account_id: accountId,
+          action: item.action_type, result: preflight.code,
+        });
+        if (!preflight.allowed) {
+          if (persistentContext) await this.synchronizePersistentContext(persistentContext, persistentSessionId);
+          else await this.linkedin.close();
+          if (preflight.code === 'duplicate_action' && preflight.already_done) {
+            await this.queue.complete(item.id, { result_code: 'already_done', safety_result: preflight.code }, Date.now() - startTime);
+          } else {
+            await this.queue.fail(item.id, `LinkedIn write denied: ${preflight.code}`, Date.now() - startTime, false);
+          }
+          return;
+        }
+        writeAuditId = preflight.audit_id ?? null;
+        if (!writeAuditId) throw new Error('LinkedIn write preflight returned no audit identifier');
+      }
 
       switch (item.action_type) {
         case 'profile_visit':
@@ -1013,12 +1034,23 @@ export class Worker {
           }
           await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
           if (item.action_type === 'read_profile') {
-            const profile = await page.evaluate(() => ({
-              name: document.querySelector('main h1')?.textContent?.trim() || null,
-              headline: document.querySelector('main .text-body-medium')?.textContent?.trim() || null,
-              location: document.querySelector('main .text-body-small.inline')?.textContent?.trim() || null,
-              canonical_url: document.querySelector<HTMLLinkElement>('link[rel="canonical"]')?.href || location.href,
-            }));
+            await page.locator('main h1, h1, meta[property="og:title"]').first().waitFor({ state: 'attached', timeout: 8000 }).catch(() => {});
+            const profile = await page.evaluate(() => {
+              const text = (selectors: string[]) => selectors.map(selector => {
+                const element = document.querySelector(selector);
+                if (element instanceof HTMLMetaElement) return element.content.trim() || null;
+                return element?.textContent?.replace(/\s+/g, ' ').trim() || null;
+              }).find(Boolean) ?? null;
+              const name = text(['main h1', '.pv-text-details__left-panel h1', 'h1', 'meta[property="og:title"]']);
+              const headline = text(['main .text-body-medium.break-words', '.pv-text-details__left-panel .text-body-medium', 'meta[property="og:description"]']);
+              const locationText = text(['main .text-body-small.inline.t-black--light.break-words', '.pv-text-details__left-panel span.text-body-small.inline', '[data-generated-suggestion-target*="location"]']);
+              return {
+                name: name?.replace(/\s*\|\s*LinkedIn\s*$/i, '') ?? null,
+                headline,
+                location: locationText,
+                canonical_url: document.querySelector<HTMLLinkElement>('link[rel="canonical"]')?.href || location.href,
+              };
+            });
             result = { success: true, data: { result_code: 'success', profile } };
           } else {
             result = { success: true, data: { result_code: 'success', visited: parsed.origin + parsed.pathname } };
@@ -1154,15 +1186,26 @@ export class Worker {
             break;
           }
           const limit = filters.limit ?? 10;
+          await page.locator('a[href*="/sales/lead/"], a[href*="/in/"], [data-x-search-result]').first()
+            .waitFor({ state: 'attached', timeout: 10000 }).catch(() => {});
           const candidates = await page.$$eval('a[href*="/sales/lead/"], a[href*="/in/"]', (links, max) => {
             const seen = new Set<string>();
             return links.flatMap(link => {
               const anchor = link as HTMLAnchorElement;
               const href = anchor.href.split('?')[0];
-              const name = anchor.textContent?.trim() || null;
+              const card = anchor.closest('li, [data-x-search-result], .artdeco-list__item') ?? anchor.parentElement;
+              const clean = (value?: string | null) => value?.replace(/\s+/g, ' ').trim() || null;
+              const name = clean(anchor.textContent) || clean(card?.querySelector('[data-anonymize="person-name"], .artdeco-entity-lockup__title')?.textContent);
               if (!href || !name || seen.has(href)) return [];
               seen.add(href);
-              return [{ name, profile_url: href }];
+              return [{
+                name,
+                profile_url: href.includes('/in/') ? href : null,
+                sales_nav_lead_url: href.includes('/sales/lead/') ? href : null,
+                headline: clean(card?.querySelector('[data-anonymize="headline"], .artdeco-entity-lockup__subtitle')?.textContent),
+                company: clean(card?.querySelector('[data-anonymize="company-name"]')?.textContent),
+                location: clean(card?.querySelector('[data-anonymize="location"], .artdeco-entity-lockup__caption')?.textContent),
+              }];
             }).slice(0, max as number);
           }, limit).catch(() => [] as Array<{ name: string; profile_url: string }>);
           result = { success: true, data: { result_code: 'success', candidates, count: candidates.length, applied_filters: filters } };
@@ -1233,6 +1276,18 @@ export class Worker {
           result = { success: false, error: `Unhandled automation action: ${item.action_type}` };
       }
 
+      if (writeAuditId) {
+        const pathname = (() => { try { return new URL(page.url()).pathname.toLowerCase(); } catch { return ''; } })();
+        const classification = pathname.includes('/checkpoint') || pathname.includes('/challenge')
+          ? 'verification_required'
+          : result.success ? 'success' : 'failed';
+        await finalizeLinkedInWrite(this.client, writeAuditId, result.success, classification);
+        writeAuditId = null;
+        if (classification === 'verification_required') {
+          result = { success: false, error: 'LinkedIn verification required' };
+        }
+      }
+
       if (persistentContext) await this.synchronizePersistentContext(persistentContext, persistentSessionId);
       else {
         if (result.success) await this.refreshSessionAfterAutomation(sessionId!);
@@ -1249,6 +1304,16 @@ export class Worker {
         logger.warn('linkedin_job_failed', { queue_item_id: item.id, workspace_id: item.workspace_id, account_id: accountId, action: item.action_type, reason: result.error });
       }
     } catch (err) {
+      if (writeAuditId) {
+        let classification = 'failed';
+        try {
+          const pathname = new URL(this.linkedin.getPage().url()).pathname.toLowerCase();
+          if (pathname.includes('/checkpoint') || pathname.includes('/challenge')) classification = 'verification_required';
+        } catch { /* retain sanitized failure classification */ }
+        await finalizeLinkedInWrite(this.client, writeAuditId, false, classification).catch(finalizeError => {
+          logger.error('linkedin_write_audit_finalize_failed', { queue_item_id: item.id, error: this.sanitizeError(finalizeError) });
+        });
+      }
       await this.linkedin.close().catch(() => {});
       const msg = this.sanitizeError(err);
       logger.error('Automation action error', { action: item.action_type, error: msg });
