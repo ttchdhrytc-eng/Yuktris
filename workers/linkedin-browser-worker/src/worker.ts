@@ -389,6 +389,7 @@ export class Worker {
     logPersistentFastPath('P0_connect_claimed');
     const onProgress = this.makeProgressCallback(workspaceId, accountId, item.id);
     const intendedIdentity = await this.loadIntendedIdentity(accountId, workspaceId);
+    if (persistentContextsEnabled()) await this.linkedinContexts.ensureV1Enrollment(workspaceId, accountId);
     const usePersistentContext = await this.linkedinContexts.shouldUsePersistentContext(
       workspaceId, accountId, persistentContextsEnabled(),
     );
@@ -498,7 +499,7 @@ export class Worker {
 
     // ── Verify: Browserbase session exists ──────────────────────
     const bbSessionId = this.linkedin.getSessionId();
-    let liveUrl = this.linkedin.getLiveUrl();
+    const liveUrl = this.linkedin.getLiveUrl();
     logger.info('handleConnect: browser session ready', { account_id: accountId, bbSessionId, liveUrlAvailable: !!liveUrl });
     if (usePersistentContext) logPersistentFastPath('P2_context_session_created');
 
@@ -620,20 +621,24 @@ export class Worker {
     await onProgress('saving_session', 'Login successful. Encrypting and saving session...');
     await onProgress('finalizing_connection', 'Securing your LinkedIn connection...');
 
-    // Persist the verified Browserbase identity before its encrypted session.
-    // First login binds the identity; subsequent logins must match it.
-    await this.bindAuthenticatedIdentity(workspaceId, accountId, result.identity?.profileUrl);
+    const effectiveProfileUrl = result.effectiveProfileUrl || result.identity?.profileUrl;
+    // First login binds the identity. A bound account using the same persistent
+    // Context does not rebind when LinkedIn temporarily withholds /in/me.
+    if (!result.reuseBoundIdentity) await this.bindAuthenticatedIdentity(workspaceId, accountId, effectiveProfileUrl);
 
     const persistenceStartedAt = Date.now();
-    logPostAuthStage('encrypted_session_persistence_started');
-    const sessionId = await this.saveSession(workspaceId, accountId, result.session!);
-    if (!sessionId) {
+    let sessionId: string | null = null;
+    if (result.session) {
+      logPostAuthStage('encrypted_session_persistence_started');
+      sessionId = await this.saveSession(workspaceId, accountId, result.session);
+    }
+    if (!sessionId && !persistentContext) {
       await this.linkedin.close();
       await this.updateAccount(accountId, { connection_state: 'failed', last_error: 'Session save failed — cookies were not persisted' });
       await this.queue.fail(item.id, 'Session save failed', Date.now() - startTime, true);
       return;
     }
-    logPostAuthStage('encrypted_session_persistence_completed', persistenceStartedAt);
+    if (sessionId) logPostAuthStage('encrypted_session_persistence_completed', persistenceStartedAt);
 
     // Browserbase saves a persistent Context only after the provider session
     // closes and its asynchronous synchronization has settled.
@@ -661,16 +666,18 @@ export class Worker {
     await this.updateAccount(accountId, {
       connection_state: 'connected', session_status: 'connected', status: 'active',
       last_validated_at: new Date().toISOString(), last_login_at: new Date().toISOString(), last_error: null,
-      profile_url: result.identity?.profileUrl, profile_name: result.identity?.profileName,
+      profile_url: effectiveProfileUrl, profile_name: result.identity?.profileName,
       profile_headline: result.identity?.profileHeadline,
     });
     logPostAuthStage('durable_account_connected');
     if (usePersistentContext) logPersistentFastPath('P8_durable_connected');
 
-    await onProgress('connected', 'LinkedIn connected successfully. Session encrypted and verified.');
+    await onProgress('connected', persistentContext
+      ? 'LinkedIn connected successfully using its persistent secure browser.'
+      : 'LinkedIn connected successfully. Session encrypted and verified.');
 
     await this.queue.complete(item.id, {
-      connected: true, session_id: sessionId, identity: result.identity,
+      connected: true, session_id: sessionId, identity: result.identity, persistent_context: !!persistentContext,
       duration_ms: Date.now() - startTime,
     }, Date.now() - startTime);
 
@@ -688,7 +695,7 @@ export class Worker {
 
     await this.linkedin.close();
 
-    logger.info('LinkedIn account connected', { account_id: accountId, session_id: sessionId });
+    logger.info('linkedin_connected', { account_id: accountId, session_id: sessionId, persistent_context: !!persistentContext });
   }
 
   // ── Test Connection Handler ────────────────────────────────
@@ -696,6 +703,32 @@ export class Worker {
   private async handleTestConnection(item: QueueItem, startTime: number): Promise<void> {
     const accountId = item.account_id;
     if (!accountId) { await this.queue.fail(item.id, 'Missing account_id', Date.now() - startTime, false); return; }
+
+    if (persistentContextsEnabled()) {
+      const intendedIdentity = await this.loadIntendedIdentity(accountId, item.workspace_id);
+      const context = await this.openPersistentContextForTask(item);
+      const browserbaseSessionId = this.linkedin.getSessionId();
+      const result = await this.linkedin.verifyPersistentAuthentication(intendedIdentity);
+      await this.synchronizePersistentContext(context, browserbaseSessionId);
+      if (result.success) {
+        await this.updateAccount(accountId, {
+          connection_state: 'connected', session_status: 'connected', status: 'active',
+          last_validated_at: new Date().toISOString(), last_error: null,
+          profile_url: result.effectiveProfileUrl, profile_name: result.identity?.profileName,
+        });
+        await this.logSessionEvent(item.workspace_id, accountId, 'validated', { test: true, persistent_context: true });
+        await this.queue.complete(item.id, { healthy: true, identity: result.identity, persistent_context: true }, Date.now() - startTime);
+      } else {
+        const checkpoint = result.errorCode === 'checkpoint_required';
+        await this.updateAccount(accountId, { connection_state: checkpoint ? 'requires_action' : 'session_expired', last_error: result.error });
+        logger.info(checkpoint ? 'linkedin_checkpoint_required' : 'linkedin_reauth_required', {
+          queue_item_id: item.id, workspace_id: item.workspace_id, account_id: accountId,
+          authentication_state: result.authState, identity_state: result.identityState,
+        });
+        await this.queue.fail(item.id, result.error || 'LinkedIn requires reauthentication', Date.now() - startTime, false);
+      }
+      return;
+    }
 
     const loaded = await this.loadSessionForAccount(accountId);
     if (!loaded) {
@@ -735,14 +768,16 @@ export class Worker {
     const accountId = item.account_id;
     if (!accountId) { await this.queue.fail(item.id, 'Missing account_id', Date.now() - startTime, false); return; }
 
-    const loaded = await this.loadSessionForAccount(accountId);
-    if (!loaded) {
+    const usePersistentContext = persistentContextsEnabled();
+    const loaded = usePersistentContext ? null : await this.loadSessionForAccount(accountId);
+    if (!usePersistentContext && !loaded) {
       await this.updateAccount(accountId, { connection_state: 'session_invalid', last_error: 'No active session for automation' });
       await this.queue.fail(item.id, 'No active session — account must be connected first', Date.now() - startTime, false);
       return;
     }
 
-    const { session: sessionData, sessionId } = loaded;
+    const sessionData = loaded?.session;
+    const sessionId = loaded?.sessionId;
     const intendedIdentity = await this.loadIntendedIdentity(accountId, item.workspace_id);
     const params = item.action_params ?? {};
     if (item.action_type === 'follow_up_message' && params.contact_id) {
@@ -763,25 +798,43 @@ export class Worker {
     let result: { success: boolean; data?: Record<string, unknown>; error?: string };
 
     try {
-      await this.linkedin.launch(undefined);
-      await this.linkedin.newContext();
-      const restored = await this.linkedin.restoreSession(sessionData);
-      if (!restored) {
-        await this.linkedin.close();
-        await this.client.rpc('expire_session', { p_session_id: sessionId, p_reason: 'Session restore failed during automation' });
-        await this.updateAccount(accountId, { connection_state: 'session_expired', last_error: 'Session expired during automation' });
-        await this.queue.fail(item.id, 'Session expired — reconnect required', Date.now() - startTime, true);
-        return;
-      }
-
-      // Validate session before automation
-      const validation = await this.linkedin.validateSession(intendedIdentity);
-      if (!validation.valid) {
-        await this.linkedin.close();
-        await this.client.rpc('expire_session', { p_session_id: sessionId, p_reason: validation.reason });
-        await this.updateAccount(accountId, { connection_state: 'session_expired', last_error: validation.reason || 'Session validation failed' });
-        await this.queue.fail(item.id, 'Session expired — reconnect required', Date.now() - startTime, true);
-        return;
+      logger.info('linkedin_job_started', { queue_item_id: item.id, workspace_id: item.workspace_id, account_id: accountId, action: item.action_type });
+      let persistentContext: ContextRecord | null = null;
+      let persistentSessionId: string | null = null;
+      if (usePersistentContext) {
+        persistentContext = await this.openPersistentContextForTask(item);
+        persistentSessionId = this.linkedin.getSessionId();
+        const authentication = await this.linkedin.verifyPersistentAuthentication(intendedIdentity);
+        if (!authentication.success) {
+          await this.synchronizePersistentContext(persistentContext, persistentSessionId);
+          const checkpoint = authentication.errorCode === 'checkpoint_required';
+          await this.updateAccount(accountId, { connection_state: checkpoint ? 'requires_action' : 'session_expired', last_error: authentication.error });
+          logger.info(checkpoint ? 'linkedin_checkpoint_required' : 'linkedin_reauth_required', {
+            queue_item_id: item.id, workspace_id: item.workspace_id, account_id: accountId,
+            authentication_state: authentication.authState, identity_state: authentication.identityState,
+          });
+          await this.queue.fail(item.id, authentication.error || 'LinkedIn requires reauthentication', Date.now() - startTime, false);
+          return;
+        }
+      } else {
+        await this.linkedin.launch(undefined);
+        await this.linkedin.newContext();
+        const restored = await this.linkedin.restoreSession(sessionData!);
+        if (!restored) {
+          await this.linkedin.close();
+          await this.client.rpc('expire_session', { p_session_id: sessionId, p_reason: 'Session restore failed during automation' });
+          await this.updateAccount(accountId, { connection_state: 'session_expired', last_error: 'Session expired during automation' });
+          await this.queue.fail(item.id, 'Session expired — reconnect required', Date.now() - startTime, true);
+          return;
+        }
+        const validation = await this.linkedin.validateSession(intendedIdentity);
+        if (!validation.valid) {
+          await this.linkedin.close();
+          await this.client.rpc('expire_session', { p_session_id: sessionId, p_reason: validation.reason });
+          await this.updateAccount(accountId, { connection_state: 'session_expired', last_error: validation.reason || 'Session validation failed' });
+          await this.queue.fail(item.id, 'Session expired — reconnect required', Date.now() - startTime, true);
+          return;
+        }
       }
 
       const page = this.linkedin.getPage();
@@ -968,25 +1021,64 @@ export class Worker {
           result = { success: false, error: `Unhandled automation action: ${item.action_type}` };
       }
 
-      // Auto-refresh session data after automation
-      if (result.success) {
-        await this.refreshSessionAfterAutomation(sessionId);
+      if (persistentContext) await this.synchronizePersistentContext(persistentContext, persistentSessionId);
+      else {
+        if (result.success) await this.refreshSessionAfterAutomation(sessionId!);
+        await this.linkedin.close();
       }
-      await this.linkedin.close();
 
       if (result.success) {
         await this.updateAccount(accountId, { last_activity_at: new Date().toISOString() });
         await this.logSessionEvent(item.workspace_id, accountId, `automation_${item.action_type}`, result.data ?? {});
         await this.queue.complete(item.id, result.data ?? { success: true }, Date.now() - startTime);
+        logger.info('linkedin_job_completed', { queue_item_id: item.id, workspace_id: item.workspace_id, account_id: accountId, action: item.action_type });
       } else {
         await this.queue.fail(item.id, result.error || 'Automation action failed', Date.now() - startTime, true);
+        logger.warn('linkedin_job_failed', { queue_item_id: item.id, workspace_id: item.workspace_id, account_id: accountId, action: item.action_type, reason: result.error });
       }
     } catch (err) {
       await this.linkedin.close().catch(() => {});
       const msg = this.sanitizeError(err);
       logger.error('Automation action error', { action: item.action_type, error: msg });
+      logger.error('linkedin_job_failed', { queue_item_id: item.id, workspace_id: item.workspace_id, account_id: accountId, action: item.action_type, reason: msg });
       await this.queue.fail(item.id, msg, Date.now() - startTime, true);
     }
+  }
+
+  private async openPersistentContextForTask(item: QueueItem): Promise<ContextRecord> {
+    if (!item.account_id) throw new Error('Persistent Context requires an account');
+    await this.linkedinContexts.ensureV1Enrollment(item.workspace_id, item.account_id);
+    const owner: ContextLeaseOwner = {
+      workspaceId: item.workspace_id, accountId: item.account_id, queueItemId: item.id,
+      workerId: this.workerId, attemptId: item.attempt_id,
+    };
+    let context = await this.linkedinContexts.ensureProvisioned(owner);
+    const newlyProvisioned = context.status === 'active' && !context.last_synchronized_at;
+    context = await this.linkedinContexts.acquire(owner);
+    this.activeContextLease = { context, owner };
+    await this.linkedinContexts.reconcileBeforeSession(context, owner);
+    logger.info(newlyProvisioned ? 'linkedin_context_created' : 'linkedin_context_loaded', {
+      queue_item_id: item.id, workspace_id: item.workspace_id, account_id: item.account_id,
+      context_id: context.id, context_generation: context.generation,
+    });
+    await this.linkedin.launch(undefined, sessionOptionsForAccount(true, context));
+    await this.linkedin.newContext();
+    const sessionId = this.linkedin.getSessionId();
+    if (!sessionId) throw new Error('Persistent Browserbase session has no identifier');
+    await this.linkedinContexts.attachSession(context.id, sessionId, owner);
+    logger.info('linkedin_browser_attached', {
+      queue_item_id: item.id, workspace_id: item.workspace_id, account_id: item.account_id,
+      browserbase_session_id: sessionId, context_id: context.id, playwright_connected: true,
+    });
+    return context;
+  }
+
+  private async synchronizePersistentContext(context: ContextRecord, sessionId: string | null): Promise<void> {
+    const active = this.activeContextLease;
+    if (!active || active.context.id !== context.id || !sessionId) throw new Error('Persistent Context synchronization ownership is unavailable');
+    await this.linkedin.close();
+    await this.linkedinContexts.synchronize(context, sessionId, active.owner);
+    this.activeContextLease = null;
   }
 
   // ── RPC Helpers ────────────────────────────────────────────

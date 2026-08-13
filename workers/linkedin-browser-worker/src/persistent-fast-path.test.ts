@@ -18,13 +18,14 @@ const tests: Array<[string, () => void]> = [
     assert.ok(check > 0 && authRequired > check && expose > check);
     assert.match(worker, /launch\(usePersistentContext \? undefined : onProgress/);
   }],
-  ['healthy Context still verifies canonical identity and captures state', () => {
-    const check = linkedin.match(/async checkExistingAuthenticatedSession[\s\S]*?\n  \}/)?.[0] ?? '';
-    assert.match(check, /navigateWithRetry\(this\.page, LINKEDIN_FEED_URL/);
-    assert.match(check, /assessment\.state !== 'authenticated'/);
-    assert.match(check, /verifyIdentityWithRetry/);
-    assert.match(check, /getIdentityMismatch/);
-    assert.match(check, /captureSession/);
+  ['healthy Context verifies authentication and identity without requiring encrypted capture', () => {
+    const check = linkedin.match(/async checkExistingAuthenticatedSession[\s\S]*?\n {2}\}/)?.[0] ?? '';
+    assert.match(check, /verifyPersistentAuthentication\(intendedIdentity\)/);
+    assert.doesNotMatch(check, /captureSession/);
+    const verify = linkedin.match(/async verifyPersistentAuthentication[\s\S]*?private async navigateWithRetry/)?.[0] ?? '';
+    assert.match(verify, /navigateWithRetry\(this\.page, LINKEDIN_FEED_URL/);
+    assert.match(verify, /verifyIdentity/);
+    assert.match(verify, /getIdentityMismatch/);
   }],
   ['healthy Context publishes neither auth_required nor Live View', () => {
     const branch = worker.match(/if \(preflight\.result\)[\s\S]*?\} else \{/)?.[0] ?? '';
@@ -32,18 +33,18 @@ const tests: Array<[string, () => void]> = [
     assert.match(branch, /existing_session_authenticated/);
   }],
   ['logged out or expired Context explicitly requests human auth', () => {
-    assert.match(linkedin, /assessment\.state !== 'authenticated'[\s\S]*authRequired: true/);
+    assert.match(linkedin, /errorCode === 'reauth_required'[\s\S]*authRequired: true/);
     assert.match(worker, /onProgress\('auth_required'/);
   }],
   ['checkpoint preserves the current page for passive human completion', () => {
-    assert.match(linkedin, /preserveCurrentPage: assessment\.state === 'checkpoint'/);
+    assert.match(linkedin, /preserveCurrentPage: result\.errorCode === 'checkpoint_required'/);
     assert.match(worker, /preflight\.preserveCurrentPage/);
   }],
   ['identity mismatch cannot connect or request alternate login', () => {
     assert.match(linkedin, /identityMismatch[\s\S]*nonRetryable: true/);
-    const mismatch = linkedin.indexOf('const identityMismatch = this.getIdentityMismatch', linkedin.indexOf('checkExistingAuthenticatedSession'));
-    const capture = linkedin.indexOf('const session = await this.captureSession()', mismatch);
-    assert.ok(mismatch > 0 && capture > mismatch);
+    const verify = linkedin.match(/async verifyPersistentAuthentication[\s\S]*?private async navigateWithRetry/)?.[0] ?? '';
+    assert.match(verify, /getIdentityMismatch[\s\S]*identityState: 'mismatch'/);
+    assert.doesNotMatch(verify, /captureSession/);
   }],
   ['modal requires current-attempt auth_required', () => {
     assert.match(onboarding, /event\.queue_item_id === linkedinQueueItemId[\s\S]*event\.step === 'auth_required'/);

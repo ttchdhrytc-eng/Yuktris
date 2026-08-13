@@ -981,30 +981,64 @@ export class LinkedInBrowser {
 
   async checkExistingAuthenticatedSession(intendedIdentity?: IntendedLinkedInIdentity): Promise<ExistingSessionCheck> {
     if (!this.page) throw new Error('No page — call newContext() first');
-    await this.navigateWithRetry(this.page, LINKEDIN_FEED_URL, PAGE_LOAD_TIMEOUT_MS);
-    const assessment = await this.assessAuthentication(undefined, false);
-    logger.info('Persistent Context preflight authentication assessed', {
-      auth_state: assessment.state, confidence: assessment.confidence,
-      origin: this.safeOrigin(assessment.url), pathname: this.safePathname(assessment.url), signals: assessment.signals,
-    });
-    if (assessment.state !== 'authenticated') {
-      return { result: null, authRequired: true, preserveCurrentPage: assessment.state === 'checkpoint' };
-    }
-
     const authenticationDetectedAt = Date.now();
-    const identity = await this.verifyIdentityWithRetry();
-    if (!identity) return { result: null, authRequired: true, preserveCurrentPage: false };
-    const identityMismatch = this.getIdentityMismatch(identity, intendedIdentity);
-    if (identityMismatch) {
-      return { result: { success: false, error: identityMismatch, nonRetryable: true, authState: 'authenticated' }, authRequired: false, preserveCurrentPage: false };
+    const result = await this.verifyPersistentAuthentication(intendedIdentity);
+    if (!result.success && (result.errorCode === 'reauth_required' || result.errorCode === 'checkpoint_required')) {
+      return { result: null, authRequired: true, preserveCurrentPage: result.errorCode === 'checkpoint_required' };
     }
-    const identityVerifiedAt = Date.now();
-    const session = await this.captureSession();
+    if (!result.success) return { result, authRequired: false, preserveCurrentPage: false };
     return {
-      result: { success: true, identity, session, authenticationDetectedAt, identityVerifiedAt, stateCapturedAt: Date.now() },
+      result: { ...result, authenticationDetectedAt, identityVerifiedAt: Date.now(), stateCapturedAt: Date.now() },
       authRequired: false,
       preserveCurrentPage: false,
     };
+  }
+
+  async verifyPersistentAuthentication(intendedIdentity?: IntendedLinkedInIdentity): Promise<ConnectionResult> {
+    if (!this.browser?.isConnected() || !this.context || !this.page || this.page.isClosed()) {
+      return { success: false, authState: 'unknown', errorCode: 'playwright_disconnected', nonRetryable: true,
+        error: 'Persistent LinkedIn browser is not connected' };
+    }
+    await this.navigateWithRetry(this.page, LINKEDIN_FEED_URL, PAGE_LOAD_TIMEOUT_MS);
+    const assessment = await this.assessAuthentication(undefined, false);
+    logger.info('linkedin_auth_assessed', {
+      authentication_state: assessment.state, confidence: assessment.confidence,
+      origin: this.safeOrigin(assessment.url), pathname: this.safePathname(assessment.url),
+      playwright_connected: this.browser.isConnected(),
+      authenticated_cookie_present: assessment.signals.includes('session_cookie'),
+    });
+    if (assessment.state === 'checkpoint') return {
+      success: false, authState: 'checkpoint', errorCode: 'checkpoint_required', nonRetryable: true,
+      error: 'LinkedIn security verification is required in the secure browser',
+    };
+    if (assessment.state !== 'authenticated') return {
+      success: false, authState: assessment.state, errorCode: 'reauth_required', nonRetryable: true,
+      error: 'LinkedIn requires reauthentication',
+    };
+
+    const identity = await this.verifyIdentity(1, undefined, undefined, undefined, FAST_REUSE_IDENTITY_TIMEOUT_MS);
+    if (!identity) {
+      const boundProfileUrl = intendedIdentity?.profileUrl
+        ? this.canonicalPersonalProfileUrl(intendedIdentity.profileUrl)
+        : null;
+      if (!boundProfileUrl) return {
+        success: false, authState: 'authenticated', identityState: 'unresolved',
+        errorCode: 'identity_resolution_failed', nonRetryable: true,
+        error: 'LinkedIn is authenticated, but its canonical identity could not be verified',
+      };
+      logger.info('linkedin_identity_deferred', {
+        authentication_state: 'authenticated', identity_state: 'unresolved', canonical_identity_bound: true,
+      });
+      return {
+        success: true, authState: 'authenticated', identityState: 'unresolved',
+        identity: { profileUrl: boundProfileUrl, profileName: intendedIdentity?.profileName || null, profileHeadline: null },
+        effectiveProfileUrl: boundProfileUrl, reuseBoundIdentity: true,
+      };
+    }
+    const mismatch = this.getIdentityMismatch(identity, intendedIdentity);
+    if (mismatch) return { success: false, authState: 'authenticated', identityState: 'mismatch', nonRetryable: true, error: mismatch };
+    logger.info('linkedin_identity_verified', { authentication_state: 'authenticated', identity_state: 'verified', canonical_identity_found: true });
+    return { success: true, authState: 'authenticated', identityState: 'verified', identity, effectiveProfileUrl: identity.profileUrl || undefined };
   }
 
   private async navigateWithRetry(page: Page, url: string, timeoutMs: number): Promise<void> {

@@ -28,9 +28,7 @@ const OnboardingPage = lazy(() => import('@/pages/OnboardingPage').then(m => ({ 
 
 // Lazy: core app pages
 const DashboardPage = lazy(() => import('@/pages/DashboardPage').then(m => ({ default: m.DashboardPage })));
-const CampaignsPage = lazy(() => import('@/pages/CampaignsPage').then(m => ({ default: m.CampaignsPage })));
 const ProspectsPage = lazy(() => import('@/pages/ProspectsPage').then(m => ({ default: m.ProspectsPage })));
-const InboxPage = lazy(() => import('@/pages/InboxPage').then(m => ({ default: m.InboxPage })));
 const MeetingsPage = lazy(() => import('@/pages/MeetingsPage').then(m => ({ default: m.MeetingsPage })));
 const AnalyticsPage = lazy(() => import('@/pages/AnalyticsPage').then(m => ({ default: m.AnalyticsPage })));
 const CRMPage = lazy(() => import('@/pages/CRMPage').then(m => ({ default: m.CRMPage })));
@@ -148,9 +146,9 @@ export default function App() {
 
               {/* Protected app routes — new navigation */}
               <Route path="/app" element={<ProtectedApp><DashboardPage /></ProtectedApp>} />
-              <Route path="/app/campaigns" element={<ProtectedApp><CampaignsPage /></ProtectedApp>} />
+              <Route path="/app/campaigns" element={<Navigate to="/app/linkedin-automation" replace />} />
               <Route path="/app/prospects" element={<ProtectedApp><ProspectsPage /></ProtectedApp>} />
-              <Route path="/app/inbox" element={<ProtectedApp><InboxPage /></ProtectedApp>} />
+              <Route path="/app/inbox" element={<Navigate to="/app/conversations" replace />} />
               <Route path="/app/meetings" element={<ProtectedApp><MeetingsPage /></ProtectedApp>} />
               <Route path="/app/analytics" element={<ProtectedApp><AnalyticsPage /></ProtectedApp>} />
               <Route path="/app/crm" element={<ProtectedApp><CRMPage /></ProtectedApp>} />

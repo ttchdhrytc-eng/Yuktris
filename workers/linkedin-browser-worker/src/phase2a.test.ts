@@ -76,8 +76,8 @@ const tests: Array<[string, () => void]> = [
   ['authenticated identity is discovered, canonicalized, and persisted before session save', () => {
     assert.match(linkedin, /https:\/\/www\.linkedin\.com\/in\/\$\{match\[1\]\}/);
     assert.match(linkedin, /canonicalPersonalProfileUrl/);
-    const bind = worker.indexOf('await this.bindAuthenticatedIdentity(workspaceId, accountId, result.identity?.profileUrl)');
-    const save = worker.indexOf('await this.saveSession(workspaceId, accountId, result.session!)');
+    const bind = worker.indexOf('await this.bindAuthenticatedIdentity(workspaceId, accountId, effectiveProfileUrl)');
+    const save = worker.indexOf('sessionId = await this.saveSession(workspaceId, accountId, result.session)');
     assert.ok(bind > 0 && bind < save);
     assert.match(identityMigration, /SET expected_profile_url=v_profile, profile_url=v_profile/);
   }],
@@ -178,8 +178,8 @@ const tests: Array<[string, () => void]> = [
     assert.doesNotMatch(connectFlow, /const validator = new LinkedInBrowser|Starting session restore test|validator\.launch/);
     assert.match(connectFlow, /const identity = await this\.verifyIdentityWithRetry\(queueItemId, workspaceId, accountId\)/);
     assert.match(connectFlow, /const session = await this\.captureSession\(authenticationProof, 'verified'\)/);
-    const bind = worker.indexOf('await this.bindAuthenticatedIdentity(workspaceId, accountId, result.identity?.profileUrl)');
-    const save = worker.indexOf('await this.saveSession(workspaceId, accountId, result.session!)');
+    const bind = worker.indexOf('await this.bindAuthenticatedIdentity(workspaceId, accountId, effectiveProfileUrl)');
+    const save = worker.indexOf('sessionId = await this.saveSession(workspaceId, accountId, result.session)');
     const connected = worker.indexOf("connection_state: 'connected'", save);
     assert.ok(bind > 0 && save > bind && connected > save);
   }],

@@ -26,7 +26,7 @@ const tests: Array<[string, () => void]> = [
   }],
   ['redirect identity requires a canonical personal LinkedIn URL', () => {
     assert.match(linkedin, /canonicalPersonalProfileUrl[\s\S]*this\.isLinkedInUrl/);
-    assert.match(linkedin, /match\(\/\^\\\/in\\\/\(\[A-Za-z0-9_%\.\-\]\+\)/);
+    assert.ok(linkedin.includes("match(/^\\/in\\/([A-Za-z0-9_%.-]+)"));
     assert.match(linkedin, /toLowerCase\(\) === 'me'/);
   }],
   ['identity mismatch remains fail closed before capture', () => {
@@ -37,7 +37,7 @@ const tests: Array<[string, () => void]> = [
   }],
   ['resolution failure cannot mark the account connected', () => {
     assert.match(linkedin, /if \(!identity\)[\s\S]*Identity verification failed/);
-    const bind = worker.indexOf('await this.bindAuthenticatedIdentity(workspaceId, accountId, result.identity?.profileUrl)');
+    const bind = worker.indexOf('await this.bindAuthenticatedIdentity(workspaceId, accountId, effectiveProfileUrl)');
     const connected = worker.indexOf("connection_state: 'connected'", bind);
     assert.ok(bind > 0 && connected > bind);
   }],

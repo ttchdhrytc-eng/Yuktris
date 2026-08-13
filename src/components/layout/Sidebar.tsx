@@ -1,6 +1,6 @@
 import { NavLink } from 'react-router-dom';
 import {
-  LayoutDashboard, Rocket, Users, MessageSquare, Calendar,
+  LayoutDashboard, Users, MessageSquare, Calendar,
   BarChart3, Plug, CreditCard, DollarSign, Settings, Sparkles, ChevronDown,
   ListOrdered, Monitor, UserCircle, Activity, Zap,
 } from 'lucide-react';
@@ -26,9 +26,7 @@ const sections: { label: string; items: NavItem[] }[] = [
   {
     label: 'Sales',
     items: [
-      { to: '/app/campaigns', label: 'Campaigns', icon: Rocket },
       { to: '/app/prospects', label: 'Prospects', icon: Users },
-      { to: '/app/inbox', label: 'Inbox', icon: MessageSquare },
       { to: '/app/meetings', label: 'Meetings', icon: Calendar },
     ],
   },

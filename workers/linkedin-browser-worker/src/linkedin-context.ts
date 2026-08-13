@@ -10,6 +10,7 @@ export interface ContextRecord {
   status: string;
   generation: number;
   active_browserbase_session_id?: string | null;
+  last_synchronized_at?: string | null;
 }
 
 export interface ContextPolicy { enrolled: boolean; has_persistent_context: boolean; }
@@ -24,7 +25,7 @@ export interface ContextLeaseOwner {
 }
 
 export function persistentContextsEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  return env.LINKEDIN_PERSISTENT_CONTEXTS_ENABLED?.trim().toLowerCase() === 'true';
+  return env.LINKEDIN_PERSISTENT_CONTEXTS_ENABLED?.trim().toLowerCase() !== 'false';
 }
 
 export function sessionOptionsForAccount(enabled: boolean, context?: ContextRecord | null): CreateSessionOptions {
@@ -55,6 +56,14 @@ export class LinkedInContextService {
     const policy = first(data as ContextPolicy | ContextPolicy[] | null);
     if (!policy) throw new Error('Context policy lookup returned no account');
     return policy;
+  }
+
+  async ensureV1Enrollment(workspaceId: string, accountId: string): Promise<void> {
+    const { error } = await this.client.rpc('set_linkedin_browser_context_enrollment', {
+      p_workspace_id: workspaceId, p_account_id: accountId, p_enabled: true,
+      p_enrolled_by: 'linkedin-v1-worker', p_reason: 'persistent-context-first-v1',
+    });
+    if (error) throw new Error(`Persistent Context enrollment failed: ${error.message}`);
   }
 
   async shouldUsePersistentContext(workspaceId: string, accountId: string, globalEnabled = persistentContextsEnabled()): Promise<boolean> {
