@@ -20,6 +20,7 @@ const CHALLENGE_DISAPPEAR_GRACE_MS = 10 * 1000;
 const IDENTITY_RESOLUTION_ATTEMPTS = 4;
 const IDENTITY_RESOLUTION_DELAY_MS = 2000;
 const IDENTITY_NAVIGATION_TIMEOUT_MS = 10000;
+const FAST_REUSE_IDENTITY_TIMEOUT_MS = 2500;
 
 async function withTimeout<T>(operation: Promise<T>, timeoutMs: number, message: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -787,9 +788,24 @@ export class LinkedInBrowser {
           error: 'The restored LinkedIn authentication state could not be confirmed' };
       }
 
-      await onProgress?.('identity_resolution_pending', 'LinkedIn is authenticated. Verifying the canonical account identity...');
-      const identity = await this.verifyIdentityWithRetry();
+      await onProgress?.('identity_resolution_pending', 'LinkedIn is authenticated. Checking the bound account identity...');
+      // Existing bound accounts get one bounded, best-effort identity check.
+      // Authentication usability is not coupled to LinkedIn's /in/me redirect.
+      const identity = await this.verifyIdentity(1, undefined, undefined, undefined, FAST_REUSE_IDENTITY_TIMEOUT_MS);
       if (!identity) {
+        const boundProfileUrl = this.normalizeProfileUrl(intendedIdentity?.profileUrl);
+        if (boundProfileUrl) {
+          logger.warn('Bound LinkedIn account identity remains unresolved after fast verification', {
+            authentication_state: 'authenticated', identity_state: 'unresolved',
+            canonical_identity_bound: true,
+          });
+          await onProgress?.('connected', 'Authenticated LinkedIn session restored. Identity verification remains pending.');
+          return {
+            success: true,
+            identity: { profileUrl: boundProfileUrl, profileName: intendedIdentity?.profileName || null, profileHeadline: null },
+            authState: 'authenticated', identityState: 'unresolved',
+          };
+        }
         return { success: false, authState: 'authenticated', identityState: 'unresolved',
           errorCode: 'identity_resolution_failed', nonRetryable: true,
           error: 'LinkedIn is authenticated, but its canonical personal profile URL could not be verified. Please retry identity verification.' };
@@ -1293,7 +1309,7 @@ export class LinkedInBrowser {
     }
   }
 
-  private async verifyIdentity(attempt = 1, queueItemId?: string, workspaceId?: string, accountId?: string): Promise<LinkedInIdentity | null> {
+  private async verifyIdentity(attempt = 1, queueItemId?: string, workspaceId?: string, accountId?: string, navigationTimeoutMs = IDENTITY_NAVIGATION_TIMEOUT_MS): Promise<LinkedInIdentity | null> {
     if (!this.page) return null;
     const startedAt = Date.now();
     const timing = (stage: string, method: string, stageStartedAt = startedAt, metadata: Record<string, unknown> = {}): void => {
@@ -1343,8 +1359,8 @@ export class LinkedInBrowser {
 
       const navigationStartedAt = Date.now();
       timing('identity_fallback_started', 'linkedin_profile_redirect', navigationStartedAt);
-      timing('I1_navigation_started', 'linkedin_profile_redirect', navigationStartedAt, { timeout_ms: IDENTITY_NAVIGATION_TIMEOUT_MS });
-      const response = await this.page.goto(LINKEDIN_PROFILE_URL, { waitUntil: 'commit', timeout: IDENTITY_NAVIGATION_TIMEOUT_MS });
+      timing('I1_navigation_started', 'linkedin_profile_redirect', navigationStartedAt, { timeout_ms: navigationTimeoutMs });
+      const response = await this.page.goto(LINKEDIN_PROFILE_URL, { waitUntil: 'commit', timeout: navigationTimeoutMs });
       timing('I2_navigation_response_received', 'linkedin_profile_redirect', navigationStartedAt, { response_received: !!response });
       const resolvedUrl = this.page.url();
       timing('I3_redirect_resolved', 'linkedin_profile_redirect', navigationStartedAt, { origin: this.safeOrigin(resolvedUrl), pathname: this.safePathname(resolvedUrl) });

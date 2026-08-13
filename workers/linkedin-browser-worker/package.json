@@ -20,6 +20,7 @@
     "test:connection-orchestration": "npm run build && node dist/connection-orchestration.test.js",
     "test:auth-surface-lifecycle": "npm run build && node --test dist/auth-surface-lifecycle.test.js",
     "test:authenticated-identity-state": "npm run build && node --test dist/authenticated-identity-state.test.js",
+    "test:v1-authenticated-reuse": "npm run build && node --test dist/v1-authenticated-reuse.test.js",
     "install-browser": "echo 'No local browser needed — using Browserbase'"
   },
   "dependencies": {

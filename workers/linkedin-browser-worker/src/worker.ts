@@ -459,14 +459,14 @@ export class Worker {
             authentication_state: reuseResult.authState || 'unknown', identity_state: reuseResult.identityState || 'unresolved',
           });
           await this.linkedin.close();
-          await this.updateAccount(accountId, { connection_state: 'failed', status: 'failed', last_error: reuseResult.error });
+          await this.updateAccount(accountId, { connection_state: 'failed', status: 'error', last_error: reuseResult.error });
           await this.queue.fail(item.id, reuseResult.error || 'Existing session verification failed', Date.now() - startTime, reuseResult.retryable === true);
           return;
         }
       } catch (err) {
         logger.warn('Session reuse error; failing without creating a second browser session', { error: this.sanitizeError(err) });
         await this.linkedin.close().catch(() => {});
-        await this.updateAccount(accountId, { connection_state: 'failed', status: 'failed', last_error: 'Existing LinkedIn session check failed' });
+        await this.updateAccount(accountId, { connection_state: 'failed', status: 'error', last_error: 'Existing LinkedIn session check failed' });
         await this.queue.fail(item.id, 'Existing LinkedIn session check failed', Date.now() - startTime, true);
         return;
       }
@@ -559,7 +559,7 @@ export class Worker {
         return;
       }
 
-      await this.updateAccount(accountId, { connection_state: 'failed', status: 'failed', session_status: 'disconnected', last_error: result.error || 'Connection failed' });
+      await this.updateAccount(accountId, { connection_state: 'failed', status: 'error', session_status: 'disconnected', last_error: result.error || 'Connection failed' });
       await this.logSessionEvent(workspaceId, accountId, 'login_failed', { error: result.error });
       await this.queue.fail(item.id, result.error || 'Connection failed', Date.now() - startTime, result.retryable === true || !isNonRetryable);
       return;
