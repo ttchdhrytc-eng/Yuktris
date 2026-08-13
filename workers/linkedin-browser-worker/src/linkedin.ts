@@ -11,12 +11,15 @@ const LINKEDIN_PROFILE_URL = 'https://www.linkedin.com/in/me';
 const CDP_CONNECT_TIMEOUT_MS = 30000;
 const PAGE_LOAD_TIMEOUT_MS = 30000;
 const AUTH_SIGNAL_TIMEOUT_MS = 5000;
+// Credential submission must resolve quickly. The 30-minute budget is reserved
+// exclusively for a positively detected human verification surface.
+export const AUTOMATIC_LOGIN_RESULT_TIMEOUT_MS = 45 * 1000;
+export const HUMAN_VERIFICATION_TIMEOUT_MS = DEFAULT_INTERACTIVE_AUTH_TIMEOUT_MS;
 const TRANSIENT_RETRY_LIMIT = 2;
 const TRANSIENT_RETRY_DELAY_MS = 1500;
 // Normal sign-in remains bounded by CONNECTION_TIMEOUT_MS. A verified human
 // challenge may extend that window, but never beyond the absolute lifetime.
-const HUMAN_CHALLENGE_EXTENSION_MS = 20 * 60 * 1000;
-const MAX_AUTH_ATTEMPT_LIFETIME_MS = DEFAULT_INTERACTIVE_AUTH_TIMEOUT_MS;
+const MAX_AUTH_ATTEMPT_LIFETIME_MS = 35 * 60 * 1000;
 const CHALLENGE_DISAPPEAR_GRACE_MS = 10 * 1000;
 const IDENTITY_RESOLUTION_ATTEMPTS = 4;
 const IDENTITY_RESOLUTION_DELAY_MS = 2000;
@@ -80,6 +83,22 @@ export function classifyLinkedInAuthentication(signals: AuthenticationSignals): 
   if (signals.isLogin && signals.hasSessionCookie) return { state: 'login_in_progress', confidence: 'medium' };
   if (signals.isLogin) return { state: 'unauthenticated', confidence: 'medium' };
   return { state: 'unknown', confidence: 'low' };
+}
+
+export type AutomaticLoginResult = 'authenticated' | 'verification_required' | 'credentials_invalid'
+  | 'login_failed' | 'linkedin_unavailable' | 'pending';
+
+export function classifyAutomaticLoginResult(
+  assessment: Pick<AuthenticationAssessment, 'state' | 'signals'>,
+  decisionWindowElapsed: boolean,
+): AutomaticLoginResult {
+  if (assessment.state === 'authenticated') return 'authenticated';
+  if (assessment.state === 'checkpoint') return 'verification_required';
+  if (assessment.signals.includes('invalid_credentials')) return 'credentials_invalid';
+  if (assessment.signals.includes('linkedin_error')) return 'linkedin_unavailable';
+  if (!decisionWindowElapsed) return 'pending';
+  if (assessment.state === 'unauthenticated' && assessment.signals.includes('login_form')) return 'login_failed';
+  return 'linkedin_unavailable';
 }
 
 export interface IntendedLinkedInIdentity {
@@ -944,6 +963,7 @@ export class LinkedInBrowser {
           if (state === 'waiting_for_user' && flowState === 'challenge_detected') transition('waiting_for_user');
           if (state === 'waiting_for_login' && flowState === 'waiting_for_user') transition('waiting_for_login');
         },
+        credentialInteractionStarted,
       );
 
       if (authResult.cancelled) {
@@ -1217,19 +1237,24 @@ export class LinkedInBrowser {
           return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
         };
         const visible = (selector: string): boolean => Array.from(document.querySelectorAll<HTMLElement>(selector)).some(elementVisible);
+        const visibleTextMatches = (selector: string, pattern: RegExp): boolean => Array.from(document.querySelectorAll<HTMLElement>(selector))
+          .filter(elementVisible).some(element => pattern.test((element.textContent || '').replace(/\s+/g, ' ').trim()));
         return {
           loginForm: visible('input[type="password"], input[name="session_key"], form.login__form'),
-          checkpoint: visible('input[name="pin"], input[name="verificationCode"], input[name="otp"], #captcha, [data-test-challenge], .challenge'),
+          checkpoint: visible('input[name="pin"], input[name="verificationCode"], input[name="otp"], input[name="code"], input[autocomplete="one-time-code"], #captcha, .captcha, [data-test-challenge], .challenge, iframe[src*="captcha"], iframe[src*="recaptcha"]')
+            || visibleTextMatches('main, form, [role="main"], [role="dialog"]', /verification code|enter (the )?code|security (verification|check)|verify (your|it['â€™]s) you|confirm your identity|check your (email|phone)|two[- ]factor|authenticator|captcha/i),
           globalNav: visible('.global-nav, nav[aria-label="Primary"], nav[aria-label="Main"]'),
           meControl: visible('.global-nav__me, .global-nav__me-photo, button[aria-label*="Me"], img.global-nav__me-photo'),
           feedContent: visible('.feed-update-wrapper, .core-entry-card, div[class*="feed-shared"]'),
+          linkedInError: visibleTextMatches('[role="alert"], .alert, .form__label--error, .error',
+            /something went wrong|please try again|temporarily unavailable|unable to sign in|sign-in attempt/i),
           invalidCredentials: Array.from(document.querySelectorAll<HTMLElement>('[role="alert"], .alert, .form__label--error, #error-for-password, #error-for-username'))
             .filter(elementVisible)
             .some(element => /incorrect|not accepted|wrong (email|password)|couldn['’]t find|could not find/i.test(element.textContent || '')),
         };
       }),
       new Promise<never>((_, reject) => setTimeout(() => reject(new Error('auth signal timeout')), AUTH_SIGNAL_TIMEOUT_MS)),
-    ]).catch(() => ({ loginForm: false, checkpoint: false, globalNav: false, meControl: false, feedContent: false, invalidCredentials: false }));
+    ]).catch(() => ({ loginForm: false, checkpoint: false, globalNav: false, meControl: false, feedContent: false, invalidCredentials: false, linkedInError: false }));
 
     if (selectorFlags.loginForm) signals.push('login_form');
     if (selectorFlags.checkpoint) signals.push('checkpoint_control');
@@ -1237,6 +1262,7 @@ export class LinkedInBrowser {
     if (selectorFlags.meControl) signals.push('me_control');
     if (selectorFlags.feedContent) signals.push('feed_content');
     if (selectorFlags.invalidCredentials) signals.push('invalid_credentials');
+    if (selectorFlags.linkedInError) signals.push('linkedin_error');
 
     let hasSessionCookie = false;
     try {
@@ -1380,11 +1406,14 @@ export class LinkedInBrowser {
     accountId?: string,
     queueItemId?: string,
     onFlowState?: (state: 'waiting_for_login' | 'challenge_detected' | 'waiting_for_user') => void,
+    automaticCredentialLogin = false,
   ): Promise<{ authenticated: boolean; challenge: ChallengeInfo | null; cancelled: boolean; failure?: string; failureCode?: string }> {
     if (!this.page) return { authenticated: false, challenge: null, cancelled: false, failure: 'Secure LinkedIn browser page is unavailable' };
 
     const startedAt = Date.now();
-    const normalDeadline = startedAt + timeoutMs;
+    const normalDeadline = startedAt + (automaticCredentialLogin
+      ? Math.min(AUTOMATIC_LOGIN_RESULT_TIMEOUT_MS, timeoutMs)
+      : timeoutMs);
     const absoluteDeadline = startedAt + MAX_AUTH_ATTEMPT_LIFETIME_MS;
     let challengeDeadline: number | null = null;
     let pinnedChallengePage: Page | null = null;
@@ -1399,6 +1428,7 @@ export class LinkedInBrowser {
     let lastChallengeNavigationCount = -1;
     let wasCheckpoint = false;
     let invalidCredentialsReported = false;
+    let lastAssessment: AuthenticationAssessment | null = null;
     const CHALLENGE_CHECK_INTERVAL = 5000;
     const observedPage = this.page;
     const observeMainFrameNavigation = (frame: import('playwright').Frame): void => {
@@ -1424,6 +1454,7 @@ export class LinkedInBrowser {
       // Once a challenge is detected, observe that exact page without page
       // selection, focus changes, navigation, reloads, clicks, or form input.
       const assessment = await this.assessAuthentication(pinnedChallengePage ?? undefined, pinnedChallengePage === null);
+      lastAssessment = assessment;
       const url = assessment.url;
       const diagnosticState = `${assessment.state}:${assessment.confidence}:${assessment.signals.join(',')}:${mainFrameNavigationCount}`;
       if (diagnosticState !== lastDiagnosticState) {
@@ -1480,15 +1511,22 @@ export class LinkedInBrowser {
         invalidCredentialsReported = false;
       }
 
+      if (automaticCredentialLogin && assessment.signals.includes('linkedin_error')) {
+        const failure = 'LinkedIn could not complete sign-in. Please try again later.';
+        await onProgress?.('login_failed', failure, { error_code: 'linkedin_unavailable' });
+        return { authenticated: false, challenge: activeChallenge, cancelled: false,
+          failure, failureCode: 'linkedin_unavailable' };
+      }
+
       const now = Date.now();
       const enteredCheckpoint = assessment.state === 'checkpoint' && !wasCheckpoint;
       if (assessment.state === 'checkpoint') {
         challengeMissingSince = null;
         if (!pinnedChallengePage) pinnedChallengePage = this.page;
         if (!challengeDeadline) {
-          challengeDeadline = Math.min(now + HUMAN_CHALLENGE_EXTENSION_MS, absoluteDeadline);
+          challengeDeadline = Math.min(now + HUMAN_VERIFICATION_TIMEOUT_MS, absoluteDeadline);
           logger.info('Human challenge window activated', {
-            extensionMs: HUMAN_CHALLENGE_EXTENSION_MS,
+            humanVerificationTimeoutMs: HUMAN_VERIFICATION_TIMEOUT_MS,
             absoluteLifetimeMs: MAX_AUTH_ATTEMPT_LIFETIME_MS,
           });
         }
@@ -1597,6 +1635,25 @@ export class LinkedInBrowser {
       await new Promise(resolve => setTimeout(resolve, 2000));
     }
 
+    if (automaticCredentialLogin && !activeChallenge) {
+      const terminalResult = classifyAutomaticLoginResult(lastAssessment ?? { state: 'unknown', signals: [] }, true);
+      const unchangedLogin = terminalResult === 'login_failed';
+      const failureCode = unchangedLogin ? 'automatic_login_timeout' : 'linkedin_unavailable';
+      const failure = unchangedLogin
+        ? 'LinkedIn sign-in did not complete. Verify the saved sign-in details before reconnecting.'
+        : 'LinkedIn did not return a recognizable sign-in result. Please try again later.';
+      logger.warn('Automatic LinkedIn login reached bounded terminal result', {
+        queue_item_id: queueItemId, workspace_id: workspaceId, account_id: accountId,
+        browserbase_session_id: this.bbSession?.id ?? null,
+        elapsed_ms: Date.now() - startedAt, failure_code: failureCode,
+        authentication_state: lastAssessment?.state ?? 'unknown',
+        origin: this.safeOrigin(lastAssessment?.url ?? ''), pathname: this.safePathname(lastAssessment?.url ?? ''),
+        login_form_exists: lastAssessment?.signals.includes('login_form') ?? false,
+        challenge_detected: false,
+      });
+      await onProgress?.('login_failed', failure, { error_code: failureCode });
+      return { authenticated: false, challenge: null, cancelled: false, failure, failureCode };
+    }
     return { authenticated: false, challenge: activeChallenge, cancelled: false };
     } finally {
       observedPage.off('framenavigated', observeMainFrameNavigation);
@@ -1627,6 +1684,33 @@ export class LinkedInBrowser {
 
     if (url.includes('/checkpoint') || url.includes('/challenge')) {
       return { type: 'email_otp', description: 'Complete the LinkedIn security check' };
+    }
+
+    const semanticChallenge = await page.evaluate(() => {
+      const visible = (element: HTMLElement): boolean => {
+        const style = window.getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        return style.visibility !== 'hidden' && style.display !== 'none' && rect.width > 0 && rect.height > 0;
+      };
+      const controls = Array.from(document.querySelectorAll<HTMLElement>(
+        'input[name="pin"], input[name="verificationCode"], input[name="otp"], input[name="code"], input[autocomplete="one-time-code"], #captcha, .captcha, iframe[src*="captcha"], iframe[src*="recaptcha"]',
+      )).filter(visible);
+      const text = Array.from(document.querySelectorAll<HTMLElement>('main, form, [role="main"], [role="dialog"]'))
+        .filter(visible).map(element => element.textContent || '').join(' ').replace(/\s+/g, ' ').toLowerCase();
+      if (controls.some(element => element.matches('#captcha, .captcha, iframe[src*="captcha"], iframe[src*="recaptcha"]')) || /captcha/.test(text)) return 'captcha';
+      if (/authenticator|two[- ]factor|2fa/.test(text)) return 'two_factor';
+      if (/phone|sms|text message/.test(text) && /code|verify|confirm/.test(text)) return 'phone_verification';
+      if (controls.length || /verification code|enter (the )?code|security (verification|check)|verify (your|it['â€™]s) you|confirm your identity|check your email/.test(text)) return 'email_otp';
+      return null;
+    }).catch(() => null as ChallengeInfo['type'] | null);
+    if (semanticChallenge) {
+      const descriptions: Record<ChallengeInfo['type'], string> = {
+        captcha: 'Complete the CAPTCHA verification',
+        two_factor: 'Complete two-factor verification inside the secure LinkedIn browser',
+        phone_verification: 'Complete phone verification inside the secure LinkedIn browser',
+        email_otp: 'Complete the LinkedIn verification challenge',
+      };
+      return { type: semanticChallenge, description: descriptions[semanticChallenge] };
     }
 
     const challengeSelectors = [

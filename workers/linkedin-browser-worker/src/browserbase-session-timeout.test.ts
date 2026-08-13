@@ -19,5 +19,6 @@ test('LinkedIn connect sessions outlive the bounded 30-minute human challenge wi
   const linkedin = readFileSync('src/linkedin.ts', 'utf8');
   assert.match(worker, /interactiveBrowserSessionTimeoutMs\(\)/);
   assert.match(worker, /launchOptions = \{[\s\S]*timeoutMs: INTERACTIVE_BROWSER_SESSION_TIMEOUT_MS/);
-  assert.match(linkedin, /MAX_AUTH_ATTEMPT_LIFETIME_MS = DEFAULT_INTERACTIVE_AUTH_TIMEOUT_MS/);
+  assert.match(linkedin, /HUMAN_VERIFICATION_TIMEOUT_MS = DEFAULT_INTERACTIVE_AUTH_TIMEOUT_MS/);
+  assert.match(linkedin, /MAX_AUTH_ATTEMPT_LIFETIME_MS = 35 \* 60 \* 1000/);
 });

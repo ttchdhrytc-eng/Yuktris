@@ -22,11 +22,12 @@ test('incompatible configured deadlines fail before session creation', () => {
   }), /must exceed/);
 });
 
-test('ordinary and challenge login share one absolute bounded lifecycle', () => {
+test('automatic and challenge login use separate bounded lifecycles', () => {
   const linkedin = readFileSync('src/linkedin.ts', 'utf8');
-  assert.match(linkedin, /normalDeadline = startedAt \+ timeoutMs/);
+  assert.match(linkedin, /AUTOMATIC_LOGIN_RESULT_TIMEOUT_MS = 45 \* 1000/);
+  assert.match(linkedin, /normalDeadline = startedAt \+ \(automaticCredentialLogin/);
   assert.match(linkedin, /absoluteDeadline = startedAt \+ MAX_AUTH_ATTEMPT_LIFETIME_MS/);
-  assert.match(linkedin, /Math\.min\(now \+ HUMAN_CHALLENGE_EXTENSION_MS, absoluteDeadline\)/);
+  assert.match(linkedin, /Math\.min\(now \+ HUMAN_VERIFICATION_TIMEOUT_MS, absoluteDeadline\)/);
 });
 
 test('active queue and Context leases renew throughout the interactive wait', () => {
