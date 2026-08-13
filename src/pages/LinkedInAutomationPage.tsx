@@ -108,7 +108,7 @@ function AccountsTab() {
   const connect = useConnectLinkedIn();
   const [showForm, setShowForm] = useState(false);
   const [email, setEmail] = useState('');
-  const [displayName, setDisplayName] = useState('');
+  const [password, setPassword] = useState('');
   const [connectingAccountId, setConnectingAccountId] = useState<string | null>(null);
 
   const list = accounts.data ?? [];
@@ -126,7 +126,7 @@ function AccountsTab() {
         <Card className="p-4 mb-4 space-y-3">
           <div className="rounded-lg bg-gold-500/5 border border-gold-500/15 p-3">
             <p className="text-xs text-ink-300 leading-relaxed">
-              Enter your password and any verification codes only inside the secure LinkedIn browser. Yuktris never receives or stores them.
+              Your password is encrypted immediately and used only for LinkedIn authentication. Verification codes remain inside the secure browser.
             </p>
           </div>
           <input
@@ -137,25 +137,27 @@ function AccountsTab() {
             className="w-full rounded-lg border border-gold-500/12 bg-maroon-950/60 px-3 py-2 text-sm text-ink-50 placeholder:text-ink-600 input-luxury focus:outline-none"
           />
           <input
-            placeholder="Optional display name"
-            value={displayName}
-            onChange={(e) => setDisplayName(e.target.value)}
+            type="password"
+            autoComplete="current-password"
+            placeholder="LinkedIn password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
             className="w-full rounded-lg border border-gold-500/12 bg-maroon-950/60 px-3 py-2 text-sm text-ink-50 placeholder:text-ink-600 input-luxury focus:outline-none"
           />
           <Button
             size="sm"
             onClick={() => {
               connect.mutate(
-                { linkedinEmail: email || undefined, displayName: displayName || undefined },
+                { username: email.trim(), password },
                 {
                   onSuccess: (data) => {
                     setConnectingAccountId(data.accountId);
                   },
                 },
               );
-              setEmail(''); setDisplayName(''); setShowForm(false);
+              setEmail(''); setPassword(''); setShowForm(false);
             }}
-            disabled={connect.isPending}
+            disabled={connect.isPending || !email.trim() || !password}
             loading={connect.isPending}
           >
             Continue to LinkedIn
@@ -318,7 +320,7 @@ function AccountCard({
   const cancelInteraction = useCancelAuthInteraction();
   const recoverSurface = useRecoverLinkedInAuthSurface();
 
-  const { progressSteps, challenge, identityVerified, authRequired, repeatedSecurityChecks, cancellableInteraction, currentQueueItemId, latestStep } = useMemo(() => {
+  const { progressSteps, challenge, identityVerified, repeatedSecurityChecks, cancellableInteraction, currentQueueItemId, latestStep } = useMemo(() => {
     const items = interactions.data ?? [];
     const currentQueueItemId = [...items].reverse().find((item) => item.queue_item_id)?.queue_item_id ?? null;
     const currentItems = currentQueueItemId
@@ -338,7 +340,6 @@ function AccountCard({
       progressSteps: steps,
       challenge: chal,
       identityVerified: currentItems.some((item) => item.interaction_type === 'progress' && item.step === 'identity_verified' && item.status === 'completed'),
-      authRequired: currentItems.some((item) => item.interaction_type === 'progress' && item.step === 'auth_required' && item.status === 'completed'),
       repeatedSecurityChecks: currentItems.some((item) => item.interaction_type === 'progress' && item.step === 'provider_rechallenge' && item.status === 'completed'),
       cancellableInteraction: [...currentItems].reverse().find((item) => item.queue_item_id) ?? null,
       currentQueueItemId,
@@ -458,7 +459,7 @@ function AccountCard({
       )}
 
       <SecureLinkedInAuthModal
-        open={showPanel && (authRequired || identityVerified)}
+        open={showPanel && (!!challenge || identityVerified)}
         loginUrl={loginAccess.data?.loginUrl ?? null}
         identityVerified={identityVerified}
         securityCheckRequired={!!challenge && challenge.status === 'pending'}

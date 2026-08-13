@@ -8,6 +8,7 @@ const migration = read('supabase/migrations/20260810090000_phase2a_linkedin_conn
 const identityMigration = read('supabase/migrations/20260812150000_linkedin_post_auth_identity_binding.sql');
 const loginAccessMigration = read('supabase/migrations/20260812160000_linkedin_authorized_live_login_access.sql');
 const continuityMigration = read('supabase/migrations/20260812170000_linkedin_human_auth_continuity.sql');
+const credentialMigration = read('supabase/migrations/20260813210000_linkedin_v1_encrypted_credentials.sql');
 const linkedin = read('workers/linkedin-browser-worker/src/linkedin.ts');
 const worker = read('workers/linkedin-browser-worker/src/worker.ts');
 const browserbase = read('workers/linkedin-browser-worker/src/browserbase.ts');
@@ -39,7 +40,7 @@ const tests: Array<[string, () => void]> = [
   }],
   ['identity mismatch fails closed', () => {
     assert.match(linkedin, /Authenticated LinkedIn profile does not match/);
-    assert.match(hook, /p_expected_profile_url/);
+    assert.match(credentialMigration, /coalesce\(expected_profile_url,profile_url\)/);
   }],
   ['expired sessions are excluded', () => {
     assert.match(migration, /expires_at > now\(\)/);
@@ -70,8 +71,8 @@ const tests: Array<[string, () => void]> = [
   }],
   ['connection can start with pending profile identity', () => {
     assert.doesNotMatch(identityMigration, /IF v_profile IS NULL THEN RAISE EXCEPTION 'A valid LinkedIn profile URL is required'/);
-    assert.match(hook, /p_expected_profile_url:\s*null/);
-    assert.match(onboardingPage, /LinkedIn email \(optional\)/);
+    assert.match(credentialMigration, /v_expected_profile text/);
+    assert.match(onboardingPage, /LinkedIn email or phone/);
   }],
   ['authenticated identity is discovered, canonicalized, and persisted before session save', () => {
     assert.match(linkedin, /https:\/\/www\.linkedin\.com\/in\/\$\{match\[1\]\}/);
@@ -218,7 +219,7 @@ const tests: Array<[string, () => void]> = [
   ['transactional start enforces workspace membership', () => {
     assert.match(migration, /auth\.uid\(\) IS NULL OR NOT public\.is_workspace_member\(p_workspace_id\)/);
     assert.match(migration, /enqueue_linkedin_connection_test\(uuid,uuid\) FROM PUBLIC, anon/);
-    assert.match(hook, /start_linkedin_connection/);
+    assert.match(hook, /functions\.invoke\('linkedin-credentials'/);
   }],
 ];
 

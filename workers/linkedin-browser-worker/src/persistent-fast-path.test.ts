@@ -46,11 +46,11 @@ const tests: Array<[string, () => void]> = [
     assert.match(verify, /getIdentityMismatch[\s\S]*identityState: 'mismatch'/);
     assert.doesNotMatch(verify, /captureSession/);
   }],
-  ['modal requires current-attempt auth_required', () => {
+  ['modal requires a current challenge rather than ordinary auth_required', () => {
     assert.match(onboarding, /event\.queue_item_id === linkedinQueueItemId[\s\S]*event\.step === 'auth_required'/);
-    assert.match(onboarding, /open=\{[\s\S]*linkedinAuthRequired \|\| linkedinIdentityVerified/);
-    assert.match(accounts, /open=\{authRequired \|\| identityVerified\}/);
-    assert.match(automation, /open=\{showPanel && \(authRequired \|\| identityVerified\)\}/);
+    assert.match(onboarding, /open=\{[\s\S]*!!linkedinChallenge \|\| linkedinIdentityVerified/);
+    assert.match(accounts, /open=\{securityCheckRequired \|\| identityVerified\}/);
+    assert.match(automation, /open=\{showPanel && \(!!challenge \|\| identityVerified\)\}/);
   }],
   ['checking and interactive copy are distinct', () => {
     assert.match(onboarding, /Checking your LinkedIn connection/);

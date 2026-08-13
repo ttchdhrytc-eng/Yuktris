@@ -4,7 +4,7 @@ import { toast } from 'sonner';
 import {
   Sparkles, ArrowRight, ArrowLeft, Check, CheckCircle2,
   Rocket, Globe, Linkedin, Mail, Calendar,
-  Target, Zap, ChevronRight, Loader2, TrendingUp,
+  Target, Zap, Loader2, TrendingUp,
   Users, Search, Activity, RefreshCw, FileText,
   MessageSquare, PartyPopper, Building2, Briefcase,
   DollarSign, Lightbulb, ShieldCheck, AlertCircle, XCircle,
@@ -30,8 +30,8 @@ import { cn } from '@/lib/utils';
 
 type Step = 'welcome' | 'linkedin' | 'gmail' | 'calendar' | 'business' | 'icp' | 'review' | 'launch';
 
-const stepOrder: Step[] = ['welcome', 'linkedin', 'gmail', 'calendar', 'business', 'icp', 'review', 'launch'];
-const stepLabels = ['Welcome', 'LinkedIn', 'Gmail', 'Calendar', 'Your Business', 'Ideal Customer', 'AI Review', 'Launch'];
+const stepOrder: Step[] = ['welcome', 'linkedin', 'business', 'icp', 'review', 'launch'];
+const stepLabels = ['Welcome', 'LinkedIn', 'Your Business', 'Ideal Customer', 'AI Review', 'Launch'];
 
 const RESEARCH_STAGES = [
   { label: 'Reading your website...', icon: Globe },
@@ -71,12 +71,14 @@ export function OnboardingPage() {
   const [businessProfile, setBusinessProfile] = useState<BusinessProfile | null>(null);
   const [icps, setIcps] = useState<ICPRecommendation[]>([]);
   const [selectedIcp, setSelectedIcp] = useState<string | null>(null);
-  const [goal, setGoal] = useState('book_meetings');
-  const [channels, setChannels] = useState({ linkedin: true, email: true });
+  const [goal] = useState('book_meetings');
+  const [channels] = useState({ linkedin: true, email: true });
   const [progress, setProgress] = useState<ActivationProgress[]>([]);
   const [editing, setEditing] = useState<Record<string, string>>({});
   const [linkedinAccountId, setLinkedinAccountId] = useState<string | null>(null);
   const [linkedinQueueItemId, setLinkedinQueueItemId] = useState<string | null>(null);
+  const [linkedinUsername, setLinkedinUsername] = useState('');
+  const [linkedinPassword, setLinkedinPassword] = useState('');
   const [linkedinAttemptTimeoutStage, setLinkedinAttemptTimeoutStage] = useState<'worker_claim' | 'existing_session_check' | 'auth_surface_preparation' | null>(null);
   const linkedinAttemptTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const linkedinWatchdogPhaseRef = useRef<'worker_claim' | 'existing_session_check' | 'auth_surface_preparation' | null>(null);
@@ -231,8 +233,6 @@ export function OnboardingPage() {
       return () => clearInterval(interval);
     }
   }, [loading, step]);
-
-  const currentIdx = stepOrder.indexOf(step);
 
   const handleBusinessSubmit = async () => {
     if (!website.trim()) {
@@ -459,7 +459,11 @@ export function OnboardingPage() {
 
           {/* STEP 2: LINKEDIN — Real browser-based connection */}
           {step === 'linkedin' && (
-            <><GoogleConnectStep
+            <><div className="mx-auto mb-5 max-w-md space-y-3">
+              <div><Label>LinkedIn email or phone</Label><Input value={linkedinUsername} onChange={(event) => setLinkedinUsername(event.target.value)} autoComplete="username" /></div>
+              <div><Label>Password</Label><Input type="password" value={linkedinPassword} onChange={(event) => setLinkedinPassword(event.target.value)} autoComplete="current-password" /></div>
+              <p className="text-xs text-ink-500">Encrypted immediately. Yuktris uses it only for LinkedIn authentication and never returns it to your browser.</p>
+            </div><GoogleConnectStep
               icon={Linkedin}
               iconColor="text-[#0A66C2]"
               iconBg="bg-[#0A66C2]/10"
@@ -502,12 +506,12 @@ export function OnboardingPage() {
                   setStep('business');
                   return;
                 }
-                const email = prompt('Enter your LinkedIn email (optional), or leave blank to continue:');
-                if (email === null) return;
+                if (!linkedinUsername.trim() || !linkedinPassword) { toast.error('Enter your LinkedIn email or phone and password.'); return; }
                 connectLinkedIn.mutate(
-                  { linkedinEmail: email.trim() || undefined },
+                  { username: linkedinUsername.trim(), password: linkedinPassword },
                   {
                     onSuccess: ({ accountId, queueItemId }) => {
+                      setLinkedinPassword('');
                       setLinkedinAttemptTimeoutStage(null);
                       linkedinWatchdogPhaseRef.current = 'worker_claim';
                       if (linkedinAttemptTimerRef.current) clearTimeout(linkedinAttemptTimerRef.current);
@@ -527,10 +531,12 @@ export function OnboardingPage() {
                 console.info('[linkedin-queue-timing]', { stage: 'Q0_connect_clicked', reconnect: true, timestamp: new Date().toISOString() });
                 linkedinCompletionHandledRef.current = false;
                 if (!linkedinAccountId) return;
+                if (!linkedinUsername.trim() || !linkedinPassword) { toast.error('Enter your updated LinkedIn credentials.'); return; }
                 connectLinkedIn.mutate(
-                  { existingAccountId: linkedinAccountId },
+                  { username: linkedinUsername.trim(), password: linkedinPassword, existingAccountId: linkedinAccountId },
                   {
                     onSuccess: ({ accountId, queueItemId }) => {
+                      setLinkedinPassword('');
                       setLinkedinAttemptTimeoutStage(null);
                       linkedinWatchdogPhaseRef.current = 'worker_claim';
                       if (linkedinAttemptTimerRef.current) clearTimeout(linkedinAttemptTimerRef.current);
@@ -546,7 +552,7 @@ export function OnboardingPage() {
               onNext={goNext}
             />
             <SecureLinkedInAuthModal
-              open={!!linkedinAccountId && !linkedinConnected && !linkedinFailed && !linkedinExpired && (linkedinAuthRequired || linkedinIdentityVerified)}
+              open={!!linkedinAccountId && !linkedinConnected && !linkedinFailed && !linkedinExpired && (!!linkedinChallenge || linkedinIdentityVerified)}
               loginUrl={linkedinLoginAccess.data?.loginUrl ?? null}
               identityVerified={linkedinIdentityVerified}
               queueItemId={linkedinQueueItemId}
@@ -1031,7 +1037,7 @@ function GoogleConnectStep({ icon: Icon, iconColor, iconBg, title, description, 
 // without real OAuth (LinkedIn)
 // ============================================================
 
-function ComingSoonStep({ icon: Icon, iconColor, iconBg, title, description, benefits, onBack, onNext }: {
+function _ComingSoonStep({ icon: Icon, iconColor, iconBg, title, description, benefits, onBack, onNext }: {
   icon: React.ComponentType<{ className?: string }>;
   iconColor: string;
   iconBg: string;

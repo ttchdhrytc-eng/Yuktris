@@ -2,7 +2,7 @@ import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { logger } from './logger.js';
 import { Queue, QueueItem } from './queue.js';
 import { LinkedInBrowser, SessionData, ProgressStep, ProgressCallback, IntendedLinkedInIdentity } from './linkedin.js';
-import { encrypt, decrypt, getKeyId } from './session.js';
+import { encrypt, decrypt, decryptLinkedInCredential, getKeyId } from './session.js';
 import { browserbase, BrowserbaseError } from './browserbase.js';
 import { createHash } from 'node:crypto';
 import { ContextLeaseOwner, ContextRecord, LinkedInContextService, persistentContextsEnabled, sessionOptionsForAccount } from './linkedin-context.js';
@@ -21,6 +21,7 @@ export class Worker {
   private workerName: string;
   private region: string;
   private encryptionSecret: string;
+  private credentialEncryptionSecret: string;
   private queue: Queue;
   private linkedin: LinkedInBrowser;
   private linkedinContexts: LinkedInContextService;
@@ -35,15 +36,18 @@ export class Worker {
     const supabaseUrl = process.env.SUPABASE_URL;
     const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
     const encKey = process.env.LINKEDIN_SESSION_ENCRYPTION_KEY;
+    const credentialKey = process.env.LINKEDIN_CREDENTIAL_ENCRYPTION_KEY;
 
     if (!supabaseUrl || !serviceKey) throw new Error('Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY');
     if (!encKey) throw new Error('Missing LINKEDIN_SESSION_ENCRYPTION_KEY — generate with: openssl rand -base64 32');
 
+    if (!credentialKey || credentialKey.length < 32) throw new Error('Missing or invalid LINKEDIN_CREDENTIAL_ENCRYPTION_KEY');
     this.client = createClient(supabaseUrl, serviceKey, { auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false } });
     this.workerId = process.env.WORKER_ID || crypto.randomUUID();
     this.workerName = `linkedin-worker-${this.workerId}`;
     this.region = process.env.WORKER_REGION || 'local';
     this.encryptionSecret = encKey;
+    this.credentialEncryptionSecret = credentialKey;
 
     this.queue = new Queue(this.client, this.workerId, POLL_INTERVAL);
     this.linkedin = new LinkedInBrowser(this.client, true, this.encryptionSecret);
@@ -66,6 +70,7 @@ export class Worker {
       SUPABASE_URL_set: !!process.env.SUPABASE_URL,
       SUPABASE_SERVICE_ROLE_KEY_set: !!process.env.SUPABASE_SERVICE_ROLE_KEY,
       LINKEDIN_SESSION_ENCRYPTION_KEY_set: !!process.env.LINKEDIN_SESSION_ENCRYPTION_KEY,
+      LINKEDIN_CREDENTIAL_ENCRYPTION_KEY_set: !!process.env.LINKEDIN_CREDENTIAL_ENCRYPTION_KEY,
       BROWSERBASE_API_KEY_set: !!process.env.BROWSERBASE_API_KEY,
       BROWSERBASE_PROJECT_ID_set: !!process.env.BROWSERBASE_PROJECT_ID,
       WORKER_ID: this.workerId,
@@ -376,6 +381,30 @@ export class Worker {
 
   // ── State Machine: IDLE → CREATING_SESSION → SESSION_CREATED → CONNECTING_BROWSER → CONNECTED → OPENING_LINKEDIN → READY_FOR_LOGIN → AUTHENTICATED → FAILED
 
+  private async claimCredentials(item: QueueItem): Promise<{ username: string; password: string } | null> {
+    if (!item.account_id) return null;
+    const { data, error } = await this.client.rpc('claim_linkedin_credentials_for_login', {
+      p_workspace_id: item.workspace_id, p_account_id: item.account_id, p_queue_item_id: item.id,
+      p_worker_id: this.workerId, p_attempt_id: item.attempt_id,
+    });
+    if (error) throw new Error(`LinkedIn credentials unavailable: ${error.message}`);
+    const row = Array.isArray(data) ? data[0] : data;
+    if (!row) return null;
+    return {
+      username: decryptLinkedInCredential(row.encrypted_username, this.credentialEncryptionSecret, row.encryption_version),
+      password: decryptLinkedInCredential(row.encrypted_password, this.credentialEncryptionSecret, row.encryption_version),
+    };
+  }
+
+  private async markCredentialResult(item: QueueItem, success: boolean, invalid = false): Promise<void> {
+    if (!item.account_id) return;
+    const { error } = await this.client.rpc('mark_linkedin_credentials_result', {
+      p_workspace_id: item.workspace_id, p_account_id: item.account_id, p_queue_item_id: item.id,
+      p_worker_id: this.workerId, p_attempt_id: item.attempt_id, p_success: success, p_invalid: invalid,
+    });
+    if (error) logger.warn('Unable to update LinkedIn credential status', { account_id: item.account_id, success, invalid });
+  }
+
   private async handleConnect(item: QueueItem, startTime: number): Promise<void> {
     const workspaceId = item.workspace_id;
     const accountId = item.account_id;
@@ -552,21 +581,39 @@ export class Worker {
           await onProgress('existing_session_authenticated', 'Existing LinkedIn connection verified.');
         }
       } else {
-        await onProgress('auth_required', 'LinkedIn sign-in is required to continue.', { lifecycle_stage: 'L0_auth_required' });
+        await onProgress('auth_required', 'LinkedIn sign-in is required. Yuktris is preparing automatic authentication.', { lifecycle_stage: 'L0_auth_required' });
         await this.updateAccount(accountId, { browserbase_session_id: bbSessionId, browser_connected_at: new Date().toISOString() });
-        result = await this.linkedin.connect(
-          INTERACTIVE_AUTH_TIMEOUT_MS, onProgress, workspaceId, accountId, item.id, intendedIdentity, preflight.preserveCurrentPage, true,
-        );
+        let credentials = await this.claimCredentials(item);
+        if (!credentials) throw new Error('LinkedIn credentials are not configured or automatic login is rate limited');
+        try {
+          result = await this.linkedin.connect(
+            INTERACTIVE_AUTH_TIMEOUT_MS, onProgress, workspaceId, accountId, item.id, intendedIdentity,
+            preflight.preserveCurrentPage, true, credentials,
+          );
+        } finally {
+          credentials.username = '';
+          credentials.password = '';
+          credentials = null as unknown as { username: string; password: string };
+        }
       }
     } else {
-      await onProgress('auth_required', 'LinkedIn sign-in is required to continue.', { lifecycle_stage: 'L0_auth_required' });
+      await onProgress('auth_required', 'LinkedIn sign-in is required. Yuktris is preparing automatic authentication.', { lifecycle_stage: 'L0_auth_required' });
       await this.updateAccount(accountId, { browserbase_session_id: bbSessionId, browser_connected_at: new Date().toISOString() });
-      result = await this.linkedin.connect(INTERACTIVE_AUTH_TIMEOUT_MS, onProgress, workspaceId, accountId, item.id, intendedIdentity, preserveRestoredPage, false);
+      let credentials = await this.claimCredentials(item);
+      if (!credentials) throw new Error('LinkedIn credentials are not configured or automatic login is rate limited');
+      try {
+        result = await this.linkedin.connect(INTERACTIVE_AUTH_TIMEOUT_MS, onProgress, workspaceId, accountId, item.id, intendedIdentity, preserveRestoredPage, false, credentials);
+      } finally {
+        credentials.username = '';
+        credentials.password = '';
+        credentials = null as unknown as { username: string; password: string };
+      }
     }
 
     logger.info('handleConnect: linkedin.connect() returned', { account_id: accountId, success: result.success, requiresAction: result.requiresAction, error: result.error });
 
     if (!result.success) {
+      await this.markCredentialResult(item, false, result.errorCode === 'invalid_credentials');
       if (result.errorCode === 'identity_resolution_pending' && result.authState === 'authenticated' && result.session) {
         const pendingError = result.error || 'LinkedIn identity verification is pending.';
         const sessionId = await this.saveSession(workspaceId, accountId, result.session);
@@ -678,6 +725,7 @@ export class Worker {
       profile_url: effectiveProfileUrl, profile_name: result.identity?.profileName,
       profile_headline: result.identity?.profileHeadline,
     });
+    await this.markCredentialResult(item, true);
     logPostAuthStage('durable_account_connected');
     if (usePersistentContext) logPersistentFastPath('P8_durable_connected');
 
@@ -717,9 +765,25 @@ export class Worker {
       const intendedIdentity = await this.loadIntendedIdentity(accountId, item.workspace_id);
       const context = await this.openPersistentContextForTask(item);
       const browserbaseSessionId = this.linkedin.getSessionId();
-      const result = await this.linkedin.verifyPersistentAuthentication(intendedIdentity);
+      let result = await this.linkedin.verifyPersistentAuthentication(intendedIdentity);
+      if (!result.success && result.authState === 'unauthenticated') {
+        let credentials = await this.claimCredentials(item);
+        if (credentials) {
+          try {
+            result = await this.linkedin.connect(
+              INTERACTIVE_AUTH_TIMEOUT_MS, this.makeProgressCallback(item.workspace_id, accountId, item.id),
+              item.workspace_id, accountId, item.id, intendedIdentity, true, true, credentials,
+            );
+          } finally {
+            credentials.username = '';
+            credentials.password = '';
+            credentials = null as unknown as { username: string; password: string };
+          }
+        }
+      }
       await this.synchronizePersistentContext(context, browserbaseSessionId);
       if (result.success) {
+        await this.markCredentialResult(item, true);
         await this.updateAccount(accountId, {
           connection_state: 'connected', session_status: 'connected', status: 'active',
           last_validated_at: new Date().toISOString(), last_error: null,
@@ -728,6 +792,7 @@ export class Worker {
         await this.logSessionEvent(item.workspace_id, accountId, 'validated', { test: true, persistent_context: true });
         await this.queue.complete(item.id, { healthy: true, identity: result.identity, persistent_context: true }, Date.now() - startTime);
       } else {
+        await this.markCredentialResult(item, false, result.errorCode === 'invalid_credentials');
         const checkpoint = result.errorCode === 'checkpoint_required';
         await this.updateAccount(accountId, { connection_state: checkpoint ? 'requires_action' : 'session_expired', last_error: result.error });
         logger.info(checkpoint ? 'linkedin_checkpoint_required' : 'linkedin_reauth_required', {

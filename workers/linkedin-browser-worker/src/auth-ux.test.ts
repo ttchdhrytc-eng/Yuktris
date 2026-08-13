@@ -81,7 +81,7 @@ const tests: Array<[string, () => void]> = [
   }],
   ['healthy connected accounts do not expose a modal and expired accounts reconnect in place', () => {
     assert.match(onboarding, /!linkedinConnected && !linkedinFailed && !linkedinExpired/);
-    assert.match(accounts, /existingAccountId: acc\.id/);
+    assert.match(accounts, /setCredentialAccountId\(acc\.id\)/);
     assert.match(onboarding, /existingAccountId: linkedinAccountId/);
     assert.doesNotMatch(automation, /'connecting_browser', 'connected'/);
   }],

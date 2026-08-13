@@ -219,6 +219,11 @@ export interface ExistingSessionCheck {
   preserveCurrentPage: boolean;
 }
 
+export interface LinkedInLoginCredentials {
+  username: string;
+  password: string;
+}
+
 interface CurrentAttemptAuthenticationProof {
   queueItemId?: string;
   accountId?: string;
@@ -669,6 +674,18 @@ export class LinkedInBrowser {
 
   // ── CONNECTION FLOW: open LinkedIn → wait for auth → verify ────
 
+  private async submitLinkedInCredentials(credentials: LinkedInLoginCredentials): Promise<void> {
+    if (!this.page) throw new Error('LinkedIn login page is unavailable');
+    const username = this.page.locator('input[name="session_key"], input#username, input[autocomplete="username"]').first();
+    const password = this.page.locator('input[name="session_password"], input#password, input[type="password"]').first();
+    await username.waitFor({ state: 'visible', timeout: 10_000 });
+    await password.waitFor({ state: 'visible', timeout: 10_000 });
+    await username.fill(credentials.username);
+    await password.fill(credentials.password);
+    await this.page.locator('button[type="submit"], button[data-litms-control-urn*="login-submit"]').first().click({ timeout: 10_000 });
+    logger.info('LinkedIn credential login submitted', { credentials_decryption_attempted: true });
+  }
+
   async connect(
     timeoutMs: number,
     onProgress?: ProgressCallback,
@@ -678,6 +695,7 @@ export class LinkedInBrowser {
     intendedIdentity?: IntendedLinkedInIdentity,
     preserveCurrentPage = false,
     allowBoundIdentityDeferral = false,
+    credentials?: LinkedInLoginCredentials,
   ): Promise<ConnectionResult> {
     if (!this.page) throw new Error('No page — call newContext() first');
     let flowState: LoginFlowState = 'idle';
@@ -705,12 +723,14 @@ export class LinkedInBrowser {
       transition('opening_browser');
       if (!preserveCurrentPage) await this.openLinkedIn(onProgress);
 
+      if (credentials) await this.submitLinkedInCredentials(credentials);
+
       // ── Refresh Live URL after navigation ───────────────────────
       // After page.goto() navigates to LinkedIn, fetch the updated debug URL
       // from Browserbase so the frontend's "Open Browser" button opens the
       // live debugger view showing the actual LinkedIn page, not about:blank.
       logger.info('LinkedIn auth lifecycle', { lifecycle_stage: 'L2_debugger_authorization_requested' });
-      const refreshedLiveUrl = await this.refreshLiveUrl();
+      const refreshedLiveUrl = credentials ? null : await this.refreshLiveUrl();
       if (refreshedLiveUrl && onProgress) {
         await onProgress('auth_surface_ready', 'Secure LinkedIn sign-in is ready.', {
           lifecycle_stage: 'L3_auth_surface_ready',
@@ -722,7 +742,9 @@ export class LinkedInBrowser {
 
       // ── Wait for authentication ────────────────────────────────
       transition('waiting_for_login');
-      if (onProgress) await onProgress('waiting_for_login', 'Waiting for login. Complete LinkedIn sign-in in the browser window...');
+      if (onProgress) await onProgress('waiting_for_login', credentials
+        ? 'Signing in to LinkedIn securely...'
+        : 'Waiting for login. Complete LinkedIn sign-in in the browser window...');
       const authResult = await this.waitForAuthenticationWithChallenges(
         timeoutMs, onProgress, workspaceId, accountId, queueItemId,
         (state) => {
@@ -740,7 +762,7 @@ export class LinkedInBrowser {
       if (!authResult.authenticated) {
         transition('failed');
         if (authResult.failure) {
-          return { success: false, error: authResult.failure, nonRetryable: true, challengeType: authResult.challenge?.type };
+          return { success: false, error: authResult.failure, errorCode: authResult.failureCode, nonRetryable: true, challengeType: authResult.challenge?.type };
         }
         if (onProgress) await onProgress('login_timeout', 'LinkedIn authentication not completed within timeout.');
         const challengeSuffix = authResult.challenge ? ' Additional verification was not completed in the secure browser.' : '';
@@ -1161,7 +1183,7 @@ export class LinkedInBrowser {
     accountId?: string,
     queueItemId?: string,
     onFlowState?: (state: 'waiting_for_login' | 'challenge_detected' | 'waiting_for_user') => void,
-  ): Promise<{ authenticated: boolean; challenge: ChallengeInfo | null; cancelled: boolean; failure?: string }> {
+  ): Promise<{ authenticated: boolean; challenge: ChallengeInfo | null; cancelled: boolean; failure?: string; failureCode?: string }> {
     if (!this.page) return { authenticated: false, challenge: null, cancelled: false, failure: 'Secure LinkedIn browser page is unavailable' };
 
     const startedAt = Date.now();
@@ -1255,6 +1277,8 @@ export class LinkedInBrowser {
           invalidCredentialsReported = true;
           await onProgress('invalid_credentials', 'LinkedIn reported that the sign-in details were not accepted. Check them directly in the secure LinkedIn browser and try again.');
         }
+        return { authenticated: false, challenge: activeChallenge, cancelled: false,
+          failure: 'LinkedIn rejected the configured credentials.', failureCode: 'invalid_credentials' };
       } else if (!assessment.signals.includes('invalid_credentials')) {
         invalidCredentialsReported = false;
       }
@@ -1339,6 +1363,11 @@ export class LinkedInBrowser {
           if (isNewChallenge) {
             onFlowState?.('challenge_detected');
             if (onProgress) {
+              const challengeLiveUrl = await this.refreshLiveUrl();
+              if (challengeLiveUrl) await onProgress('auth_surface_ready', 'LinkedIn verification is ready in the secure browser.', {
+                browserbase_session_id: this.getSessionId(), browserbase_live_url: challengeLiveUrl,
+                challenge_type: challenge.type,
+              });
               await onProgress('challenge_detected', `LinkedIn verification required: ${challenge.description}`, {
                 challenge_type: challenge.type,
                 challenge_deadline: challengeDeadline ? new Date(challengeDeadline).toISOString() : null,

@@ -43,7 +43,7 @@ const tests: Array<[string, () => void]> = [
     assert.match(hook, /browser_execution_queue[\s\S]*\.eq\('id', result\.queue_item_id\)[\s\S]*action_type !== 'linkedin_connect'/);
   }],
   ['enqueue has a bounded abort and failure cannot leave checking active', () => {
-    assert.match(hook, /AbortController[\s\S]*12_000[\s\S]*abortSignal/);
+    assert.match(hook, /Promise\.race[\s\S]*12_000/);
     assert.match(onboarding, /linkedinAttemptTimeoutStage[\s\S]*'worker_claim'[\s\S]*15_000/);
     assert.match(onboarding, /linkedinWaiting = [^\n]*activeLinkedinQueue[^\n]*!linkedinAttemptTimeoutStage/);
   }],

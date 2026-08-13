@@ -124,7 +124,7 @@ export function useConnectLinkedIn() {
   const { workspace } = useWorkspace();
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: async (params: { linkedinEmail?: string; displayName?: string; existingAccountId?: string }) => {
+    mutationFn: async (params: { username: string; password: string; existingAccountId?: string }) => {
       if (!workspace) throw new Error('No workspace');
       const idempotencyKey = crypto.randomUUID();
       const startedAt = performance.now();
@@ -133,17 +133,13 @@ export function useConnectLinkedIn() {
         supabaseHost: new URL(import.meta.env.VITE_SUPABASE_URL).hostname,
         timestamp: new Date().toISOString(),
       });
-      const controller = new AbortController();
-      const timeout = window.setTimeout(() => controller.abort(), 12_000);
-      const { data, error } = await supabase.rpc('start_linkedin_connection', {
-        p_workspace_id: workspace.id,
-        p_linkedin_email: params.linkedinEmail?.trim() || null,
-        p_display_name: params.displayName ?? null,
-        p_expected_profile_url: null,
-        p_existing_account_id: params.existingAccountId ?? null,
-        p_idempotency_key: idempotencyKey,
-      }).abortSignal(controller.signal);
-      window.clearTimeout(timeout);
+      const { data, error } = await Promise.race([
+        supabase.functions.invoke('linkedin-credentials', {
+          body: { workspace_id: workspace.id, username: params.username, password: params.password,
+            existing_account_id: params.existingAccountId ?? null, idempotency_key: idempotencyKey },
+        }),
+        new Promise<never>((_, reject) => window.setTimeout(() => reject(new Error('LinkedIn connection initialization timed out')), 12_000)),
+      ]);
       if (error) throw error;
       const result = Array.isArray(data) ? data[0] : data;
       if (!result?.account_id || !result?.queue_item_id) {

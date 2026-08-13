@@ -98,6 +98,7 @@ interface AccountRow {
 export function LinkedInAccountsPage() {
   const { workspace } = useWorkspace();
   const [showConnect, setShowConnect] = useState(false);
+  const [credentialAccountId, setCredentialAccountId] = useState<string | null>(null);
   const [confirmDisconnect, setConfirmDisconnect] = useState<AccountRow | null>(null);
   const [authAccountId, setAuthAccountId] = useState<string | null>(null);
   const [authQueueItemId, setAuthQueueItemId] = useState<string | null>(null);
@@ -288,13 +289,7 @@ export function LinkedInAccountsPage() {
                     {(state === 'disconnected' || state === 'session_expired' || state === 'session_invalid' || state === 'failed' || state === 'cancelled') && (
                       <>
                         <button
-                          onClick={() => connect.mutate(
-                            { existingAccountId: acc.id },
-                            { onSuccess: (result) => {
-                              setAuthAccountId(result.accountId);
-                              setAuthQueueItemId(result.queueItemId);
-                            } }
-                          )}
+                          onClick={() => { setCredentialAccountId(acc.id); setShowConnect(true); }}
                           disabled={connect.isPending}
                           className="flex items-center gap-1.5 rounded-lg bg-gradient-to-r from-gold-400 to-gold-300 px-2.5 py-1.5 text-xs font-medium text-maroon-950 hover:bg-brand-300/20 transition-colors"
                         >
@@ -342,11 +337,11 @@ export function LinkedInAccountsPage() {
 
       {showConnect && (
         <ConnectLinkedInModal
-          onClose={() => setShowConnect(false)}
+          onClose={() => { setShowConnect(false); setCredentialAccountId(null); }}
           onConnect={(params) => {
-            connect.mutate(params, {
+            connect.mutate({ ...params, existingAccountId: credentialAccountId ?? undefined }, {
               onSuccess: (result) => {
-                setShowConnect(false);
+                setShowConnect(false); setCredentialAccountId(null);
                 if (result?.accountId) {
                   setAuthAccountId(result.accountId);
                   setAuthQueueItemId(result.queueItemId);
@@ -480,9 +475,6 @@ function AccountAuthModal({ accountId, queueItemId, onClose }: { accountId: stri
   const identityVerified = interactions?.some(
     (event) => event.queue_item_id === currentQueueItemId && event.interaction_type === 'progress' && event.step === 'identity_verified' && event.status === 'completed'
   ) ?? false;
-  const authRequired = interactions?.some(
-    (event) => event.queue_item_id === currentQueueItemId && event.interaction_type === 'progress' && event.step === 'auth_required' && event.status === 'completed'
-  ) ?? false;
   const securityCheckRequired = interactions?.some(
     (event) => event.queue_item_id === currentQueueItemId && event.interaction_type === 'challenge' && event.status === 'pending'
   ) ?? false;
@@ -493,7 +485,7 @@ function AccountAuthModal({ accountId, queueItemId, onClose }: { accountId: stri
 
   return (
     <SecureLinkedInAuthModal
-      open={authRequired || identityVerified}
+      open={securityCheckRequired || identityVerified}
       loginUrl={loginAccess?.loginUrl ?? null}
       identityVerified={identityVerified}
       securityCheckRequired={securityCheckRequired}
@@ -545,25 +537,25 @@ function ChallengeNotification({ event, onResolved }: { event: LinkedInAuthInter
 
 function ConnectLinkedInModal({ onClose, onConnect, isConnecting }: {
   onClose: () => void;
-  onConnect: (params: { linkedinEmail?: string; displayName?: string }) => void;
+  onConnect: (params: { username: string; password: string }) => void;
   isConnecting: boolean;
 }) {
   const [email, setEmail] = useState('');
-  const [displayName, setDisplayName] = useState('');
+  const [password, setPassword] = useState('');
 
   return (
-    <Modal open onClose={onClose} title="Connect your existing LinkedIn account" description="Sign in directly inside the secure LinkedIn browser. Yuktris never receives your password or verification codes.">
+    <Modal open onClose={onClose} title="Connect your existing LinkedIn account" description="Your credentials are encrypted immediately. Yuktris asks you only when LinkedIn requires human verification.">
       <div className="space-y-4">
         <>
             <div className="rounded-lg bg-brand-300/10 border border-brand-300/20 p-3">
               <div className="flex items-start gap-2">
                 <ShieldCheck className="h-4 w-4 text-brand-300 mt-0.5 flex-shrink-0" />
                 <p className="text-xs text-brand-300 leading-relaxed">
-                  Yuktris does not create LinkedIn accounts. Enter your password, OTP, 2FA code, or CAPTCHA response only inside the secure LinkedIn browser; Yuktris never collects or submits them.
+                  Yuktris encrypts your LinkedIn credentials and never returns them. Enter OTP, 2FA, or CAPTCHA responses only inside the secure browser.
                 </p>
               </div>
             </div>
-            <Field label="LinkedIn email / username (optional)">
+            <Field label="LinkedIn email or phone">
               <input
                 type="email"
                 value={email}
@@ -572,22 +564,24 @@ function ConnectLinkedInModal({ onClose, onConnect, isConnecting }: {
                 className="w-full rounded-lg border border-gold-500/12 bg-maroon-900 px-3 py-2 text-sm text-ink-50 placeholder:text-ink-500 focus:border-brand-500 focus:outline-none"
               />
             </Field>
-            <Field label="Optional display name">
+            <Field label="Password">
               <input
-                value={displayName}
-                onChange={(e) => setDisplayName(e.target.value)}
-                placeholder="e.g. Sales Team Account"
+                type="password"
+                autoComplete="current-password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="LinkedIn password"
                 className="w-full rounded-lg border border-gold-500/12 bg-maroon-900 px-3 py-2 text-sm text-ink-50 placeholder:text-ink-500 focus:border-brand-500 focus:outline-none"
               />
             </Field>
             <div className="flex justify-end gap-2 pt-2">
               <Button variant="ghost" onClick={onClose}>Cancel</Button>
               <Button
-                onClick={() => onConnect({ linkedinEmail: email.trim() || undefined, displayName: displayName || undefined })}
-                disabled={isConnecting}
+                onClick={() => onConnect({ username: email.trim(), password })}
+                disabled={isConnecting || !email.trim() || !password}
               >
                 {isConnecting ? <Spinner className="h-4 w-4" /> : <Zap className="h-4 w-4" />}
-                Continue to LinkedIn
+                Connect LinkedIn
               </Button>
             </div>
         </>
