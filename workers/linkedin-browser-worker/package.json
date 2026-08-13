@@ -23,6 +23,7 @@
     "test:v1-authenticated-reuse": "npm run build && node --test dist/v1-authenticated-reuse.test.js",
     "test:restored-bound-identity": "npm run build && node --test dist/restored-bound-identity-contract.test.js",
     "test:fresh-identity-pending": "npm run build && node --test dist/fresh-identity-pending.test.js",
+    "test:post-auth-capture": "npm run build && node --test dist/post-auth-capture-continuity.test.js",
     "install-browser": "echo 'No local browser needed — using Browserbase'"
   },
   "dependencies": {

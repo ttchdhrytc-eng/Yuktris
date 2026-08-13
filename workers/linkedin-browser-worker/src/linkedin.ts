@@ -185,6 +185,15 @@ export interface ExistingSessionCheck {
   preserveCurrentPage: boolean;
 }
 
+interface CurrentAttemptAuthenticationProof {
+  queueItemId?: string;
+  accountId?: string;
+  browserbaseSessionId: string | null;
+  browser: Browser;
+  context: BrowserContext;
+  authenticationState: 'authenticated';
+}
+
 export class LinkedInBrowser {
   private browser: Browser | null = null;
   private context: BrowserContext | null = null;
@@ -705,6 +714,13 @@ export class LinkedInBrowser {
 
       transition('verifying_authentication');
       if (onProgress) await onProgress('verifying_authentication', 'LinkedIn sign-in detected. Verifying authentication...');
+      if (!this.browser?.isConnected() || !this.context) {
+        throw new Error('Authenticated LinkedIn browser disconnected before identity verification');
+      }
+      const authenticationProof: CurrentAttemptAuthenticationProof = {
+        queueItemId, accountId, browserbaseSessionId: this.bbSession?.id ?? null,
+        browser: this.browser, context: this.context, authenticationState: 'authenticated',
+      };
       logger.info('fresh_authentication_verified', {
         account_id: accountId, browserbase_session_id: this.bbSession?.id ?? null,
         authentication_state: 'authenticated', identity_state: 'unresolved',
@@ -726,7 +742,7 @@ export class LinkedInBrowser {
       });
       if (!identity) {
         transition('capturing_session');
-        const session = await this.captureSession();
+        const session = await this.captureSession(authenticationProof, 'unresolved');
         logger.warn('fresh_identity_pending', {
           account_id: accountId, browserbase_session_id: this.bbSession?.id ?? null,
           authentication_state: 'authenticated', identity_state: 'unresolved',
@@ -756,7 +772,7 @@ export class LinkedInBrowser {
 
       // ── Capture session ────────────────────────────────────────
       transition('capturing_session');
-      const session = await this.captureSession();
+      const session = await this.captureSession(authenticationProof, 'verified');
       const stateCapturedAt = Date.now();
       logger.info('fresh_connect_success', {
         account_id: accountId, browserbase_session_id: this.bbSession?.id ?? null,
@@ -1503,15 +1519,71 @@ export class LinkedInBrowser {
 
   // ── Session Capture & Restore ───────────────────────────────────
 
-  async captureSession(): Promise<SessionData> {
+  async captureSession(
+    authenticationProof?: CurrentAttemptAuthenticationProof,
+    identityState: 'verified' | 'unresolved' = 'verified',
+  ): Promise<SessionData> {
     if (!this.context) throw new Error('No context to capture session from');
+    const currentUrl = this.page?.url() ?? '';
+    const telemetry = {
+      queue_item_id: authenticationProof?.queueItemId,
+      account_id: authenticationProof?.accountId,
+      browserbase_session_id: this.bbSession?.id ?? null,
+      origin: this.safeOrigin(currentUrl),
+      pathname: this.safePathname(currentUrl),
+      playwright_connected: this.browser?.isConnected() === true,
+      context_present: !!this.context,
+      page_present: !!this.page && !this.page.isClosed(),
+      prior_authentication_state: authenticationProof?.authenticationState ?? 'not_provided',
+      identity_state: identityState,
+    };
+    logger.info('post_auth_capture_started', telemetry);
+
+    const proofContinuityValid = !!authenticationProof
+      && this.browser === authenticationProof.browser
+      && this.context === authenticationProof.context
+      && (this.bbSession?.id ?? null) === authenticationProof.browserbaseSessionId
+      && this.browser.isConnected()
+      && !!this.page
+      && !this.page.isClosed();
+    logger.info('post_auth_browserbase_state', {
+      ...telemetry,
+      provider_session_present: !!this.bbSession,
+      provider_session_unchanged: !!authenticationProof
+        && (this.bbSession?.id ?? null) === authenticationProof.browserbaseSessionId,
+    });
+    logger.info('post_auth_playwright_state', { ...telemetry, proof_continuity_valid: proofContinuityValid });
+    logger.info('post_auth_page_state', telemetry);
+
+    if (authenticationProof && !proofContinuityValid) {
+      logger.error('post_auth_capture_failed', { ...telemetry, current_authentication_state: 'unknown', reason: 'authentication_proof_continuity_lost' });
+      throw new Error('Cannot capture LinkedIn session after browser continuity was lost');
+    }
     const assessment = await this.assessAuthentication();
-    if (assessment.state !== 'authenticated') {
+    const cookies = await this.context.cookies();
+    const authenticatedCookiePresent = cookies.some(cookie => cookie.name === 'li_at' && cookie.value.length > 0);
+    logger.info('post_auth_auth_reassessment', {
+      ...telemetry,
+      origin: this.safeOrigin(assessment.url), pathname: this.safePathname(assessment.url),
+      authenticated_cookie_present: authenticatedCookiePresent,
+      current_authentication_state: assessment.state,
+      proof_continuity_valid: proofContinuityValid,
+    });
+    const currentStateAccepted = assessment.state === 'authenticated'
+      || (assessment.state === 'unknown' && proofContinuityValid && authenticatedCookiePresent);
+    if (!currentStateAccepted) {
+      logger.error('post_auth_capture_failed', {
+        ...telemetry, authenticated_cookie_present: authenticatedCookiePresent,
+        current_authentication_state: assessment.state, reason: 'authentication_not_confirmed',
+      });
       throw new Error(`Cannot capture LinkedIn session while authentication state is ${assessment.state}`);
     }
 
-    const cookies = await this.context.cookies();
-    if (!cookies.some(cookie => cookie.name === 'li_at' && cookie.value.length > 0)) {
+    if (!authenticatedCookiePresent) {
+      logger.error('post_auth_capture_failed', {
+        ...telemetry, authenticated_cookie_present: false,
+        current_authentication_state: assessment.state, reason: 'authenticated_cookie_missing',
+      });
       throw new Error('Cannot capture LinkedIn session without an authenticated session cookie');
     }
     const storageState = await this.context.storageState();
@@ -1555,7 +1627,7 @@ export class LinkedInBrowser {
     const browserVersion = this.browser?.version() || null;
     const playwrightVersion = null;
 
-    return {
+    const captured = {
       cookies,
       storageState,
       localStorage,
@@ -1568,6 +1640,11 @@ export class LinkedInBrowser {
       playwrightVersion,
       fingerprint,
     };
+    logger.info('post_auth_capture_completed', {
+      ...telemetry, authenticated_cookie_present: true,
+      current_authentication_state: assessment.state,
+    });
+    return captured;
   }
 
   // ── Validate Session: verify restored session is still authenticated ──
