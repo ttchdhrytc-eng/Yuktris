@@ -137,6 +137,8 @@ export interface ConnectionResult {
   identityState?: 'verified' | 'unresolved' | 'mismatch';
   reuseExistingBrowser?: boolean;
   preserveCurrentPage?: boolean;
+  effectiveProfileUrl?: string;
+  reuseBoundIdentity?: boolean;
 }
 
 export type ProgressStep =
@@ -793,16 +795,18 @@ export class LinkedInBrowser {
       // Authentication usability is not coupled to LinkedIn's /in/me redirect.
       const identity = await this.verifyIdentity(1, undefined, undefined, undefined, FAST_REUSE_IDENTITY_TIMEOUT_MS);
       if (!identity) {
-        const boundProfileUrl = this.normalizeProfileUrl(intendedIdentity?.profileUrl);
+        const boundProfileUrl = intendedIdentity?.profileUrl
+          ? this.canonicalPersonalProfileUrl(intendedIdentity.profileUrl)
+          : null;
         if (boundProfileUrl) {
           logger.warn('Bound LinkedIn account identity remains unresolved after fast verification', {
             authentication_state: 'authenticated', identity_state: 'unresolved',
             canonical_identity_bound: true,
           });
-          await onProgress?.('connected', 'Authenticated LinkedIn session restored. Identity verification remains pending.');
           return {
             success: true,
             identity: { profileUrl: boundProfileUrl, profileName: intendedIdentity?.profileName || null, profileHeadline: null },
+            effectiveProfileUrl: boundProfileUrl, reuseBoundIdentity: true,
             authState: 'authenticated', identityState: 'unresolved',
           };
         }
@@ -813,8 +817,7 @@ export class LinkedInBrowser {
       const identityMismatch = this.getIdentityMismatch(identity, intendedIdentity);
       if (identityMismatch) return { success: false, error: identityMismatch, nonRetryable: true, authState: 'authenticated', identityState: 'mismatch' };
 
-      if (onProgress) await onProgress('connected', 'Session restored successfully.');
-      return { success: true, identity, authState: 'authenticated', identityState: 'verified' };
+      return { success: true, identity, effectiveProfileUrl: identity.profileUrl || undefined, authState: 'authenticated', identityState: 'verified' };
     } catch (err) {
       const msg = this.sanitizeError(err);
       return { success: false, error: msg };

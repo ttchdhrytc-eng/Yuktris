@@ -18,7 +18,10 @@ test('2 critical path performs only one fast identity attempt', () => {
   assert.match(restore, /verifyIdentity\(1,[\s\S]*FAST_REUSE_IDENTITY_TIMEOUT_MS/);
   assert.doesNotMatch(restore, /verifyIdentityWithRetry/);
 });
-test('3 unresolved bound identity remains usable and pending', () => assert.match(restore, /Authenticated LinkedIn session restored\. Identity verification remains pending/));
+test('3 unresolved bound identity remains usable and pending', () => {
+  assert.match(restore, /success: true[\s\S]*identityState: 'unresolved'/);
+  assert.match(worker, /Authenticated LinkedIn session restored\. Identity verification remains pending/);
+});
 test('4 reliable resolved mismatch remains fail closed', () => assert.match(restore, /identityMismatch[\s\S]*nonRetryable: true[\s\S]*identityState: 'mismatch'/));
 test('5 authenticated existing session exposes no Live View', () => {
   const successfulReuse = handler.match(/if \(reuseResult\.success\)[\s\S]*?return;/)?.[0] ?? '';

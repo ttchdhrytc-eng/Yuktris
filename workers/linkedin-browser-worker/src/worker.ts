@@ -424,19 +424,27 @@ export class Worker {
         const reuseResult = await this.linkedin.connectWithSession(existingSession.session, TEST_CONNECTION_TIMEOUT, onProgress, intendedIdentity);
 
         if (reuseResult.success) {
-          await this.bindAuthenticatedIdentity(workspaceId, accountId, reuseResult.identity?.profileUrl);
+          const effectiveProfileUrl = reuseResult.effectiveProfileUrl;
+          if (!effectiveProfileUrl) throw new Error('Successful restored session has no effective trusted LinkedIn profile URL');
+          if (!reuseResult.reuseBoundIdentity) {
+            await this.bindAuthenticatedIdentity(workspaceId, accountId, effectiveProfileUrl);
+          }
           await this.updateAccount(accountId, {
             connection_state: 'connected', session_status: 'connected', status: 'active',
             last_validated_at: new Date().toISOString(), last_login_at: new Date().toISOString(), last_error: null,
-            profile_url: reuseResult.identity?.profileUrl, profile_name: reuseResult.identity?.profileName,
+            profile_url: effectiveProfileUrl, profile_name: reuseResult.identity?.profileName,
             profile_headline: reuseResult.identity?.profileHeadline,
           });
           await this.logSessionEvent(workspaceId, accountId, 'login_success', {
-            profile_url: reuseResult.identity?.profileUrl, profile_name: reuseResult.identity?.profileName, reused: true,
+            profile_url: effectiveProfileUrl, profile_name: reuseResult.identity?.profileName, reused: true,
           });
           await this.linkedin.close();
+          await onProgress('connected', reuseResult.identityState === 'unresolved'
+            ? 'Authenticated LinkedIn session restored. Identity verification remains pending.'
+            : 'LinkedIn connected successfully using the restored session.');
           await this.queue.complete(item.id, {
-            connected: true, reused: true, identity: reuseResult.identity, duration_ms: Date.now() - startTime,
+            connected: true, reused: true, identity: reuseResult.identity,
+            identity_state: reuseResult.identityState, duration_ms: Date.now() - startTime,
           }, Date.now() - startTime);
           logger.info('LinkedIn account connected via session reuse', { account_id: accountId });
           return;
