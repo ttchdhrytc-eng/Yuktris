@@ -1,10 +1,5 @@
-/* Make the normalized meeting fixture/event contract idempotent without external delivery. */
-CREATE UNIQUE INDEX IF NOT EXISTS uq_linkedin_meeting_event_idempotency
-ON public.linkedin_notifications(workspace_id,(event_payload->>'idempotency_key'))
-WHERE notification_type='meeting_booked' AND event_payload ? 'idempotency_key';
-
-DROP FUNCTION IF EXISTS public.emit_linkedin_meeting_booked(uuid,uuid,text,text,uuid,uuid,timestamptz,text,text);
-CREATE FUNCTION public.emit_linkedin_meeting_booked(
+/* Use the supported PostgREST JWT role accessor for the meeting event service call. */
+CREATE OR REPLACE FUNCTION public.emit_linkedin_meeting_booked(
   p_workspace_id uuid, p_account_id uuid, p_prospect text, p_company text DEFAULT NULL,
   p_campaign_id uuid DEFAULT NULL, p_conversation_id uuid DEFAULT NULL,
   p_meeting_time timestamptz DEFAULT NULL, p_meeting_link text DEFAULT NULL,
@@ -31,5 +26,3 @@ BEGIN
       'qualification_summary',nullif(trim(p_qualification_summary),''),'fixture',true))) RETURNING id INTO v_id;
   RETURN v_id;
 END $$;
-REVOKE ALL ON FUNCTION public.emit_linkedin_meeting_booked(uuid,uuid,text,text,uuid,uuid,timestamptz,text,text,text) FROM PUBLIC,anon;
-GRANT EXECUTE ON FUNCTION public.emit_linkedin_meeting_booked(uuid,uuid,text,text,uuid,uuid,timestamptz,text,text,text) TO authenticated,service_role;
