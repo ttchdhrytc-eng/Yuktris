@@ -1034,14 +1034,18 @@ export class Worker {
           }
           await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
           if (item.action_type === 'read_profile') {
-            await page.locator('main h1, h1, meta[property="og:title"]').first().waitFor({ state: 'attached', timeout: 8000 }).catch(() => {});
+            await page.waitForFunction(() => {
+              const candidate = document.querySelector('main h1, h1.text-heading-xlarge, .pv-text-details__left-panel h1');
+              return !!candidate?.textContent?.trim();
+            }, undefined, { timeout: 10000 }).catch(() => {});
             const profile = await page.evaluate(() => {
               const text = (selectors: string[]) => selectors.map(selector => {
                 const element = document.querySelector(selector);
                 if (element instanceof HTMLMetaElement) return element.content.trim() || null;
                 return element?.textContent?.replace(/\s+/g, ' ').trim() || null;
               }).find(Boolean) ?? null;
-              const name = text(['main h1', '.pv-text-details__left-panel h1', 'h1', 'meta[property="og:title"]']);
+              const name = text(['main h1', 'h1.text-heading-xlarge', '.pv-text-details__left-panel h1', 'h1', 'meta[property="og:title"]'])
+                ?? (document.title.replace(/\s*\|\s*LinkedIn\s*$/i, '').trim() || null);
               const headline = text(['main .text-body-medium.break-words', '.pv-text-details__left-panel .text-body-medium', 'meta[property="og:description"]']);
               const locationText = text(['main .text-body-small.inline.t-black--light.break-words', '.pv-text-details__left-panel span.text-body-small.inline', '[data-generated-suggestion-target*="location"]']);
               return {
@@ -1050,6 +1054,10 @@ export class Worker {
                 location: locationText,
                 canonical_url: document.querySelector<HTMLLinkElement>('link[rel="canonical"]')?.href || location.href,
               };
+            });
+            logger.info('linkedin_profile_extracted', {
+              queue_item_id: item.id, name_present: !!profile.name, headline_present: !!profile.headline,
+              location_present: !!profile.location, canonical_url_present: !!profile.canonical_url,
             });
             result = { success: true, data: { result_code: 'success', profile } };
           } else {
