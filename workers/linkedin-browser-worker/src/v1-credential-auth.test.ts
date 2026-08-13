@@ -45,6 +45,18 @@ test('authenticated Context bypasses decryption while logged-out Context uses cr
   assert.match(linkedin, /submitLinkedInCredentials/);
 });
 
+test('authenticated and challenge states never autofill credentials', () => {
+  assert.match(linkedin, /initialAssessment\.state !== 'authenticated' && initialAssessment\.state !== 'checkpoint'/);
+  assert.match(linkedin, /loginAssessment\.state !== 'authenticated' && loginAssessment\.state !== 'checkpoint'/);
+  assert.match(linkedin, /if \(credentials && loginAssessment[\s\S]*submitLinkedInCredentials/);
+});
+
+test('raw locator errors cannot reach frontend-visible task errors', () => {
+  assert.match(linkedin, /diagnostic_code: diagnosticCode/);
+  assert.match(linkedin, /throw new Error\('LinkedIn sign-in form was unavailable\. Please try again\.'\)/);
+  assert.doesNotMatch(linkedin, /throw new Error\(`locator\./);
+});
+
 test('invalid credentials fail distinctly and challenges expose Live View conditionally', () => {
   assert.match(linkedin, /failureCode: 'invalid_credentials'/);
   assert.match(worker, /result\.errorCode === 'invalid_credentials'/);

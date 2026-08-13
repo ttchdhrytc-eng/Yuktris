@@ -1,4 +1,4 @@
-import { chromium, Browser, BrowserContext, Page } from 'playwright';
+import { chromium, Browser, BrowserContext, Locator, Page } from 'playwright';
 import { SupabaseClient } from '@supabase/supabase-js';
 import { logger } from './logger.js';
 import { browserbase, BrowserbaseError, BrowserbaseSession, CreateSessionOptions } from './browserbase.js';
@@ -222,6 +222,29 @@ export interface ExistingSessionCheck {
 export interface LinkedInLoginCredentials {
   username: string;
   password: string;
+}
+
+type InteractiveLocatorPage = Pick<Page, 'locator'>;
+
+export async function resolveFirstInteractiveLocator(
+  page: InteractiveLocatorPage,
+  selectors: readonly string[],
+  options: { editable?: boolean; timeoutMs?: number } = {},
+): Promise<Locator | null> {
+  const deadline = Date.now() + (options.timeoutMs ?? 10_000);
+  do {
+    for (const selector of selectors) {
+      const candidates = await page.locator(selector).all();
+      for (const candidate of candidates) {
+        if (!await candidate.isVisible().catch(() => false)) continue;
+        if (!await candidate.isEnabled().catch(() => false)) continue;
+        if (options.editable && !await candidate.isEditable().catch(() => false)) continue;
+        return candidate;
+      }
+    }
+    if (Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 100));
+  } while (Date.now() < deadline);
+  return null;
 }
 
 interface CurrentAttemptAuthenticationProof {
@@ -676,14 +699,29 @@ export class LinkedInBrowser {
 
   private async submitLinkedInCredentials(credentials: LinkedInLoginCredentials): Promise<void> {
     if (!this.page) throw new Error('LinkedIn login page is unavailable');
-    const username = this.page.locator('input[name="session_key"], input#username, input[autocomplete="username"]').first();
-    const password = this.page.locator('input[name="session_password"], input#password, input[type="password"]').first();
-    await username.waitFor({ state: 'visible', timeout: 10_000 });
-    await password.waitFor({ state: 'visible', timeout: 10_000 });
-    await username.fill(credentials.username);
-    await password.fill(credentials.password);
-    await this.page.locator('button[type="submit"], button[data-litms-control-urn*="login-submit"]').first().click({ timeout: 10_000 });
-    logger.info('LinkedIn credential login submitted', { credentials_decryption_attempted: true });
+    try {
+      const username = await resolveFirstInteractiveLocator(this.page, [
+        '#username', 'input[name="session_key"]', 'input[autocomplete="username"]',
+      ], { editable: true });
+      if (!username) throw new Error('username_control_unavailable');
+      const password = await resolveFirstInteractiveLocator(this.page, [
+        '#password', 'input[name="session_password"]', 'input[type="password"]', 'input[autocomplete="current-password"]',
+      ], { editable: true });
+      if (!password) throw new Error('password_control_unavailable');
+      const submit = await resolveFirstInteractiveLocator(this.page, [
+        'button[type="submit"]', 'button:has-text("Sign in")', 'button[data-litms-control-urn*="login-submit"]',
+      ]);
+      if (!submit) throw new Error('submit_control_unavailable');
+      await username.fill(credentials.username);
+      await password.fill(credentials.password);
+      await submit.click({ timeout: 10_000 });
+      logger.info('LinkedIn credential login submitted', { credentials_decryption_attempted: true });
+    } catch (error) {
+      const diagnosticCode = error instanceof Error && /^[a-z_]+$/.test(error.message)
+        ? error.message : 'credential_form_interaction_failed';
+      logger.warn('LinkedIn credential form interaction failed', { diagnostic_code: diagnosticCode });
+      throw new Error('LinkedIn sign-in form was unavailable. Please try again.');
+    }
   }
 
   async connect(
@@ -721,9 +759,14 @@ export class LinkedInBrowser {
     try {
       // ── Open LinkedIn login page ────────────────────────────────
       transition('opening_browser');
-      if (!preserveCurrentPage) await this.openLinkedIn(onProgress);
-
-      if (credentials) await this.submitLinkedInCredentials(credentials);
+      const initialAssessment = await this.assessAuthentication(undefined, false);
+      if (initialAssessment.state !== 'authenticated' && initialAssessment.state !== 'checkpoint') {
+        await this.openLinkedIn(onProgress);
+      }
+      const loginAssessment = await this.assessAuthentication(undefined, false);
+      if (credentials && loginAssessment.state !== 'authenticated' && loginAssessment.state !== 'checkpoint') {
+        await this.submitLinkedInCredentials(credentials);
+      }
 
       // ── Refresh Live URL after navigation ───────────────────────
       // After page.goto() navigates to LinkedIn, fetch the updated debug URL
