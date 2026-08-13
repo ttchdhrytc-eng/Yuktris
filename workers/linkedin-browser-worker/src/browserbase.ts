@@ -42,6 +42,8 @@ export interface CreateSessionOptions {
   persistContext?: boolean;
   requirePersistentContext?: boolean;
   liveView?: boolean;
+  region?: 'us-west-2' | 'us-east-1' | 'eu-central-1' | 'ap-southeast-1';
+  proxyGeolocation?: { country: string; state?: string; city?: string };
 }
 
 export class BrowserbaseError extends Error {
@@ -83,6 +85,7 @@ async function createSession(opts?: CreateSessionOptions): Promise<BrowserbaseSe
 
   const body: Record<string, unknown> = {
     projectId,
+    ...(opts?.region ? { region: opts.region } : {}),
     keepAlive: opts?.keepAlive ?? true,
     ...(timeout ? { timeout } : {}),
     browserSettings: {
@@ -90,10 +93,16 @@ async function createSession(opts?: CreateSessionOptions): Promise<BrowserbaseSe
       solveCaptchas: false,
       ...(opts?.contextId ? { context: { id: opts.contextId, persist: opts.persistContext ?? true } } : {}),
     },
-  ...(opts?.proxies ? { proxies: { type: 'browserbase' } } : {}),
+    ...(opts?.proxies ? { proxies: opts.proxyGeolocation
+      ? [{ type: 'browserbase', geolocation: opts.proxyGeolocation }]
+      : true } : {}),
   };
 
-  logger.info('Creating Browserbase session', { keepAlive: body.keepAlive, timeoutSeconds: timeout ?? null, viewport, persistentContext: !!opts?.contextId });
+  logger.info('Creating Browserbase session', {
+    keepAlive: body.keepAlive, timeoutSeconds: timeout ?? null, viewport,
+    persistentContext: !!opts?.contextId, region: opts?.region ?? null,
+    managedProxy: !!opts?.proxies, proxyCountry: opts?.proxyGeolocation?.country ?? null,
+  });
 
   let lastError: Error | null = null;
   for (let attempt = 0; attempt < 3; attempt++) {

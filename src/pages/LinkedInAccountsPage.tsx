@@ -4,7 +4,7 @@ import {
   ShieldCheck, Activity, Cpu, Globe, Clock, Zap, FlaskConical,
   ChevronDown, ChevronUp, Heart,
 } from 'lucide-react';
-import { useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { PageHeader } from '@/components/ui/PageHeader';
 import { Card, CardContent } from '@/components/ui/Card';
 import { Badge } from '@/components/ui/Badge';
@@ -96,6 +96,7 @@ interface AccountRow {
 
 export function LinkedInAccountsPage() {
   const { workspace } = useWorkspace();
+  const queryClient = useQueryClient();
   const [showConnect, setShowConnect] = useState(false);
   const [credentialAccountId, setCredentialAccountId] = useState<string | null>(null);
   const [confirmDisconnect, setConfirmDisconnect] = useState<AccountRow | null>(null);
@@ -122,6 +123,16 @@ export function LinkedInAccountsPage() {
   const testConnection = useTestLinkedInConnection();
   const disconnect = useDisconnectLinkedIn();
   const toggleDryRun = useToggleDryRun();
+  const setAgentPaused = useMutation({
+    mutationFn: async ({ accountId, paused }: { accountId: string; paused: boolean }) => {
+      if (!workspace) throw new Error('No workspace selected');
+      const { error } = await supabase.from('linkedin_accounts')
+        .update({ status: paused ? 'paused' : 'active' })
+        .eq('id', accountId).eq('workspace_id', workspace.id);
+      if (error) throw error;
+    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['linkedin-accounts', workspace?.id] }),
+  });
   const activeConnectionAttempts = useQuery({
     queryKey: ['active-linkedin-connection-attempts', workspace?.id],
     enabled: !!workspace,
@@ -162,8 +173,8 @@ export function LinkedInAccountsPage() {
   return (
     <div>
       <PageHeader
-        title="LinkedIn Accounts"
-        description="Connect existing LinkedIn accounts for outreach and automation. Sessions are encrypted and managed securely through the browser execution engine."
+        title="Cloud LinkedIn Agents"
+        description="Each account uses one persistent cloud browser identity and continues operating while your laptop is off."
         actions={
           <Button onClick={() => setShowConnect(true)}>
             <Plus className="h-4 w-4" />
@@ -203,13 +214,13 @@ export function LinkedInAccountsPage() {
 
                   <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
                     <div className="space-y-1">
-                      <p className="text-xs text-ink-500">Session Health</p>
+                        <p className="text-xs text-ink-500">Cloud Agent</p>
                       <p className={`text-sm font-medium ${
                         state === 'connected' ? 'text-success-500' :
                         state === 'authenticating' || state === 'pending' ? 'text-brand-300' :
                         'text-warning-500'
                       }`}>
-                        {state === 'connected' ? 'Healthy' : state === 'authenticating' ? 'Validating' : state === 'pending' ? 'Queued' : meta.label}
+                        {acc.status === 'paused' ? 'Paused' : state === 'connected' ? 'Online' : state === 'authenticating' ? 'Starting' : state === 'pending' ? 'Queued' : meta.label}
                       </p>
                     </div>
                     <div className="space-y-1">
@@ -276,6 +287,13 @@ export function LinkedInAccountsPage() {
                           }`}
                         >
                           <FlaskConical className="h-3 w-3" />{acc.dry_run_enabled ? 'Dry Run On' : 'Dry Run Off'}
+                        </button>
+                        <button
+                          onClick={() => setAgentPaused.mutate({ accountId: acc.id, paused: acc.status !== 'paused' })}
+                          disabled={setAgentPaused.isPending}
+                          className="flex items-center gap-1.5 rounded-lg border border-gold-500/12 px-2.5 py-1.5 text-xs font-medium text-ink-200 hover:bg-card-800 transition-colors disabled:opacity-50"
+                        >
+                          {acc.status === 'paused' ? 'Resume Agent' : 'Pause Agent'}
                         </button>
                         <button
                           onClick={() => setConfirmDisconnect(acc)}

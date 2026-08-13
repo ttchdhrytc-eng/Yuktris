@@ -1,0 +1,34 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+
+const source = (name: string) => fs.readFileSync(path.join(process.cwd(), 'src', name), 'utf8');
+const worker = source('worker.ts');
+const context = source('linkedin-context.ts');
+const browserbase = source('browserbase.ts');
+const linkedin = source('linkedin.ts');
+const queue = source('queue.ts');
+const migration = fs.readFileSync(path.join(process.cwd(), '..', '..', 'supabase', 'migrations', '20260814120000_linkedin_cloud_agent_v1_events.sql'), 'utf8');
+
+test('one account gets one active Context', () => assert.match(context, /reserve_linkedin_browser_context/));
+test('every provider session reuses its Context', () => assert.match(context, /contextId: context\.provider_context_id/));
+test('account lease prevents parallel sessions', () => assert.match(context, /acquire_linkedin_browser_context_lease/));
+test('initial login-required state is surfaced', () => assert.match(worker, /auth_required.*Sign in to LinkedIn once/s));
+test('manual authentication is observed', () => assert.match(worker, /linkedin\.connect\(\s*INTERACTIVE_AUTH_TIMEOUT_MS/));
+test('challenge handling remains passive', () => { assert.match(linkedin, /checkpoint_required/); assert.doesNotMatch(browserbase, /solveCaptchas:\s*true/); });
+test('Context is persisted before connected', () => assert.ok(worker.indexOf('context_synchronization_completed') < worker.indexOf("connection_state: 'connected'", worker.indexOf('context_synchronization_completed'))));
+test('new session persistence proof is mandatory', () => assert.match(worker, /linkedin_persistence_proof_started[\s\S]*openPersistentContextForTask[\s\S]*verifyPersistentAuthentication/));
+test('worker reloads durable Context mapping', () => assert.match(context, /reserve\(owner\.workspaceId, owner\.accountId\)/));
+test('queue claim supports safe worker restart recovery', () => assert.match(queue, /claim_queue_task/));
+test('session loss fails closed', () => assert.match(worker, /connection_state: checkpoint \? 'requires_action' : 'session_expired'/));
+test('cloud agent mode does not execute credential claim', () => assert.doesNotMatch(worker.match(/private async handleConnect[\s\S]*?private async handleTestConnection/)?.[0] ?? '', /claim_linkedin_credentials_for_login/));
+test('CAPTCHA solving is disabled', () => assert.match(browserbase, /solveCaptchas: false/));
+test('queue idempotency ownership is retained', () => assert.match(queue, /attempt_id/));
+test('Sales Navigator command is first-class', () => assert.match(worker, /case 'sales_nav_search'/));
+test('read profile command returns normalized profile data', () => assert.match(worker, /case 'read_profile'[\s\S]*canonical_url/));
+test('message commands remain queue-owned', () => assert.match(worker, /case 'send_message'/));
+test('reply polling retains ingestion contract', () => assert.match(worker, /ingest_linkedin_reply/));
+test('meeting event is normalized and authorized', () => assert.match(migration, /emit_linkedin_meeting_booked[\s\S]*is_workspace_member/));
+test('meeting notification uses existing notification table', () => assert.match(migration, /'meeting_booked'[\s\S]*linkedin_notifications/));
+test('regional provider settings are explicit and non-random', () => { assert.match(context, /BROWSERBASE_REGION/); assert.doesNotMatch(context, /Math\.random/); });

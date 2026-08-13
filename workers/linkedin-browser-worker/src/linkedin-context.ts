@@ -11,6 +11,7 @@ export interface ContextRecord {
   generation: number;
   active_browserbase_session_id?: string | null;
   last_synchronized_at?: string | null;
+  metadata?: Record<string, unknown>;
 }
 
 export interface ContextPolicy { enrolled: boolean; has_persistent_context: boolean; }
@@ -28,12 +29,34 @@ export function persistentContextsEnabled(env: NodeJS.ProcessEnv = process.env):
   return env.LINKEDIN_PERSISTENT_CONTEXTS_ENABLED?.trim().toLowerCase() !== 'false';
 }
 
+export function cloudAgentSessionPreferences(env: NodeJS.ProcessEnv = process.env): Pick<CreateSessionOptions, 'region' | 'proxies' | 'proxyGeolocation'> {
+  const supported = new Set(['us-west-2', 'us-east-1', 'eu-central-1', 'ap-southeast-1']);
+  const requested = env.BROWSERBASE_REGION?.trim();
+  if (requested && !supported.has(requested)) throw new Error('BROWSERBASE_REGION is not supported');
+  const country = env.BROWSERBASE_PROXY_COUNTRY?.trim().toUpperCase();
+  return {
+    ...(requested ? { region: requested as CreateSessionOptions['region'] } : {}),
+    ...(country ? {
+      proxies: true,
+      proxyGeolocation: {
+        country,
+        ...(env.BROWSERBASE_PROXY_STATE?.trim() ? { state: env.BROWSERBASE_PROXY_STATE.trim() } : {}),
+        ...(env.BROWSERBASE_PROXY_CITY?.trim() ? { city: env.BROWSERBASE_PROXY_CITY.trim() } : {}),
+      },
+    } : {}),
+  };
+}
+
 export function sessionOptionsForAccount(enabled: boolean, context?: ContextRecord | null): CreateSessionOptions {
   if (!enabled) return { keepAlive: true };
   if (!context?.provider_context_id || !['active', 'in_use'].includes(context.status)) {
     throw new BrowserbaseError('Persistent browser Context is unavailable for the enrolled account', 409);
   }
-  return { keepAlive: true, contextId: context.provider_context_id, persistContext: true, requirePersistentContext: true, liveView: false };
+  const stored = context.metadata?.execution_preferences as ReturnType<typeof cloudAgentSessionPreferences> | undefined;
+  return {
+    keepAlive: true, contextId: context.provider_context_id, persistContext: true,
+    requirePersistentContext: true, liveView: false, ...(stored ?? cloudAgentSessionPreferences()),
+  };
 }
 
 function first<T>(data: T | T[] | null): T | null {
@@ -91,7 +114,7 @@ export class LinkedInContextService {
 
   async ensureProvisioned(owner: ContextLeaseOwner): Promise<ContextRecord> {
     const reserved = await this.reserve(owner.workspaceId, owner.accountId);
-    if (reserved.provider_context_id) return reserved;
+    if (reserved.provider_context_id) return this.ensureExecutionPreferences(reserved);
     if (reserved.status !== 'provisioning') throw new Error('Persistent browser Context is not provisionable');
     const claim = await this.client.rpc('claim_linkedin_browser_context_provisioning', {
       p_context_id:reserved.id,p_workspace_id:owner.workspaceId,p_account_id:owner.accountId,
@@ -105,7 +128,7 @@ export class LinkedInContextService {
         p_provider_context_id: created.id,
       });
       if (error) throw new Error('Context provisioning completion failed');
-      return { ...reserved, provider_context_id: created.id, status: 'active' };
+      return this.ensureExecutionPreferences({ ...reserved, provider_context_id: created.id, status: 'active' });
     } catch (error) {
       const failure = sanitizedProviderFailure(error);
       await this.client.rpc('fail_linkedin_browser_context_provisioning', {
@@ -115,6 +138,19 @@ export class LinkedInContextService {
       logger.error('Persistent browser Context provisioning failed', { code: failure.code });
       throw new Error(failure.message);
     }
+  }
+
+  private async ensureExecutionPreferences(context: ContextRecord): Promise<ContextRecord> {
+    if (context.metadata?.execution_preferences) return context;
+    const preferences = cloudAgentSessionPreferences();
+    const { data, error } = await this.client.rpc('set_linkedin_context_execution_preferences', {
+      p_context_id: context.id, p_workspace_id: context.workspace_id, p_account_id: context.account_id,
+      p_preferences: preferences,
+    });
+    if (error) throw new Error(`Context execution preferences failed: ${error.message}`);
+    const updated = first(data as ContextRecord | ContextRecord[] | null);
+    if (!updated) throw new Error('Context execution preferences returned no Context');
+    return updated;
   }
 
   async acquire(owner: ContextLeaseOwner): Promise<ContextRecord> {

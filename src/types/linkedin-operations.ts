@@ -17,7 +17,7 @@ export type WarmupStatus = 'not_started' | 'in_progress' | 'completed';
 export type SequenceStatus = 'active' | 'paused' | 'completed' | 'draft';
 export type StepStatus = 'pending' | 'in_progress' | 'completed' | 'failed' | 'skipped' | 'stopped';
 export type StoppedReason = 'meeting_booked' | 'prospect_replied' | 'prospect_rejected' | 'campaign_paused' | 'manual_stop';
-export type NotificationType = 'account_disconnected' | 'daily_limit_reached' | 'risk_score_increased' | 'queue_completed' | 'execution_failure' | 'reply_received' | 'invitation_accepted' | 'cooldown_started' | 'warmup_progress';
+export type NotificationType = 'account_disconnected' | 'daily_limit_reached' | 'risk_score_increased' | 'queue_completed' | 'execution_failure' | 'reply_received' | 'invitation_accepted' | 'cooldown_started' | 'warmup_progress' | 'meeting_booked';
 export type LogLevel = 'info' | 'warning' | 'error' | 'debug';
 
 // ============================================================
@@ -245,6 +245,7 @@ export interface LinkedInNotification {
   severity: 'info' | 'warning' | 'error' | 'success';
   is_read: boolean;
   action_url: string | null;
+  event_payload?: Record<string, unknown>;
   created_at: string;
 }
 

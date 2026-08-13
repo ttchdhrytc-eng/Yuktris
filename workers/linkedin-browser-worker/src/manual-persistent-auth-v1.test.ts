@@ -42,6 +42,17 @@ test('persistent Context is reused and persisted for the account', () => {
   assert.match(linkedin, /Browserbase owns the default context\. Reuse it/);
 });
 
+test('first connection is not marked connected before a new-session persistence proof', () => {
+  const connect = worker.match(/private async handleConnect[\s\S]*?private async handleTestConnection/)?.[0] ?? '';
+  const proof = connect.indexOf("linkedin_persistence_proof_started");
+  const secondSession = connect.indexOf('openPersistentContextForTask(item)', proof);
+  const verification = connect.indexOf('verifyPersistentAuthentication', secondSession);
+  const synchronized = connect.indexOf('synchronizePersistentContext(proofContext', verification);
+  const connected = connect.indexOf("connection_state: 'connected'", synchronized);
+  assert.ok(proof > 0 && secondSession > proof && verification > secondSession && synchronized > verification && connected > synchronized);
+  assert.match(connect, /context_persistence_not_verified[\s\S]*queue\.fail/);
+});
+
 test('one explicit intent maps to one idempotent queue', () => {
   assert.match(hook, /const idempotencyKey = params\.operationId/);
   assert.doesNotMatch(hook.match(/export function useConnectLinkedIn[\s\S]*?export function useLinkedInConnectionAttempt/)?.[0] ?? '', /crypto\.randomUUID/);

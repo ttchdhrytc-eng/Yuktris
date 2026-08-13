@@ -7,6 +7,7 @@ import { browserbase, BrowserbaseError } from './browserbase.js';
 import { createHash } from 'node:crypto';
 import { ContextLeaseOwner, ContextRecord, LinkedInContextService, persistentContextsEnabled, sessionOptionsForAccount } from './linkedin-context.js';
 import { interactiveAuthTimeoutMs, interactiveBrowserSessionTimeoutMs } from './interactive-auth-config.js';
+import { normalizeLinkedInAction, validateSalesNavigatorPayload } from './linkedin-agent-contract.js';
 
 const INTERACTIVE_AUTH_TIMEOUT_MS = interactiveAuthTimeoutMs();
 const TEST_CONNECTION_TIMEOUT = parseInt(process.env.TEST_CONNECTION_TIMEOUT_MS || '120000', 10);
@@ -41,13 +42,15 @@ export class Worker {
     if (!supabaseUrl || !serviceKey) throw new Error('Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY');
     if (!encKey) throw new Error('Missing LINKEDIN_SESSION_ENCRYPTION_KEY — generate with: openssl rand -base64 32');
 
-    if (!credentialKey || credentialKey.length < 32) throw new Error('Missing or invalid LINKEDIN_CREDENTIAL_ENCRYPTION_KEY');
+    const executionMode = process.env.LINKEDIN_EXECUTION_MODE || 'cloud_persistent_agent';
+    if (executionMode !== 'cloud_persistent_agent') throw new Error('LINKEDIN_EXECUTION_MODE must be cloud_persistent_agent');
+    if (credentialKey && credentialKey.length < 32) throw new Error('Invalid LINKEDIN_CREDENTIAL_ENCRYPTION_KEY');
     this.client = createClient(supabaseUrl, serviceKey, { auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false } });
     this.workerId = process.env.WORKER_ID || crypto.randomUUID();
     this.workerName = `linkedin-worker-${this.workerId}`;
     this.region = process.env.WORKER_REGION || 'local';
     this.encryptionSecret = encKey;
-    this.credentialEncryptionSecret = credentialKey;
+    this.credentialEncryptionSecret = credentialKey || '';
 
     this.queue = new Queue(this.client, this.workerId, POLL_INTERVAL);
     this.linkedin = new LinkedInBrowser(this.client, true, this.encryptionSecret);
@@ -298,14 +301,17 @@ export class Worker {
     }
 
     try {
-      switch (item.action_type) {
+      const normalizedAction = normalizeLinkedInAction(item.action_type);
+      const normalizedItem = normalizedAction === item.action_type ? item : { ...item, action_type: normalizedAction };
+      switch (normalizedAction) {
         case 'linkedin_connect':
-          await this.handleConnect(item, startTime);
+          await this.handleConnect(normalizedItem, startTime);
           break;
         case 'linkedin_test_connection':
-          await this.handleTestConnection(item, startTime);
+          await this.handleTestConnection(normalizedItem, startTime);
           break;
         case 'profile_visit':
+        case 'read_profile':
         case 'connection_request':
         case 'send_message':
         case 'follow_up_message':
@@ -313,9 +319,10 @@ export class Worker {
         case 'follow_company':
         case 'endorse_skills':
         case 'search_people':
+        case 'sales_nav_search':
         case 'read_inbox':
         case 'read_replies':
-          await this.handleAutomationAction(item, startTime);
+          await this.handleAutomationAction(normalizedItem, startTime);
           break;
         default:
           logger.warn('Unknown action type', { action: item.action_type });
@@ -702,6 +709,42 @@ export class Worker {
     }
 
     // STATE: AUTHENTICATED — only after session is saved AND verified
+    if (persistentContext) {
+      const proofStartedAt = Date.now();
+      logger.info('linkedin_persistence_proof_started', {
+        queue_item_id: item.id, workspace_id: workspaceId, account_id: accountId,
+        context_id: persistentContext.id, context_generation: persistentContext.generation,
+      });
+      const proofContext = await this.openPersistentContextForTask(item);
+      const proofSessionId = this.linkedin.getSessionId();
+      const proof = await this.linkedin.verifyPersistentAuthentication({
+        ...intendedIdentity, profileUrl: effectiveProfileUrl || intendedIdentity.profileUrl,
+      });
+      await this.synchronizePersistentContext(proofContext, proofSessionId);
+      if (!proof.success) {
+        const proofError = proof.error || 'Persistent LinkedIn authentication could not be verified in a new secure session.';
+        await this.updateAccount(accountId, {
+          connection_state: proof.errorCode === 'checkpoint_required' ? 'requires_action' : 'session_expired',
+          session_status: 'disconnected', status: 'pending_login', last_error: proofError,
+        });
+        await onProgress('connection_failed', proofError, {
+          error_code: 'context_persistence_not_verified', authentication_state: proof.authState,
+        });
+        await this.queue.fail(item.id, proofError, Date.now() - startTime, false);
+        logger.warn('linkedin_persistence_proof_failed', {
+          queue_item_id: item.id, workspace_id: workspaceId, account_id: accountId,
+          context_id: proofContext.id, context_generation: proofContext.generation,
+          authentication_state: proof.authState, identity_state: proof.identityState,
+        });
+        return;
+      }
+      logger.info('linkedin_persistence_proof_completed', {
+        queue_item_id: item.id, workspace_id: workspaceId, account_id: accountId,
+        context_id: proofContext.id, context_generation: proofContext.generation,
+        duration_ms: Date.now() - proofStartedAt,
+      });
+    }
+
     await this.updateAccount(accountId, {
       connection_state: 'connected', session_status: 'connected', status: 'active',
       last_validated_at: new Date().toISOString(), last_login_at: new Date().toISOString(), last_error: null,
@@ -807,6 +850,15 @@ export class Worker {
     const accountId = item.account_id;
     if (!accountId) { await this.queue.fail(item.id, 'Missing account_id', Date.now() - startTime, false); return; }
 
+    const { data: agentAccount, error: agentAccountError } = await this.client.from('linkedin_accounts')
+      .select('status').eq('id', accountId).eq('workspace_id', item.workspace_id).maybeSingle();
+    if (agentAccountError) throw new Error(`Cloud agent status check failed: ${this.sanitizeError(agentAccountError)}`);
+    if (agentAccount?.status === 'paused') {
+      await this.queue.fail(item.id, 'Cloud LinkedIn Agent is paused', Date.now() - startTime, false);
+      logger.info('agent_paused', { queue_item_id: item.id, workspace_id: item.workspace_id, account_id: accountId });
+      return;
+    }
+
     const usePersistentContext = persistentContextsEnabled();
     const loaded = usePersistentContext ? null : await this.loadSessionForAccount(accountId);
     if (!usePersistentContext && !loaded) {
@@ -879,12 +931,26 @@ export class Worker {
       const page = this.linkedin.getPage();
 
       switch (item.action_type) {
-        case 'profile_visit': {
+        case 'profile_visit':
+        case 'read_profile': {
           const url = params.profile_url as string;
           if (!url) throw new Error('profile_url required');
+          const parsed = new URL(url);
+          if (!/^https?:$/.test(parsed.protocol) || !/(^|\.)linkedin\.com$/i.test(parsed.hostname) || !parsed.pathname.startsWith('/in/')) {
+            throw new Error('A valid LinkedIn personal profile URL is required');
+          }
           await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-          await page.waitForTimeout(2000 + Math.random() * 3000);
-          result = { success: true, data: { visited: url } };
+          if (item.action_type === 'read_profile') {
+            const profile = await page.evaluate(() => ({
+              name: document.querySelector('main h1')?.textContent?.trim() || null,
+              headline: document.querySelector('main .text-body-medium')?.textContent?.trim() || null,
+              location: document.querySelector('main .text-body-small.inline')?.textContent?.trim() || null,
+              canonical_url: document.querySelector<HTMLLinkElement>('link[rel="canonical"]')?.href || location.href,
+            }));
+            result = { success: true, data: { result_code: 'success', profile } };
+          } else {
+            result = { success: true, data: { result_code: 'success', visited: parsed.origin + parsed.pathname } };
+          }
           break;
         }
         case 'connection_request': {
@@ -993,6 +1059,41 @@ export class Worker {
             });
           }
           result = { success: true, data: { results, count: results.length } };
+          break;
+        }
+        case 'sales_nav_search': {
+          const filters = validateSalesNavigatorPayload(params.filters ?? params);
+          const unsupported = ['geography', 'industry', 'company_size', 'seniority', 'function', 'relationship', 'company_attributes']
+            .filter(key => {
+              const value = filters[key as keyof typeof filters];
+              return Array.isArray(value) ? value.length > 0 : !!value;
+            });
+          if (unsupported.length > 0) {
+            result = { success: false, error: `Sales Navigator filters not safely supported by the current provider adapter: ${unsupported.join(', ')}` };
+            break;
+          }
+          const keywords = [filters.keywords, ...(filters.title ?? [])].filter(Boolean).join(' ').trim();
+          const searchUrl = new URL('https://www.linkedin.com/sales/search/people');
+          if (keywords) searchUrl.searchParams.set('keywords', keywords);
+          await page.goto(searchUrl.toString(), { waitUntil: 'domcontentloaded', timeout: 30000 });
+          const current = new URL(page.url());
+          if (!/(^|\.)linkedin\.com$/i.test(current.hostname) || !current.pathname.startsWith('/sales/')) {
+            result = { success: false, error: 'Sales Navigator is not available for this LinkedIn account' };
+            break;
+          }
+          const limit = filters.limit ?? 10;
+          const candidates = await page.$$eval('a[href*="/sales/lead/"], a[href*="/in/"]', (links, max) => {
+            const seen = new Set<string>();
+            return links.flatMap(link => {
+              const anchor = link as HTMLAnchorElement;
+              const href = anchor.href.split('?')[0];
+              const name = anchor.textContent?.trim() || null;
+              if (!href || !name || seen.has(href)) return [];
+              seen.add(href);
+              return [{ name, profile_url: href }];
+            }).slice(0, max as number);
+          }, limit).catch(() => [] as Array<{ name: string; profile_url: string }>);
+          result = { success: true, data: { result_code: 'success', candidates, count: candidates.length, applied_filters: filters } };
           break;
         }
         case 'read_inbox': {
