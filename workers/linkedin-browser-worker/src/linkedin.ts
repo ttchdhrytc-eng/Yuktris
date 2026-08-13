@@ -248,6 +248,49 @@ export interface LinkedInLoginCredentials {
 
 type InteractiveLocatorPage = Pick<Page, 'locator'>;
 
+type CredentialInputControl = Pick<Locator, 'click' | 'press' | 'pressSequentially' | 'inputValue' | 'isVisible' | 'isEnabled' | 'isEditable'>;
+
+export async function enterCredentialRealistically(control: CredentialInputControl, value: string): Promise<boolean> {
+  await control.click({ timeout: 5_000 });
+  await control.press(process.platform === 'darwin' ? 'Meta+A' : 'Control+A');
+  await control.press('Backspace');
+  await control.pressSequentially(value, { delay: 20 });
+  return (await control.inputValue()).length > 0;
+}
+
+export interface LoginSubmitObservation {
+  submitEventObserved: boolean;
+  authenticationRequestObserved: boolean;
+  urlChanged: boolean;
+  loginFormChanged: boolean;
+  authenticatedCookieAppeared: boolean;
+  explicitLinkedInErrorAppeared: boolean;
+  challengeAppeared: boolean;
+}
+
+export function loginSubmitProducedEffect(observation: LoginSubmitObservation): boolean {
+  return observation.submitEventObserved || observation.authenticationRequestObserved || observation.urlChanged
+    || observation.loginFormChanged || observation.authenticatedCookieAppeared
+    || observation.explicitLinkedInErrorAppeared || observation.challengeAppeared;
+}
+
+type SubmitClickControl = Pick<Locator, 'click'>;
+type SubmitEnterControl = Pick<Locator, 'press'>;
+
+export async function activateLoginSubmission(
+  submit: SubmitClickControl,
+  password: SubmitEnterControl,
+  observe: () => Promise<LoginSubmitObservation>,
+): Promise<{ method: 'visible_submit_click' | 'password_enter_after_proven_noop_click'; clickDispatched: boolean; observation: LoginSubmitObservation }> {
+  await submit.click({ timeout: 10_000 });
+  const clickObservation = await observe();
+  if (loginSubmitProducedEffect(clickObservation)) {
+    return { method: 'visible_submit_click', clickDispatched: true, observation: clickObservation };
+  }
+  await password.press('Enter');
+  return { method: 'password_enter_after_proven_noop_click', clickDispatched: true, observation: await observe() };
+}
+
 export async function resolveFirstInteractiveLocator(
   page: InteractiveLocatorPage,
   selectors: readonly string[],
@@ -857,14 +900,151 @@ export class LinkedInBrowser {
     return resolution;
   }
 
-  private async submitLinkedInCredentials(credentials: LinkedInLoginCredentials, probe: LoginSurfaceProbe): Promise<void> {
+  private async submitLinkedInCredentials(credentials: LinkedInLoginCredentials, probe: LoginSurfaceProbe): Promise<boolean> {
     if (!this.page) throw new Error('LinkedIn login page is unavailable');
+    const page = this.page;
     try {
       if (!probe.username || !probe.password || !probe.submit) throw new Error('login_controls_unavailable');
-      await probe.username.fill(credentials.username);
-      await probe.password.fill(credentials.password);
-      await probe.submit.click({ timeout: 10_000 });
-      logger.info('LinkedIn credential login submitted', { credentials_decryption_attempted: true });
+      const initialUrl = page.url();
+      const initialPath = this.safePathname(initialUrl);
+      if (page.isClosed() || this.page !== page || this.safeHostname(initialUrl) !== 'www.linkedin.com'
+        || !/\/(login|uas\/login|signin)/i.test(initialPath)) throw new Error('selected_login_page_changed');
+
+      const [usernameVisible, usernameEnabled, usernameEditable, passwordVisible, passwordEnabled, passwordEditable,
+        submitVisible, submitEnabled, formExists, activeElementCategory] = await Promise.all([
+        probe.username.isVisible(), probe.username.isEnabled(), probe.username.isEditable(),
+        probe.password.isVisible(), probe.password.isEnabled(), probe.password.isEditable(),
+        probe.submit.isVisible(), probe.submit.isEnabled(),
+        page.locator('form:has(#username), form:has(input[name="session_key"]), form:has(input[type="password"])').count().then(count => count > 0),
+        page.evaluate(() => {
+          const active = document.activeElement as HTMLInputElement | null;
+          if (!active) return 'none';
+          if (active.tagName === 'INPUT') return active.type === 'password' ? 'password_input' : 'text_input';
+          if (active.tagName === 'BUTTON') return 'button';
+          return 'other';
+        }),
+      ]);
+      logger.info('LinkedIn credential controls ready', {
+        username_visible: usernameVisible, username_enabled: usernameEnabled, username_editable: usernameEditable,
+        password_visible: passwordVisible, password_enabled: passwordEnabled, password_editable: passwordEditable,
+        submit_visible: submitVisible, submit_enabled: submitEnabled, form_exists: formExists,
+        active_element_category: activeElementCategory,
+        selected_page_open: !page.isClosed(), selected_page_count: this.context?.pages().filter(candidate => !candidate.isClosed()).length ?? 0,
+        selected_origin: this.safeOrigin(initialUrl), selected_pathname: initialPath,
+      });
+      if (!usernameVisible || !usernameEnabled || !usernameEditable || !passwordVisible || !passwordEnabled
+        || !passwordEditable || !submitVisible || !submitEnabled) throw new Error('login_controls_not_interactive');
+
+      const usernameNonEmpty = await enterCredentialRealistically(probe.username, credentials.username);
+      const passwordNonEmpty = await enterCredentialRealistically(probe.password, credentials.password);
+      if (!usernameNonEmpty || !passwordNonEmpty) throw new Error('credential_input_not_accepted');
+
+      const [preSubmitUsernameVisible, preSubmitUsernameEnabled, preSubmitUsernameEditable,
+        preSubmitPasswordVisible, preSubmitPasswordEnabled, preSubmitPasswordEditable,
+        preSubmitVisible, preSubmitEnabled, preSubmitFormExists, preSubmitActiveCategory] = await Promise.all([
+        probe.username.isVisible(), probe.username.isEnabled(), probe.username.isEditable(),
+        probe.password.isVisible(), probe.password.isEnabled(), probe.password.isEditable(),
+        probe.submit.isVisible(), probe.submit.isEnabled(),
+        page.locator('form:has(#username), form:has(input[name="session_key"]), form:has(input[type="password"])').count().then(count => count > 0),
+        page.evaluate(() => {
+          const active = document.activeElement as HTMLInputElement | null;
+          if (!active) return 'none';
+          if (active.tagName === 'INPUT') return active.type === 'password' ? 'password_input' : 'text_input';
+          if (active.tagName === 'BUTTON') return 'button';
+          return 'other';
+        }),
+      ]);
+      logger.info('LinkedIn credential submission preflight', {
+        username_visible: preSubmitUsernameVisible, username_enabled: preSubmitUsernameEnabled,
+        username_editable: preSubmitUsernameEditable, username_value_non_empty: usernameNonEmpty,
+        password_visible: preSubmitPasswordVisible, password_enabled: preSubmitPasswordEnabled,
+        password_editable: preSubmitPasswordEditable, password_value_non_empty: passwordNonEmpty,
+        submit_visible: preSubmitVisible, submit_enabled: preSubmitEnabled,
+        active_element_category: preSubmitActiveCategory, form_exists: preSubmitFormExists,
+      });
+      if (!preSubmitUsernameVisible || !preSubmitUsernameEnabled || !preSubmitUsernameEditable
+        || !preSubmitPasswordVisible || !preSubmitPasswordEnabled || !preSubmitPasswordEditable
+        || !preSubmitVisible || !preSubmitEnabled || !preSubmitFormExists) throw new Error('login_controls_changed_before_submit');
+
+      await page.evaluate(() => {
+        const marker = window as typeof window & { __yuktrisLoginSubmitObserved?: boolean; __yuktrisLoginSubmitHooked?: boolean };
+        marker.__yuktrisLoginSubmitObserved = false;
+        if (!marker.__yuktrisLoginSubmitHooked) {
+          document.addEventListener('submit', () => { marker.__yuktrisLoginSubmitObserved = true; }, true);
+          marker.__yuktrisLoginSubmitHooked = true;
+        }
+      });
+
+      let authenticationRequestObserved = false;
+      let navigationRequestObserved = false;
+      let responseStatusCategory: string | null = null;
+      let observedRequestHost: string | null = null;
+      let observedRequestMethod: string | null = null;
+      const isAuthenticationRequest = (request: import('playwright').Request): boolean => {
+        try {
+          const target = new URL(request.url());
+          const method = request.method().toUpperCase();
+          return (target.hostname === 'www.linkedin.com' || target.hostname.endsWith('.linkedin.com'))
+            && (method !== 'GET' || request.isNavigationRequest())
+            && /login|signin|checkpoint|challenge|authenticate/i.test(target.pathname);
+        } catch { return false; }
+      };
+      const onRequest = (request: import('playwright').Request): void => {
+        if (!isAuthenticationRequest(request)) return;
+        authenticationRequestObserved = true;
+        if (request.isNavigationRequest()) navigationRequestObserved = true;
+        observedRequestHost = this.safeHostname(request.url());
+        observedRequestMethod = request.method().toUpperCase();
+      };
+      const onResponse = (response: import('playwright').Response): void => {
+        if (!isAuthenticationRequest(response.request())) return;
+        responseStatusCategory = `${Math.floor(response.status() / 100)}xx`;
+      };
+      page.on('request', onRequest);
+      page.on('response', onResponse);
+
+      const observe = async (): Promise<LoginSubmitObservation> => {
+        await page.waitForTimeout(1500);
+        const assessment = await this.assessAuthentication(page, false);
+        const [submitEventObserved, loginFormExistsNow] = await Promise.all([
+          page.evaluate(() => !!(window as typeof window & { __yuktrisLoginSubmitObserved?: boolean }).__yuktrisLoginSubmitObserved).catch(() => false),
+          page.locator('form:has(#username), form:has(input[name="session_key"]), form:has(input[type="password"])').count().then(count => count > 0).catch(() => false),
+        ]);
+        return {
+          submitEventObserved, authenticationRequestObserved,
+          urlChanged: page.url() !== initialUrl,
+          loginFormChanged: formExists !== loginFormExistsNow,
+          authenticatedCookieAppeared: assessment.signals.includes('session_cookie'),
+          explicitLinkedInErrorAppeared: assessment.signals.includes('invalid_credentials') || assessment.signals.includes('linkedin_error'),
+          challengeAppeared: assessment.state === 'checkpoint',
+        };
+      };
+
+      let activation: Awaited<ReturnType<typeof activateLoginSubmission>>;
+      try {
+        activation = await activateLoginSubmission(probe.submit, probe.password, observe);
+      } finally {
+        page.off('request', onRequest);
+        page.off('response', onResponse);
+      }
+
+      const { method: submitMethod, clickDispatched, observation } = activation;
+      const processed = loginSubmitProducedEffect(observation);
+      logger.info('LinkedIn credential submission observed', {
+        credentials_decryption_attempted: true,
+        username_value_non_empty: usernameNonEmpty, password_value_non_empty: passwordNonEmpty,
+        submit_method: submitMethod, click_dispatched_successfully: clickDispatched,
+        form_submit_event_observed: observation.submitEventObserved,
+        authentication_request_observed: observation.authenticationRequestObserved,
+        navigation_request_observed: navigationRequestObserved,
+        request_target_host: observedRequestHost, request_method: observedRequestMethod,
+        response_status_category: responseStatusCategory,
+        url_changed: observation.urlChanged, login_form_changed: observation.loginFormChanged,
+        authentication_cookie_appeared: observation.authenticatedCookieAppeared,
+        explicit_linkedin_error_appeared: observation.explicitLinkedInErrorAppeared,
+        challenge_appeared: observation.challengeAppeared, submission_processed: processed,
+      });
+      return processed;
     } catch (error) {
       const diagnosticCode = error instanceof Error && /^[a-z_]+$/.test(error.message)
         ? error.message : 'credential_form_interaction_failed';
@@ -887,6 +1067,7 @@ export class LinkedInBrowser {
     if (!this.page) throw new Error('No page — call newContext() first');
     let flowState: LoginFlowState = 'idle';
     let credentialInteractionStarted = false;
+    let credentialSubmissionProcessed = true;
     const transition = (next: LoginFlowState): void => {
       const allowed: Record<LoginFlowState, LoginFlowState[]> = {
         idle: ['opening_browser', 'failed', 'cancelled'],
@@ -928,7 +1109,7 @@ export class LinkedInBrowser {
           queue_item_id: queueItemId, workspace_id: workspaceId, account_id: accountId,
           browserbase_session_id: this.bbSession?.id ?? null,
         });
-        await this.submitLinkedInCredentials(credentials, loginSurface.probe);
+        credentialSubmissionProcessed = await this.submitLinkedInCredentials(credentials, loginSurface.probe);
         if (onProgress) await onProgress('credentials_submitted', 'LinkedIn credentials submitted securely.');
         logger.info('LinkedIn credentials submitted', {
           queue_item_id: queueItemId, workspace_id: workspaceId, account_id: accountId,
@@ -956,6 +1137,12 @@ export class LinkedInBrowser {
       if (onProgress) await onProgress('waiting_for_login', credentials
         ? 'Signing in to LinkedIn securely...'
         : 'Waiting for login. Complete LinkedIn sign-in in the browser window...');
+      if (credentialInteractionStarted && !credentialSubmissionProcessed) {
+        const failure = 'LinkedIn did not process the sign-in submission. Please try again later.';
+        if (onProgress) await onProgress('login_failed', failure, { error_code: 'login_submit_not_processed' });
+        transition('failed');
+        return { success: false, error: failure, errorCode: 'login_submit_not_processed', nonRetryable: true };
+      }
       const authResult = await this.waitForAuthenticationWithChallenges(
         timeoutMs, onProgress, workspaceId, accountId, queueItemId,
         (state) => {
