@@ -973,7 +973,13 @@ export class Worker {
         if (!authentication.success) {
           await this.synchronizePersistentContext(persistentContext, persistentSessionId);
           const checkpoint = authentication.errorCode === 'checkpoint_required';
-          await this.updateAccount(accountId, { connection_state: checkpoint ? 'requires_action' : 'session_expired', last_error: authentication.error });
+          if (checkpoint) {
+            await this.updateAccount(accountId, { connection_state: 'requires_action', last_error: authentication.error });
+          } else if (authentication.authState !== 'authenticated') {
+            await this.updateAccount(accountId, { connection_state: 'session_expired', last_error: authentication.error });
+          } else {
+            await this.updateAccount(accountId, { last_error: authentication.error });
+          }
           logger.info(checkpoint ? 'linkedin_checkpoint_required' : 'linkedin_reauth_required', {
             queue_item_id: item.id, workspace_id: item.workspace_id, account_id: accountId,
             authentication_state: authentication.authState, identity_state: authentication.identityState,

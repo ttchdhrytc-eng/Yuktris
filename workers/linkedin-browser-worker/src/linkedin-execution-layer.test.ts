@@ -43,6 +43,10 @@ test('Sales Navigator waits for results and normalizes positive candidate fields
   assert.match(worker,/data-x-search-result[\s\S]*timeout: 10000/);
   for (const field of ['sales_nav_lead_url','headline','company','location']) assert.match(worker,new RegExp(field));
 });
+test('authenticated unresolved identity fails the task without falsely expiring the account', () => {
+  assert.match(worker, /authentication\.authState !== 'authenticated'[\s\S]*connection_state: 'session_expired'/);
+  assert.doesNotMatch(worker, /connection_state: checkpoint \? 'requires_action' : 'session_expired'/);
+});
 test('reply ingestion maps context and suppresses duplicate external events', () => {
   assert.match(worker,/p_contact_id[\s\S]*p_campaign_id[\s\S]*p_classification/);
   assert.match(replies,/UNIQUE\s*\(linkedin_account_id,\s*external_reply_id\)/);
