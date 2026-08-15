@@ -237,10 +237,20 @@ export interface ConnectionResult {
   authenticationDetectedAt?: number;
   errorCode?: string;
   identityState?: 'verified' | 'unresolved' | 'mismatch';
+  senderVerificationMode?: 'verified_live_identity' | 'verified_context_binding';
   reuseExistingBrowser?: boolean;
   preserveCurrentPage?: boolean;
   effectiveProfileUrl?: string;
   reuseBoundIdentity?: boolean;
+}
+
+export interface CertifiedContextIdentity {
+  canonicalProfileUrl: string;
+  providerContextId: string;
+  contextGeneration: number;
+  proofType: 'two_session_identity_proof';
+  proofVersion: number;
+  verifiedAt: string;
 }
 
 export type ProgressStep =
@@ -1537,7 +1547,7 @@ export class LinkedInBrowser {
     };
   }
 
-  async verifyPersistentAuthentication(intendedIdentity?: IntendedLinkedInIdentity): Promise<ConnectionResult> {
+  async verifyPersistentAuthentication(intendedIdentity?: IntendedLinkedInIdentity, certifiedBinding?: CertifiedContextIdentity | null): Promise<ConnectionResult> {
     if (!this.browser?.isConnected() || !this.context || !this.page || this.page.isClosed()) {
       return { success: false, authState: 'unknown', errorCode: 'playwright_disconnected', nonRetryable: true,
         error: 'Persistent LinkedIn browser is not connected' };
@@ -1561,6 +1571,14 @@ export class LinkedInBrowser {
 
     const identity = await this.resolveAuthenticatedSelfIdentity(1, undefined, undefined, undefined, FAST_REUSE_IDENTITY_TIMEOUT_MS);
     if (!identity) {
+      const bound = canonicalIdentityUrl(intendedIdentity?.profileUrl);
+      const certified = canonicalIdentityUrl(certifiedBinding?.canonicalProfileUrl);
+      if (bound && certified && bound === certified && certifiedBinding?.proofType === 'two_session_identity_proof') {
+        logger.info('linkedin_identity_verified', { authentication_state: 'authenticated', identity_state: 'verified',
+          canonical_identity_found: false, sender_verification_mode: 'verified_context_binding' });
+        return { success: true, authState: 'authenticated', identityState: 'verified',
+          senderVerificationMode: 'verified_context_binding', identity: { profileUrl: certified, profileName: null, profileHeadline: null }, effectiveProfileUrl: certified };
+      }
       return {
         success: false, authState: 'authenticated', identityState: 'unresolved',
         errorCode: 'identity_resolution_failed', nonRetryable: true,
@@ -1576,7 +1594,7 @@ export class LinkedInBrowser {
       if (mismatch) return { success: false, authState: 'authenticated', identityState: 'mismatch', nonRetryable: true, error: mismatch };
     }
     logger.info('linkedin_identity_verified', { authentication_state: 'authenticated', identity_state: 'verified', canonical_identity_found: true });
-    return { success: true, authState: 'authenticated', identityState: 'verified', identity, effectiveProfileUrl: identity.profileUrl || undefined };
+    return { success: true, authState: 'authenticated', identityState: 'verified', senderVerificationMode: 'verified_live_identity', identity, effectiveProfileUrl: identity.profileUrl || undefined };
   }
 
   private async navigateWithRetry(page: Page, url: string, timeoutMs: number): Promise<void> {

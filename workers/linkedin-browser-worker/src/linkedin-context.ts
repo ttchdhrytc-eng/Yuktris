@@ -14,6 +14,15 @@ export interface ContextRecord {
   metadata?: Record<string, unknown>;
 }
 
+export interface VerifiedContextBinding {
+  canonicalProfileUrl: string;
+  providerContextId: string;
+  contextGeneration: number;
+  proofType: 'two_session_identity_proof';
+  proofVersion: number;
+  verifiedAt: string;
+}
+
 export interface ContextPolicy { enrolled: boolean; has_persistent_context: boolean; }
 interface DeletionJob { id: string; provider_context_id: string; attempt_id: string; }
 
@@ -162,6 +171,41 @@ export class LinkedInContextService {
     const record = first(data as ContextRecord | ContextRecord[] | null);
     if (!record) throw new Error('Context lease acquisition returned no record');
     return record;
+  }
+
+  async verifiedIdentityBinding(context: ContextRecord): Promise<VerifiedContextBinding | null> {
+    const { data, error } = await this.client.rpc('get_verified_linkedin_context_identity', {
+      p_context_id: context.id, p_workspace_id: context.workspace_id, p_account_id: context.account_id,
+      p_provider_context_id: context.provider_context_id, p_context_generation: context.generation,
+    });
+    if (error) throw new Error(`Context identity attestation lookup failed: ${error.message}`);
+    if (!data) return null;
+    const value = data as Record<string, unknown>;
+    return {
+      canonicalProfileUrl: String(value.canonical_profile_url),
+      providerContextId: String(value.provider_context_id),
+      contextGeneration: Number(value.context_generation),
+      proofType: 'two_session_identity_proof',
+      proofVersion: Number(value.proof_version),
+      verifiedAt: String(value.verified_at),
+    };
+  }
+
+  async certifyIdentity(context: ContextRecord, canonicalProfileUrl: string): Promise<void> {
+    const { error } = await this.client.rpc('certify_linkedin_context_identity', {
+      p_context_id: context.id, p_workspace_id: context.workspace_id, p_account_id: context.account_id,
+      p_provider_context_id: context.provider_context_id, p_context_generation: context.generation,
+      p_canonical_profile_url: canonicalProfileUrl, p_proof_version: 1,
+    });
+    if (error) throw new Error(`Context identity certification failed: ${error.message}`);
+  }
+
+  async revokeIdentity(context: ContextRecord, reason: string): Promise<void> {
+    const { error } = await this.client.rpc('revoke_linkedin_context_identity', {
+      p_context_id: context.id, p_workspace_id: context.workspace_id, p_account_id: context.account_id,
+      p_reason: reason,
+    });
+    if (error) throw new Error(`Context identity revocation failed: ${error.message}`);
   }
 
   async reconcileBeforeSession(context: ContextRecord, owner: ContextLeaseOwner): Promise<void> {

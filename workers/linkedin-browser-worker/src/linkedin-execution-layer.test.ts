@@ -80,8 +80,8 @@ test('bound identity comparison fails closed for mismatch and unresolved evidenc
 });
 test('connection/read/write reuse the same authenticated-self resolver before preflight and target interaction', () => {
   assert.doesNotMatch(worker,/verifyIdentity\(/);
-  assert.match(worker,/verifyPersistentAuthentication\(intendedIdentity\)[\s\S]*preflightLinkedInWrite\(this\.client, item\)/);
-  assert.ok(worker.indexOf('verifyPersistentAuthentication(intendedIdentity)') < worker.indexOf('preflightLinkedInWrite(this.client, item)'));
+  assert.match(worker,/verifyPersistentAuthentication\(intendedIdentity, binding\)[\s\S]*preflightLinkedInWrite\(this\.client, item\)/);
+  assert.ok(worker.indexOf('verifyPersistentAuthentication(intendedIdentity, binding)') < worker.indexOf('preflightLinkedInWrite(this.client, item)'));
 });
 function canonicalTarget(value:string):string|null { return value.includes('/in/') ? normalizeLinkedInTarget(value) : null; }
 test('authenticated unresolved identity fails the task without falsely expiring the account', () => {

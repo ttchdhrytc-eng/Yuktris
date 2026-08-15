@@ -776,6 +776,9 @@ export class Worker {
           ...intendedIdentity, profileUrl: effectiveProfileUrl || intendedIdentity.profileUrl,
         });
         await this.synchronizePersistentContext(proofContext, proofSessionId);
+        if (proof.success && proof.senderVerificationMode === 'verified_live_identity' && proof.effectiveProfileUrl) {
+          await this.linkedinContexts.certifyIdentity(proofContext, proof.effectiveProfileUrl);
+        }
       } catch (error) {
         const failure = 'The second secure LinkedIn session could not be created or synchronized.';
         logger.error('linkedin_second_session_failed', {
@@ -863,7 +866,12 @@ export class Worker {
       const intendedIdentity = await this.loadIntendedIdentity(accountId, item.workspace_id);
       const context = await this.openPersistentContextForTask(item);
       const browserbaseSessionId = this.linkedin.getSessionId();
-      const result = await this.linkedin.verifyPersistentAuthentication(intendedIdentity);
+      const binding = await this.linkedinContexts.verifiedIdentityBinding(context);
+      const result = await this.linkedin.verifyPersistentAuthentication(intendedIdentity, binding);
+      if (result.identityState === 'mismatch') await this.linkedinContexts.revokeIdentity(context, 'positive_identity_mismatch');
+      if (result.success && result.senderVerificationMode === 'verified_live_identity' && result.effectiveProfileUrl) {
+        await this.linkedinContexts.certifyIdentity(context, result.effectiveProfileUrl);
+      }
       await this.synchronizePersistentContext(context, browserbaseSessionId);
       if (result.success) {
         await this.updateAccount(accountId, {
@@ -969,7 +977,14 @@ export class Worker {
       if (usePersistentContext) {
         persistentContext = await this.openPersistentContextForTask(item);
         persistentSessionId = this.linkedin.getSessionId();
-        const authentication = await this.linkedin.verifyPersistentAuthentication(intendedIdentity);
+        const binding = await this.linkedinContexts.verifiedIdentityBinding(persistentContext);
+        const authentication = await this.linkedin.verifyPersistentAuthentication(intendedIdentity, binding);
+        if (authentication.identityState === 'mismatch') {
+          await this.linkedinContexts.revokeIdentity(persistentContext, 'positive_identity_mismatch');
+        }
+        if (authentication.success && authentication.senderVerificationMode === 'verified_live_identity' && authentication.effectiveProfileUrl) {
+          await this.linkedinContexts.certifyIdentity(persistentContext, authentication.effectiveProfileUrl);
+        }
         if (!authentication.success) {
           await this.synchronizePersistentContext(persistentContext, persistentSessionId);
           const checkpoint = authentication.errorCode === 'checkpoint_required';

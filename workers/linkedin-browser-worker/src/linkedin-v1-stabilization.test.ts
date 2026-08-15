@@ -25,7 +25,9 @@ test('7 Live View health is absent from backend authentication verification', ()
   const verify = linkedin.match(/async verifyPersistentAuthentication[\s\S]*?private async navigateWithRetry/)?.[0] ?? '';
   assert.doesNotMatch(verify, /refreshLiveUrl|debugger|liveUrl/);
 });
-test('8 bound identity requires fresh authenticated identity evidence', () => assert.match(linkedin, /if \(!identity\)[\s\S]*identity_resolution_failed/));
+test('8 bound identity requires fresh evidence or exact certified Context binding', () => {
+  assert.match(linkedin, /if \(!identity\)[\s\S]*verified_context_binding[\s\S]*identity_resolution_failed/);
+});
 test('9 unbound unresolved identity fails closed', () => assert.match(linkedin, /identity_resolution_failed/));
 test('10 different canonical identity fails closed', () => assert.match(linkedin, /getIdentityMismatch[\s\S]*identityState: 'mismatch'/));
 test('11 no raw credential persistence exists', () => {
