@@ -9,7 +9,7 @@ import { ContextLeaseOwner, ContextRecord, LinkedInContextService, persistentCon
 import { interactiveAuthTimeoutMs, interactiveBrowserSessionTimeoutMs } from './interactive-auth-config.js';
 import { normalizeLinkedInAction, validateSalesNavigatorPayload } from './linkedin-agent-contract.js';
 import { CloudAgentStartupError, cloudAgentStartupTimeoutMs, withinStartupDeadline } from './startup-deadline.js';
-import { finalizeLinkedInWrite, LINKEDIN_WRITE_ACTIONS, preflightLinkedInWrite } from './linkedin-execution-safety.js';
+import { finalizeLinkedInWrite, LINKEDIN_WRITE_ACTIONS, normalizeLinkedInTarget, preflightLinkedInWrite } from './linkedin-execution-safety.js';
 
 const INTERACTIVE_AUTH_TIMEOUT_MS = interactiveAuthTimeoutMs();
 const TEST_CONNECTION_TIMEOUT = parseInt(process.env.TEST_CONNECTION_TIMEOUT_MS || '120000', 10);
@@ -1080,6 +1080,13 @@ export class Worker {
           const note = params.note as string | undefined;
           if (!url) throw new Error('profile_url required');
           await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+          const authorizedTarget = normalizeLinkedInTarget(url);
+          const presentedTarget = normalizeLinkedInTarget(await page.evaluate(() =>
+            document.querySelector<HTMLLinkElement>('link[rel="canonical"]')?.href || location.href));
+          if (!authorizedTarget || presentedTarget !== authorizedTarget) {
+            result = { success: false, error: 'Presented LinkedIn profile does not match the authorized target' };
+            break;
+          }
           await page.waitForTimeout(1500 + Math.random() * 2000);
           const connectBtn = await page.$('button span:has-text("Connect")');
           if (!connectBtn) {
@@ -1204,8 +1211,19 @@ export class Worker {
             break;
           }
           const limit = filters.limit ?? 10;
-          await page.locator('a[href*="/sales/lead/"], a[href*="/in/"], [data-x-search-result]').first()
-            .waitFor({ state: 'attached', timeout: 10000 }).catch(() => {});
+          const resultSelector = 'a[href*="/sales/lead/"], a[href*="/in/"], [data-x-search-result], [data-anonymize="person-name"]';
+          await page.locator(resultSelector).first()
+            .waitFor({ state: 'attached', timeout: 15000 }).catch(() => {});
+          const evidence = await page.evaluate(() => ({
+            current_path: location.pathname,
+            result_list_surface_detected: !!document.querySelector('[data-x-search-result], ol.artdeco-list, .search-results__result-list, #search-results-container'),
+            visible_result_card_count: Array.from(document.querySelectorAll('[data-x-search-result], li.artdeco-list__item, .search-results__result-item'))
+              .filter(element => (element as HTMLElement).offsetParent !== null).length,
+            sales_lead_link_count: document.querySelectorAll('a[href*="/sales/lead/"]').length,
+            profile_link_count: document.querySelectorAll('a[href*="/in/"]').length,
+            pagination_detected: !!document.querySelector('[role="navigation"][aria-label*="pagination" i], button[aria-label*="next" i]'),
+            virtualized_surface_detected: !!document.querySelector('[data-virtualized], .artdeco-list, [data-x-search-result]'),
+          }));
           const candidates = await page.$$eval('a[href*="/sales/lead/"], a[href*="/in/"]', (links, max) => {
             const seen = new Set<string>();
             return links.flatMap(link => {
@@ -1213,7 +1231,8 @@ export class Worker {
               const href = anchor.href.split('?')[0];
               const card = anchor.closest('li, [data-x-search-result], .artdeco-list__item') ?? anchor.parentElement;
               const clean = (value?: string | null) => value?.replace(/\s+/g, ' ').trim() || null;
-              const name = clean(anchor.textContent) || clean(card?.querySelector('[data-anonymize="person-name"], .artdeco-entity-lockup__title')?.textContent);
+              const name = clean(anchor.textContent) || clean(anchor.getAttribute('aria-label'))
+                || clean(card?.querySelector('[data-anonymize="person-name"], .artdeco-entity-lockup__title')?.textContent);
               if (!href || !name || seen.has(href)) return [];
               seen.add(href);
               return [{
@@ -1226,7 +1245,8 @@ export class Worker {
               }];
             }).slice(0, max as number);
           }, limit).catch(() => [] as Array<{ name: string; profile_url: string }>);
-          result = { success: true, data: { result_code: 'success', candidates, count: candidates.length, applied_filters: filters } };
+          logger.info('linkedin_sales_nav_surface', { queue_item_id: item.id, ...evidence, extracted_candidate_count: candidates.length });
+          result = { success: true, data: { result_code: 'success', candidates, count: candidates.length, evidence, applied_filters: filters } };
           break;
         }
         case 'read_inbox': {

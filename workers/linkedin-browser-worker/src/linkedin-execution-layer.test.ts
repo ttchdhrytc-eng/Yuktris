@@ -40,8 +40,15 @@ test('profile extraction has bounded selector fallbacks', () => {
   assert.match(worker,/main h1[\s\S]*pv-text-details__left-panel h1[\s\S]*meta\[property="og:title"\]/);
 });
 test('Sales Navigator waits for results and normalizes positive candidate fields', () => {
-  assert.match(worker,/data-x-search-result[\s\S]*timeout: 10000/);
+  assert.match(worker,/data-x-search-result[\s\S]*timeout: 15000/);
   for (const field of ['sales_nav_lead_url','headline','company','location']) assert.match(worker,new RegExp(field));
+  for (const field of ['current_path','result_list_surface_detected','visible_result_card_count','sales_lead_link_count','profile_link_count','pagination_detected','virtualized_surface_detected']) assert.match(worker,new RegExp(field));
+});
+test('connection request verifies the presented canonical target before any Connect control', () => {
+  const start = worker.lastIndexOf("case 'connection_request':");
+  const branch = worker.slice(start, worker.indexOf("case 'send_message':", start));
+  assert.ok(branch.indexOf('presentedTarget !== authorizedTarget') < branch.indexOf('button span:has-text("Connect")'));
+  assert.match(branch,/Presented LinkedIn profile does not match the authorized target/);
 });
 test('authenticated unresolved identity fails the task without falsely expiring the account', () => {
   assert.match(worker, /if \(checkpoint\) \{[\s\S]*connection_state: 'requires_action'[\s\S]*else if \(authentication\.authState !== 'authenticated'\) \{[\s\S]*connection_state: 'session_expired'[\s\S]*else \{[\s\S]*updateAccount\(accountId, \{ last_error: authentication\.error \}\)/);
