@@ -987,6 +987,10 @@ export class Worker {
           await this.queue.fail(item.id, authentication.error || 'LinkedIn requires reauthentication', Date.now() - startTime, false);
           return;
         }
+        await this.updateAccount(accountId, {
+          connection_state: 'connected', session_status: 'connected', status: 'active',
+          last_validated_at: new Date().toISOString(), last_error: null,
+        });
       } else {
         await this.linkedin.launch(undefined);
         await this.linkedin.newContext();

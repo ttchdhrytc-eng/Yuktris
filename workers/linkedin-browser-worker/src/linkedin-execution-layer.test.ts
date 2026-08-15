@@ -44,8 +44,10 @@ test('Sales Navigator waits for results and normalizes positive candidate fields
   for (const field of ['sales_nav_lead_url','headline','company','location']) assert.match(worker,new RegExp(field));
 });
 test('authenticated unresolved identity fails the task without falsely expiring the account', () => {
-  assert.match(worker, /authentication\.authState !== 'authenticated'[\s\S]*connection_state: 'session_expired'/);
-  assert.doesNotMatch(worker, /connection_state: checkpoint \? 'requires_action' : 'session_expired'/);
+  assert.match(worker, /if \(checkpoint\) \{[\s\S]*connection_state: 'requires_action'[\s\S]*else if \(authentication\.authState !== 'authenticated'\) \{[\s\S]*connection_state: 'session_expired'[\s\S]*else \{[\s\S]*updateAccount\(accountId, \{ last_error: authentication\.error \}\)/);
+});
+test('successful persistent authentication reconciles a historical false-expiry state', () => {
+  assert.match(worker, /if \(!authentication\.success\)[\s\S]*?return;[\s\S]*?updateAccount\(accountId, \{[\s\S]*?connection_state: 'connected'[\s\S]*?session_status: 'connected'[\s\S]*?last_validated_at:[\s\S]*?last_error: null/);
 });
 test('reply ingestion maps context and suppresses duplicate external events', () => {
   assert.match(worker,/p_contact_id[\s\S]*p_campaign_id[\s\S]*p_classification/);
