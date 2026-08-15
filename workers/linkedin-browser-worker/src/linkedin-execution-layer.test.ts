@@ -10,6 +10,7 @@ const safety = readFileSync(resolve(process.cwd(), '../../supabase/migrations/20
 const replies = readFileSync(resolve(process.cwd(), '../../supabase/migrations/20260811100000_linkedin_followup_reply_loop.sql'), 'utf8');
 const meeting = readFileSync(resolve(process.cwd(), '../../supabase/migrations/20260814221000_linkedin_meeting_event_idempotency.sql'), 'utf8');
 const digestFix = readFileSync(resolve(process.cwd(), '../../supabase/migrations/20260815100000_fix_linkedin_write_preflight_digest.sql'), 'utf8');
+const acceptanceOverride = readFileSync(resolve(process.cwd(), '../../supabase/migrations/20260815110000_linkedin_one_time_acceptance_override.sql'), 'utf8');
 
 test('all current writes share one preflight before the switch', () => {
   for (const action of ['connection_request','send_message','follow_up_message','like_post','follow_company']) assert.ok(LINKEDIN_WRITE_ACTIONS.has(action));
@@ -34,6 +35,13 @@ test('queue ownership, semantic idempotency and sanitized audit are structural',
 });
 test('write preflight resolves pgcrypto digest under its hardened search path', () => {
   assert.match(digestFix,/preflight_linkedin_write[\s\S]*search_path = pg_catalog, public, extensions/);
+});
+test('one-time acceptance override is staging-only, exact-scope, expiring, reservable and consumed on finalization', () => {
+  for (const value of ['vdiqfiuqckaxdjkadinu','controlled_acceptance','connection_request','expires_at','reserved_task_id','reserved_idempotency_key','consumed_at','disabled_at']) assert.match(acceptanceOverride,new RegExp(value));
+  assert.match(acceptanceOverride,/code' <> 'outside_working_hours'[\s\S]*RETURN v_result/);
+  assert.match(acceptanceOverride,/daily_connection_limit[\s\S]*daily_total_action_limit[\s\S]*minimum_write_interval_seconds[\s\S]*linkedin_safe_write_targets/);
+  assert.match(acceptanceOverride,/finalize_linkedin_write_without_acceptance_override[\s\S]*consumed_at=now\(\),disabled_at=now\(\)/);
+  assert.doesNotMatch(acceptanceOverride,/aljpmtuekghwzrnuwkat/);
 });
 test('staging allowlist is project-bound and production requires campaign or contact authorization', () => {
   assert.match(safety,/p_project_ref='vdiqfiuqckaxdjkadinu'/);
