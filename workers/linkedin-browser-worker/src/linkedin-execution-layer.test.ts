@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { decideLinkedInNextAction } from './linkedin-ai-handoff.js';
 import { LINKEDIN_WRITE_ACTIONS, normalizeLinkedInTarget, targetForWrite } from './linkedin-execution-safety.js';
+import { resolveLinkedInSelfIdentity, verifyBoundLinkedInIdentity } from './linkedin.js';
 
 const worker = readFileSync(resolve(process.cwd(), 'src/worker.ts'), 'utf8');
 const safety = readFileSync(resolve(process.cwd(), '../../supabase/migrations/20260814220000_linkedin_execution_write_safety.sql'), 'utf8');
@@ -62,6 +63,27 @@ test('connection request verifies the presented canonical target before any Conn
   assert.ok(branch.indexOf('presentedTarget !== authorizedTarget') < branch.indexOf('button span:has-text("Connect")'));
   assert.match(branch,/Presented LinkedIn profile does not match the authorized target/);
 });
+for (const [surface,currentUrl] of [
+  ['feed','https://www.linkedin.com/feed/'],
+  ['messaging','https://www.linkedin.com/messaging/'],
+  ['Sales Navigator','https://www.linkedin.com/sales/search/people'],
+  ['target prospect','https://www.linkedin.com/in/authorized-target'],
+]) test(`bound sender resolves from authenticated self evidence on ${surface}`, () => {
+  const resolved = resolveLinkedInSelfIdentity({currentUrl,selfNavigationHrefs:['https://www.linkedin.com/in/tarun-chaudhary06/']});
+  assert.equal(resolved?.profileUrl,'https://www.linkedin.com/in/tarun-chaudhary06');
+  assert.equal(verifyBoundLinkedInIdentity(resolved?.profileUrl,'https://www.linkedin.com/in/tarun-chaudhary06/'),'match');
+  assert.notEqual(resolved?.profileUrl,canonicalTarget(currentUrl));
+});
+test('bound identity comparison fails closed for mismatch and unresolved evidence', () => {
+  assert.equal(verifyBoundLinkedInIdentity('https://www.linkedin.com/in/different-self','https://www.linkedin.com/in/tarun-chaudhary06'),'mismatch');
+  assert.equal(verifyBoundLinkedInIdentity(null,'https://www.linkedin.com/in/tarun-chaudhary06'),'unresolved');
+});
+test('connection/read/write reuse the same authenticated-self resolver before preflight and target interaction', () => {
+  assert.doesNotMatch(worker,/verifyIdentity\(/);
+  assert.match(worker,/verifyPersistentAuthentication\(intendedIdentity\)[\s\S]*preflightLinkedInWrite\(this\.client, item\)/);
+  assert.ok(worker.indexOf('verifyPersistentAuthentication(intendedIdentity)') < worker.indexOf('preflightLinkedInWrite(this.client, item)'));
+});
+function canonicalTarget(value:string):string|null { return value.includes('/in/') ? normalizeLinkedInTarget(value) : null; }
 test('authenticated unresolved identity fails the task without falsely expiring the account', () => {
   assert.match(worker, /if \(checkpoint\) \{[\s\S]*connection_state: 'requires_action'[\s\S]*else if \(authentication\.authState !== 'authenticated'\) \{[\s\S]*connection_state: 'session_expired'[\s\S]*else \{[\s\S]*updateAccount\(accountId, \{ last_error: authentication\.error \}\)/);
 });

@@ -1,4 +1,4 @@
-import { chromium, Browser, BrowserContext, Locator, Page } from 'playwright';
+import { chromium, Browser, BrowserContext, Locator, Page, Response as PlaywrightResponse } from 'playwright';
 import { SupabaseClient } from '@supabase/supabase-js';
 import { logger } from './logger.js';
 import { browserbase, BrowserbaseError, BrowserbaseSession, CreateSessionOptions } from './browserbase.js';
@@ -24,7 +24,7 @@ const CHALLENGE_DISAPPEAR_GRACE_MS = 10 * 1000;
 const IDENTITY_RESOLUTION_ATTEMPTS = 4;
 const IDENTITY_RESOLUTION_DELAY_MS = 2000;
 const IDENTITY_NAVIGATION_TIMEOUT_MS = 10000;
-const FAST_REUSE_IDENTITY_TIMEOUT_MS = 2500;
+const FAST_REUSE_IDENTITY_TIMEOUT_MS = 8000;
 
 async function withTimeout<T>(operation: Promise<T>, timeoutMs: number, message: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -167,6 +167,13 @@ export function resolveLinkedInSelfIdentity(evidence: LinkedInSelfIdentityEviden
     return accept(`https://www.linkedin.com/in/${identifier}`, 'authenticated_me_api');
   }
   return null;
+}
+
+export function verifyBoundLinkedInIdentity(resolvedProfileUrl?: string | null, boundProfileUrl?: string | null): 'match' | 'mismatch' | 'unresolved' {
+  const resolved = canonicalIdentityUrl(resolvedProfileUrl);
+  const bound = canonicalIdentityUrl(boundProfileUrl);
+  if (!resolved || !bound) return 'unresolved';
+  return resolved.toLowerCase() === bound.toLowerCase() ? 'match' : 'mismatch';
 }
 
 export function decideFreshIdentity(
@@ -1103,7 +1110,7 @@ export class LinkedInBrowser {
     accountId?: string,
     queueItemId?: string,
     intendedIdentity?: IntendedLinkedInIdentity,
-    preserveCurrentPage = false,
+    _preserveCurrentPage = false,
     allowBoundIdentityDeferral = false,
     credentials?: LinkedInLoginCredentials,
   ): Promise<ConnectionResult> {
@@ -1383,7 +1390,7 @@ export class LinkedInBrowser {
       await onProgress?.('identity_resolution_pending', 'LinkedIn is authenticated. Checking the bound account identity...');
       // Existing bound accounts get one bounded, best-effort identity check.
       // Authentication usability is not coupled to LinkedIn's /in/me redirect.
-      const identity = await this.verifyIdentity(1, undefined, undefined, undefined, FAST_REUSE_IDENTITY_TIMEOUT_MS);
+      const identity = await this.resolveAuthenticatedSelfIdentity(1, undefined, undefined, undefined, FAST_REUSE_IDENTITY_TIMEOUT_MS);
       if (!identity) {
         return { success: false, authState: 'authenticated', identityState: 'unresolved',
           errorCode: 'identity_resolution_failed', nonRetryable: true,
@@ -1411,7 +1418,7 @@ export class LinkedInBrowser {
       const auth = await this.waitForAuthentication(15000);
       if (!auth) return { success: false, error: 'Session expired — LinkedIn did not show authenticated state' };
 
-      const identity = await this.verifyIdentity();
+      const identity = await this.resolveAuthenticatedSelfIdentity();
       if (!identity) return { success: false, error: 'Identity verification failed' };
       const identityMismatch = this.getIdentityMismatch(identity, intendedIdentity);
       if (identityMismatch) return { success: false, error: identityMismatch, nonRetryable: true, authState: 'authenticated' };
@@ -1552,7 +1559,7 @@ export class LinkedInBrowser {
       error: 'LinkedIn requires reauthentication',
     };
 
-    const identity = await this.verifyIdentity(1, undefined, undefined, undefined, FAST_REUSE_IDENTITY_TIMEOUT_MS);
+    const identity = await this.resolveAuthenticatedSelfIdentity(1, undefined, undefined, undefined, FAST_REUSE_IDENTITY_TIMEOUT_MS);
     if (!identity) {
       return {
         success: false, authState: 'authenticated', identityState: 'unresolved',
@@ -1560,8 +1567,14 @@ export class LinkedInBrowser {
         error: 'LinkedIn is authenticated, but its canonical identity could not be verified',
       };
     }
-    const mismatch = this.getIdentityMismatch(identity, intendedIdentity);
-    if (mismatch) return { success: false, authState: 'authenticated', identityState: 'mismatch', nonRetryable: true, error: mismatch };
+    if (intendedIdentity?.profileUrl) {
+      const comparison = verifyBoundLinkedInIdentity(identity.profileUrl, intendedIdentity.profileUrl);
+      if (comparison !== 'match') return { success: false, authState: 'authenticated', identityState: comparison, nonRetryable: true,
+        error: comparison === 'mismatch' ? 'Authenticated LinkedIn profile does not match the account being connected' : 'Authenticated LinkedIn identity could not be compared with the bound account' };
+    } else {
+      const mismatch = this.getIdentityMismatch(identity, intendedIdentity);
+      if (mismatch) return { success: false, authState: 'authenticated', identityState: 'mismatch', nonRetryable: true, error: mismatch };
+    }
     logger.info('linkedin_identity_verified', { authentication_state: 'authenticated', identity_state: 'verified', canonical_identity_found: true });
     return { success: true, authState: 'authenticated', identityState: 'verified', identity, effectiveProfileUrl: identity.profileUrl || undefined };
   }
@@ -2029,7 +2042,7 @@ export class LinkedInBrowser {
     }).catch(() => null);
   }
 
-  private async verifyIdentity(attempt = 1, queueItemId?: string, workspaceId?: string, accountId?: string, navigationTimeoutMs = IDENTITY_NAVIGATION_TIMEOUT_MS): Promise<LinkedInIdentity | null> {
+  private async resolveAuthenticatedSelfIdentity(attempt = 1, queueItemId?: string, workspaceId?: string, accountId?: string, navigationTimeoutMs = IDENTITY_NAVIGATION_TIMEOUT_MS): Promise<LinkedInIdentity | null> {
     if (!this.page) return null;
     const startedAt = Date.now();
     const timing = (stage: string, method: string, stageStartedAt = startedAt, metadata: Record<string, unknown> = {}): void => {
@@ -2082,7 +2095,14 @@ export class LinkedInBrowser {
       const navigationStartedAt = Date.now();
       timing('identity_fallback_started', 'linkedin_profile_redirect', navigationStartedAt);
       timing('I1_navigation_started', 'linkedin_profile_redirect', navigationStartedAt, { timeout_ms: navigationTimeoutMs });
-      const response = await this.page.goto(LINKEDIN_PROFILE_URL, { waitUntil: 'commit', timeout: navigationTimeoutMs });
+      let response: PlaywrightResponse | null = null;
+      try {
+        response = await this.page.goto(LINKEDIN_PROFILE_URL, { waitUntil: 'commit', timeout: navigationTimeoutMs });
+      } catch (navigationError) {
+        logger.warn('Authenticated self navigation did not commit within the identity deadline; inspecting current self evidence', {
+          error: this.sanitizeError(navigationError), pathname: this.safePathname(this.page.url()),
+        });
+      }
       timing('I2_navigation_response_received', 'linkedin_profile_redirect', navigationStartedAt, { response_received: !!response });
       const resolvedUrl = this.page.url();
       timing('I3_redirect_resolved', 'linkedin_profile_redirect', navigationStartedAt, { origin: this.safeOrigin(resolvedUrl), pathname: this.safePathname(resolvedUrl) });
@@ -2139,7 +2159,7 @@ export class LinkedInBrowser {
 
   private async verifyIdentityWithRetry(queueItemId?: string, workspaceId?: string, accountId?: string): Promise<LinkedInIdentity | null> {
     for (let attempt = 1; attempt <= IDENTITY_RESOLUTION_ATTEMPTS; attempt++) {
-      const identity = await this.verifyIdentity(attempt, queueItemId, workspaceId, accountId);
+      const identity = await this.resolveAuthenticatedSelfIdentity(attempt, queueItemId, workspaceId, accountId);
       logger.info('Canonical LinkedIn identity resolution attempt', {
         queue_item_id: queueItemId,
         workspace_id: workspaceId,
@@ -2351,7 +2371,7 @@ export class LinkedInBrowser {
       }
 
       // 3. Verify profile is accessible
-      const identity = await this.verifyIdentity();
+      const identity = await this.resolveAuthenticatedSelfIdentity();
       if (!identity) {
         return { valid: false, reason: 'Profile page not accessible — identity verification failed', identity: null };
       }

@@ -15,7 +15,7 @@ test('1 authenticated bound restore fails closed when self identity is unresolve
   assert.match(restore, /if \(!identity\)[\s\S]*success: false[\s\S]*identityState: 'unresolved'/);
 });
 test('2 critical path performs only one fast identity attempt', () => {
-  assert.match(restore, /verifyIdentity\(1,[\s\S]*FAST_REUSE_IDENTITY_TIMEOUT_MS/);
+  assert.match(restore, /resolveAuthenticatedSelfIdentity\(1,[\s\S]*FAST_REUSE_IDENTITY_TIMEOUT_MS/);
   assert.doesNotMatch(restore, /verifyIdentityWithRetry/);
 });
 test('3 unresolved bound identity cannot mark connected', () => {

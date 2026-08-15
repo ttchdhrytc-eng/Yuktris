@@ -24,8 +24,8 @@ const tests: Array<[string, () => void]> = [
     assert.doesNotMatch(check, /captureSession/);
     const verify = linkedin.match(/async verifyPersistentAuthentication[\s\S]*?private async navigateWithRetry/)?.[0] ?? '';
     assert.match(verify, /navigateWithRetry\(this\.page, LINKEDIN_FEED_URL/);
-    assert.match(verify, /verifyIdentity/);
-    assert.match(verify, /getIdentityMismatch/);
+    assert.match(verify, /resolveAuthenticatedSelfIdentity/);
+    assert.match(verify, /verifyBoundLinkedInIdentity/);
   }],
   ['healthy Context publishes neither auth_required nor Live View', () => {
     const branch = worker.match(/if \(preflight\.result\)[\s\S]*?\} else \{/)?.[0] ?? '';

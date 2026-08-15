@@ -8,7 +8,7 @@ const linkedin = read('workers/linkedin-browser-worker/src/linkedin.ts');
 const worker = read('workers/linkedin-browser-worker/src/worker.ts');
 const fastPath = read('workers/linkedin-browser-worker/src/persistent-fast-path.test.ts');
 const challenge = read('workers/linkedin-browser-worker/src/interactive-challenge.test.ts');
-const start = linkedin.indexOf('private async verifyIdentity(', linkedin.indexOf('private async resolveAuthenticatedMeApiIdentity'));
+const start = linkedin.indexOf('private async resolveAuthenticatedSelfIdentity(', linkedin.indexOf('private async resolveAuthenticatedMeApiIdentity'));
 const end = linkedin.indexOf('private async verifyIdentityWithRetry', start);
 const resolver = linkedin.slice(start, end);
 
