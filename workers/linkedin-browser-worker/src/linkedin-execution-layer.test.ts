@@ -9,6 +9,7 @@ const worker = readFileSync(resolve(process.cwd(), 'src/worker.ts'), 'utf8');
 const safety = readFileSync(resolve(process.cwd(), '../../supabase/migrations/20260814220000_linkedin_execution_write_safety.sql'), 'utf8');
 const replies = readFileSync(resolve(process.cwd(), '../../supabase/migrations/20260811100000_linkedin_followup_reply_loop.sql'), 'utf8');
 const meeting = readFileSync(resolve(process.cwd(), '../../supabase/migrations/20260814221000_linkedin_meeting_event_idempotency.sql'), 'utf8');
+const digestFix = readFileSync(resolve(process.cwd(), '../../supabase/migrations/20260815100000_fix_linkedin_write_preflight_digest.sql'), 'utf8');
 
 test('all current writes share one preflight before the switch', () => {
   for (const action of ['connection_request','send_message','follow_up_message','like_post','follow_company']) assert.ok(LINKEDIN_WRITE_ACTIONS.has(action));
@@ -30,6 +31,9 @@ test('queue ownership, semantic idempotency and sanitized audit are structural',
   assert.match(safety,/q\.attempt_id=p_attempt_id AND q\.status='running'/);
   assert.match(safety,/semantic_key text NOT NULL UNIQUE/);
   assert.doesNotMatch(safety,/cookie|password|browserbase_url|cdp/i);
+});
+test('write preflight resolves pgcrypto digest under its hardened search path', () => {
+  assert.match(digestFix,/preflight_linkedin_write[\s\S]*search_path = pg_catalog, public, extensions/);
 });
 test('staging allowlist is project-bound and production requires campaign or contact authorization', () => {
   assert.match(safety,/p_project_ref='vdiqfiuqckaxdjkadinu'/);
