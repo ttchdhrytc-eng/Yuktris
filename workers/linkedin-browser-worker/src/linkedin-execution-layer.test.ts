@@ -12,6 +12,7 @@ const replies = readFileSync(resolve(process.cwd(), '../../supabase/migrations/2
 const meeting = readFileSync(resolve(process.cwd(), '../../supabase/migrations/20260814221000_linkedin_meeting_event_idempotency.sql'), 'utf8');
 const digestFix = readFileSync(resolve(process.cwd(), '../../supabase/migrations/20260815100000_fix_linkedin_write_preflight_digest.sql'), 'utf8');
 const acceptanceOverride = readFileSync(resolve(process.cwd(), '../../supabase/migrations/20260815110000_linkedin_one_time_acceptance_override.sql'), 'utf8');
+const writeAcceptancePurpose = readFileSync(resolve(process.cwd(), '../../supabase/migrations/20260816090000_controlled_write_acceptance_purpose.sql'), 'utf8');
 
 test('all current writes share one preflight before the switch', () => {
   for (const action of ['connection_request','send_message','follow_up_message','like_post','follow_company']) assert.ok(LINKEDIN_WRITE_ACTIONS.has(action));
@@ -43,6 +44,12 @@ test('one-time acceptance override is staging-only, exact-scope, expiring, reser
   assert.match(acceptanceOverride,/daily_connection_limit[\s\S]*daily_total_action_limit[\s\S]*minimum_write_interval_seconds[\s\S]*linkedin_safe_write_targets/);
   assert.match(acceptanceOverride,/finalize_linkedin_write_without_acceptance_override[\s\S]*consumed_at=now\(\),disabled_at=now\(\)/);
   assert.doesNotMatch(acceptanceOverride,/aljpmtuekghwzrnuwkat/);
+});
+test('controlled write acceptance purpose remains staging-only and working-hours-only', () => {
+  assert.match(writeAcceptancePurpose,/purpose='controlled_write_acceptance'/);
+  assert.match(writeAcceptancePurpose,/v_result->>'code'<>'outside_working_hours'/);
+  assert.match(writeAcceptancePurpose,/p_project_ref<>'vdiqfiuqckaxdjkadinu'/);
+  assert.match(writeAcceptancePurpose,/daily_connection_limit[\s\S]*minimum_write_interval_seconds[\s\S]*linkedin_safe_write_targets/);
 });
 test('staging allowlist is project-bound and production requires campaign or contact authorization', () => {
   assert.match(safety,/p_project_ref='vdiqfiuqckaxdjkadinu'/);
