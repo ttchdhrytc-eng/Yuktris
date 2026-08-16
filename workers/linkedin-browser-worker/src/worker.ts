@@ -10,6 +10,7 @@ import { interactiveAuthTimeoutMs, interactiveBrowserSessionTimeoutMs } from './
 import { normalizeLinkedInAction, validateSalesNavigatorPayload } from './linkedin-agent-contract.js';
 import { CloudAgentStartupError, cloudAgentStartupTimeoutMs, withinStartupDeadline } from './startup-deadline.js';
 import { finalizeLinkedInWrite, LINKEDIN_WRITE_ACTIONS, normalizeLinkedInTarget, preflightLinkedInWrite } from './linkedin-execution-safety.js';
+import { classifyConnectionProfileState, isNoNoteConfirmCandidate, NO_NOTE_CONFIRM_LABELS } from './connection-dialog.js';
 
 const INTERACTIVE_AUTH_TIMEOUT_MS = interactiveAuthTimeoutMs();
 const TEST_CONNECTION_TIMEOUT = parseInt(process.env.TEST_CONNECTION_TIMEOUT_MS || '120000', 10);
@@ -1103,6 +1104,26 @@ export class Worker {
             break;
           }
           await page.waitForTimeout(1500 + Math.random() * 2000);
+
+          const readProfileState = async () => classifyConnectionProfileState({
+            hasPending: !!(await page.$('button span:has-text("Pending")')),
+            hasConnect: !!(await page.$('button span:has-text("Connect")')),
+            hasMessage: !!(await page.$('button span:has-text("Message")')),
+          });
+          const initialState = await readProfileState();
+          if (initialState === 'already_pending') {
+            result = { success: true, data: { result_code: 'already_done', connection_state: 'request_already_pending' } };
+            break;
+          }
+          if (initialState === 'already_connected') {
+            result = { success: true, data: { result_code: 'already_done', connection_state: 'already_connected' } };
+            break;
+          }
+          if (initialState === 'unavailable') {
+            result = { success: false, error: 'Connect control not found — action unavailable', data: { result_code: 'not_available' } };
+            break;
+          }
+
           const connectBtn = await page.$('button span:has-text("Connect")');
           if (!connectBtn) {
             result = { success: false, error: 'Connect button not found — may already be connected' };
@@ -1110,6 +1131,12 @@ export class Worker {
           }
           await connectBtn.click();
           await page.waitForTimeout(800 + Math.random() * 1200);
+
+          if (await this.linkedin.detectRestriction()) {
+            result = { success: false, error: 'LinkedIn restriction detected after opening connect dialog', data: { result_code: 'restricted' } };
+            break;
+          }
+
           if (note) {
             const addNoteBtn = await page.$('button:has-text("Add a note")');
             if (!addNoteBtn) { result = { success: false, error: 'Add note control not found' }; break; }
@@ -1123,14 +1150,33 @@ export class Worker {
             if (!sendBtn || await sendBtn.isDisabled()) { result = { success: false, error: 'Connection request send control unavailable' }; break; }
             await sendBtn.click();
           } else {
-            const sendBtn = await page.$('button:has-text("Send without note")');
-            if (!sendBtn || await sendBtn.isDisabled()) { result = { success: false, error: 'Connection request send control unavailable' }; break; }
-            await sendBtn.click();
+            const dialog = await page.$('div[role="dialog"]');
+            const scope = dialog ?? page;
+            let confirmBtn: Awaited<ReturnType<typeof page.$>> = null;
+            for (const label of NO_NOTE_CONFIRM_LABELS) {
+              const candidate = await scope.$(`button:visible:has-text("${label}")`);
+              if (!candidate) continue;
+              const text = (await candidate.textContent())?.trim() ?? '';
+              if (!isNoNoteConfirmCandidate(text) || await candidate.isDisabled()) continue;
+              confirmBtn = candidate;
+              break;
+            }
+            if (!confirmBtn) {
+              // Some cohorts confirm immediately on the profile Connect click with no dialog at all.
+              const directState = await readProfileState();
+              if (directState === 'already_pending') {
+                result = { success: true, data: { result_code: 'success', connection_state: 'request_already_pending' } };
+                break;
+              }
+              result = { success: false, error: 'Connection request send control unavailable', data: { result_code: 'not_available' } };
+              break;
+            }
+            await confirmBtn.click();
           }
           await page.waitForTimeout(2000);
-          const stillOpen = await page.$('#custom-message, button:has-text("Send without note")');
+          const stillOpen = await page.$('#custom-message, div[role="dialog"]:has-text("Add a note")');
           if (stillOpen) { result = { success: false, error: 'Connection request was not confirmed as sent' }; break; }
-          result = { success: true, data: { connected: url } };
+          result = { success: true, data: { result_code: 'success', connected: url } };
           break;
         }
         case 'send_message':
