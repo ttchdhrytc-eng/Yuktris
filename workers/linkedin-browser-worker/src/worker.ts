@@ -1186,8 +1186,10 @@ export class Worker {
           if (!prospectName || !message) throw new Error('prospect_name and message required');
           await page.goto('https://www.linkedin.com/messaging', { waitUntil: 'domcontentloaded', timeout: 30000 });
           await page.waitForTimeout(1500 + Math.random() * 1500);
-          const convEl = await page.$(`div.msg-conversation-listitem:has-text("${prospectName}")`);
-          if (!convEl) { result = { success: false, error: `Conversation with ${prospectName} not found` }; break; }
+          const matchingConversations = await page.$$(`div.msg-conversation-listitem:has-text("${prospectName}")`);
+          if (matchingConversations.length === 0) { result = { success: false, error: `Conversation with ${prospectName} not found` }; break; }
+          if (matchingConversations.length > 1) { result = { success: false, error: `Multiple conversations match "${prospectName}" — refusing to guess the recipient` }; break; }
+          const convEl = matchingConversations[0];
           await convEl.click();
           await page.waitForTimeout(1000);
           const inputBox = await page.$('div.msg-form__contenteditable');
@@ -1327,11 +1329,15 @@ export class Worker {
           await page.waitForTimeout(2000);
           const prospectName = params.prospect_name as string | undefined;
           if (prospectName) {
-            const conversation = await page.$(`div.msg-conversation-listitem:has-text("${prospectName}")`);
-            if (!conversation) { result = { success: false, error: `Conversation with ${prospectName} not found` }; break; }
-            await conversation.click();
+            const matchingConversations = await page.$$(`div.msg-conversation-listitem:has-text("${prospectName}")`);
+            if (matchingConversations.length === 0) { result = { success: false, error: `Conversation with ${prospectName} not found` }; break; }
+            if (matchingConversations.length > 1) { result = { success: false, error: `Multiple conversations match "${prospectName}" — refusing to guess the thread` }; break; }
+            await matchingConversations[0].click();
             await page.waitForTimeout(1000);
           }
+          // Scroll the thread to the top to force LinkedIn's lazy loader to render the full history before extraction.
+          await page.evaluate(() => { document.querySelector('.msg-s-message-list-container')?.scrollTo(0, 0); }).catch(() => {});
+          await page.waitForTimeout(500);
           const messages = await page.$$eval('div.msg-s-message-list__event', (els) =>
             els.map((el) => ({
               external_id: el.getAttribute('data-event-urn') ?? el.id ?? null,
@@ -1787,7 +1793,7 @@ export class Worker {
 type ReplyClassification = 'positive' | 'interested' | 'neutral' | 'objection' | 'not_interested' | 'wrong_person' | 'do_not_contact' | 'unknown';
 
 function classifyLinkedInReply(body: string): { classification: ReplyClassification; confidence: number } {
-  const text = body.toLowerCase().replace(/\s+/g, ' ').trim();
+  const text = body.toLowerCase().replace(/[-_]+/g, ' ').replace(/\s+/g, ' ').trim();
   if (/\b(do not contact|don't contact|stop messaging|remove me|unsubscribe)\b/.test(text)) return { classification: 'do_not_contact', confidence: 0.98 };
   if (/\b(not interested|no interest|not a fit|no thanks|please don't)\b/.test(text)) return { classification: 'not_interested', confidence: 0.95 };
   if (/\b(wrong person|not the right person|speak to|contact .* instead)\b/.test(text)) return { classification: 'wrong_person', confidence: 0.9 };

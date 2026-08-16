@@ -13,7 +13,7 @@ export interface LinkedInDecision {
 
 /** Deterministic fixture-safe handoff. The worker executes commands; it never invents or sends this response. */
 export function decideLinkedInNextAction(message: string): LinkedInDecision {
-  const text = message.toLowerCase().replace(/\s+/g, ' ').trim();
+  const text = message.toLowerCase().replace(/[-_]+/g, ' ').replace(/\s+/g, ' ').trim();
   const decision = (category: ObjectionCategory, action: LinkedInDecision['action'], qualification: LinkedInDecision['qualification_state'], response: string | null, approval = true): LinkedInDecision =>
     ({ action, category, qualification_state: qualification, response, requires_human_approval: approval });
   if (/\b(not interested|no thanks|stop messaging|do not contact)\b/.test(text)) return decision('not_interested', 'STOP', 'disqualified', null, false);

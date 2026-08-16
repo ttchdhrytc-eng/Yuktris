@@ -120,3 +120,18 @@ test('meeting event is workspace authorized, idempotent, persistent and notifica
   assert.match(meeting,/is_workspace_member/); assert.match(meeting,/uq_linkedin_meeting_event_idempotency/);
   assert.match(meeting,/notification_type='meeting_booked'/); assert.match(meeting,/'fixture',true/);
 });
+test('send_message and follow_up_message refuse an ambiguous recipient rather than guessing', () => {
+  const messagingCase = worker.slice(worker.lastIndexOf("case 'send_message':"), worker.lastIndexOf("case 'like_post':"));
+  assert.match(messagingCase, /matchingConversations\.length > 1/);
+  assert.match(messagingCase, /refusing to guess the recipient/);
+});
+test('read_replies refuses an ambiguous thread and scrolls to load full history before extraction', () => {
+  const readRepliesCase = worker.slice(worker.lastIndexOf("case 'read_replies':"), worker.lastIndexOf('default:'));
+  assert.match(readRepliesCase, /matchingConversations\.length > 1/);
+  assert.match(readRepliesCase, /refusing to guess the thread/);
+  assert.match(readRepliesCase, /scrollTo\(0, 0\)/);
+});
+test('reply classification and AI handoff normalize hyphenated/underscored phrasing', () => {
+  assert.equal(decideLinkedInNextAction("not-interested, please stop").category, 'not_interested');
+  assert.match(worker, /classifyLinkedInReply\(body: string\)[\s\S]*?replace\(\/\[-_\]\+\/g, ' '\)/);
+});
