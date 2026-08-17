@@ -21,6 +21,7 @@ import {
   buyingSignalAgent,
   linkedinIntelligenceAgent,
 } from './IntelligenceAgents';
+import { icpGenerationAgent } from './ICPGenerationAgent';
 import {
   proposalGeneratorAgent,
   emailWriterAgent,
@@ -59,6 +60,7 @@ agentRegistry.register(linkedinIntelligenceAgent);
 agentRegistry.register(technologyDetectionAgent);
 agentRegistry.register(seoAnalysisAgent);
 agentRegistry.register(icpScoringAgent);
+agentRegistry.register(icpGenerationAgent);
 agentRegistry.register(buyingSignalAgent);
 agentRegistry.register(proposalGeneratorAgent);
 agentRegistry.register(emailWriterAgent);

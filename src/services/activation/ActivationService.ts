@@ -242,16 +242,32 @@ class ActivationService {
     this.updateStep('icp', 'Generating ICP recommendations...', false);
 
     try {
-      const mockIcps = await icpService.generateMultipleICPs();
+      const generated = await icpService.generateICPs({
+        workspaceId,
+        businessSummary: {
+          company_name: businessProfile.name,
+          website: businessProfile.website,
+          description: businessProfile.description,
+          industry: businessProfile.industry,
+          services: businessProfile.services,
+          usp: businessProfile.usp,
+          competitors: businessProfile.competitors,
+          target_audience: businessProfile.targetCustomers,
+          pricing_model: businessProfile.pricingModel,
+          technology_stack: businessProfile.technologies,
+          business_model: businessProfile.businessModel,
+        },
+        companyName: businessProfile.name,
+      });
 
-      const icps: ICPRecommendation[] = mockIcps.map((icp, index) => ({
+      const icps: ICPRecommendation[] = generated.map((icp, index) => ({
         id: `icp_${index}`,
         name: icp.name,
         description: icp.description,
-        industry: icp.name,
-        companySize: '50–500 employees',
-        jobTitles: ['VP Sales', 'CRO', 'Head of RevOps'],
-        painPoints: ['Manual prospect research', 'Low reply rates', 'No buying intent visibility'],
+        industry: icp.company_profile.industry,
+        companySize: icp.company_profile.company_size,
+        jobTitles: icp.decision_makers.map((dm) => dm.job_title),
+        painPoints: icp.pain_points.map((p) => p.pain_point),
         estimatedTam: icp.estimated_deal_size ?? '$10K+ ARR per deal',
         estimatedReplyRate: `${icp.conversion_rate}%`,
         estimatedMeetingRate: `${Math.round(icp.conversion_rate * 0.3)}%`,

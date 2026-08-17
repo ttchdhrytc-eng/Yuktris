@@ -3,14 +3,11 @@
 // ============================================================
 //
 // Main orchestrator for the ICP Intelligence Agent.
-// Runs after both the Business Intelligence Agent and
-// Market Intelligence Agent complete.
+// Generates ICPs from the workspace's persisted business and
+// market research (business_analysis / business_insights /
+// market_analysis) via icp_generation_agent (real AI Gateway
+// call, structured + validated), then persists the result.
 //
-// Generates multiple ICPs with company profiles, decision
-// makers, pain points, goals, buying triggers, negative
-// filters, and sales navigator filters.
-//
-// Not implemented — uses mock data to simulate the workflow.
 // Data is persisted to Supabase tables:
 //   - icps
 //   - icp_company_profile
@@ -22,6 +19,10 @@
 //   - sales_navigator_filters
 
 import { supabase } from '@/lib/supabase';
+import { agentOrchestrator } from '@/services/agents';
+import { biService } from '@/services/business-intelligence';
+import { miService } from '@/services/market-intelligence';
+import { validateGeneratedICPs, type GeneratedICP } from './icpValidation';
 import type {
   ICP,
   FullICP,
@@ -37,18 +38,7 @@ import type {
   ICPRecommendations,
   ICPGenerationResult,
 } from '@/types/icp-intelligence';
-import {
-  ICP_STAGES,
-  MOCK_ICPS,
-  MOCK_ICP_PROFILES,
-  MOCK_ICP_DECISION_MAKERS,
-  MOCK_ICP_PAIN_POINTS,
-  MOCK_ICP_GOALS,
-  MOCK_ICP_TRIGGERS,
-  MOCK_ICP_NEGATIVE_FILTERS,
-  MOCK_ICP_SALES_NAV,
-  MOCK_RECOMMENDATIONS,
-} from './mockData';
+import { ICP_STAGES } from './mockData';
 
 // ============================================================
 // Service Definition
@@ -56,121 +46,112 @@ import {
 
 export class ICPIntelligenceService {
   /**
-   * Generate a single ICP (placeholder).
-   * Will use OpenAIService.generateICP() when implemented.
+   * Load the workspace's persisted business + market research and build the
+   * context objects the ICP generation agent needs. Throws if business
+   * research has not completed yet — there is no mock substitute for it.
    */
-  async generateICP(_businessSummary: string, _marketSummary: string): Promise<unknown> {
-    throw new Error('ICPIntelligenceService.generateICP() not implemented — use generateMultipleICPs()');
-  }
+  private async loadResearchContext(
+    workspaceId: string,
+    companyName?: string | null,
+  ): Promise<{ businessSummary: Record<string, unknown>; marketSummary: Record<string, unknown>; businessAnalysisId: string | null; marketAnalysisId: string | null }> {
+    const businessAnalysis = await biService.loadLatestAnalysis(workspaceId, companyName);
+    if (!businessAnalysis || businessAnalysis.analysis_status !== 'completed') {
+      throw new Error('Business analysis must complete before ICPs can be generated.');
+    }
 
-  /**
-   * Generate multiple ICPs from BI + MI data.
-   * Returns mock ICP definitions (without DB ids).
-   */
-  async generateMultipleICPs(): Promise<typeof MOCK_ICPS> {
-    return MOCK_ICPS;
-  }
+    const marketAnalysis = await miService.loadLatestAnalysis(workspaceId, companyName).catch(() => null);
 
-  /**
-   * Score an ICP by opportunity, competition, and revenue.
-   * Placeholder — will use OpenAIService.scoreICP() when implemented.
-   */
-  async scoreICP(icpIndex: number): Promise<{
-    confidence: number;
-    opportunityScore: number;
-    competitionScore: number;
-    revenueScore: number;
-    conversionRate: number;
-  }> {
-    const icp = MOCK_ICPS[icpIndex] ?? MOCK_ICPS[0];
+    const businessSummary: Record<string, unknown> = {
+      company_name: businessAnalysis.company_name,
+      industry: businessAnalysis.industry,
+      country: businessAnalysis.country,
+      description: businessAnalysis.description,
+      business_model: businessAnalysis.business_model,
+      products: businessAnalysis.products,
+      services: businessAnalysis.services,
+      pricing_model: businessAnalysis.pricing_model,
+      target_audience: businessAnalysis.target_audience,
+      usp: businessAnalysis.usp,
+      customer_problems: businessAnalysis.customer_problems,
+      business_goals: businessAnalysis.business_goals,
+      revenue_model: businessAnalysis.revenue_model,
+      competitive_position: businessAnalysis.competitive_position,
+      insights: businessAnalysis.insights
+        ? {
+            strengths: businessAnalysis.insights.strengths,
+            weaknesses: businessAnalysis.insights.weaknesses,
+            opportunities: businessAnalysis.insights.opportunities,
+            risks: businessAnalysis.insights.risks,
+            executive_summary: businessAnalysis.insights.executive_summary,
+          }
+        : null,
+    };
+
+    const marketSummary: Record<string, unknown> = marketAnalysis
+      ? {
+          market_size: marketAnalysis.market_size,
+          growth_score: marketAnalysis.growth_score,
+          competition_score: marketAnalysis.competition_score,
+          opportunity_score: marketAnalysis.opportunity_score,
+          recommended_strategy: marketAnalysis.recommended_strategy,
+          executive_summary: marketAnalysis.executive_summary,
+        }
+      : {};
+
     return {
-      confidence: icp.confidence,
-      opportunityScore: icp.opportunity_score,
-      competitionScore: icp.competition_score,
-      revenueScore: icp.revenue_score,
-      conversionRate: icp.conversion_rate,
+      businessSummary,
+      marketSummary,
+      businessAnalysisId: businessAnalysis.id,
+      marketAnalysisId: marketAnalysis?.id ?? null,
     };
   }
 
   /**
-   * Generate decision makers for an ICP.
-   * Placeholder — will use OpenAIService.generateBuyerPersona() when implemented.
+   * Generate 1-3 ICPs from business/market research context via the real
+   * icp_generation_agent (AI Gateway). Throws a retryable error on failure
+   * or invalid model output \u2014 never falls back to mock data.
    */
-  async generateDecisionMakers(icpIndex: number): Promise<Omit<ICPDecisionMaker, 'id' | 'icp_id' | 'created_at'>[]> {
-    return MOCK_ICP_DECISION_MAKERS[icpIndex] ?? MOCK_ICP_DECISION_MAKERS[0];
+  async generateICPs(params: {
+    workspaceId: string;
+    businessSummary: Record<string, unknown>;
+    marketSummary?: Record<string, unknown>;
+    companyName?: string | null;
+  }): Promise<GeneratedICP[]> {
+    const result = await agentOrchestrator.executeAgent({
+      agentName: 'icp_generation_agent',
+      input: {
+        business_summary: params.businessSummary,
+        market_summary: params.marketSummary ?? {},
+        company_name: params.companyName ?? '',
+      },
+      workspaceId: params.workspaceId,
+      timeoutMs: 60_000,
+    });
+
+    if (result.status !== 'completed') {
+      throw new Error(result.error ?? 'ICP generation failed');
+    }
+
+    // Defense in depth: re-validate even though the agent already validates
+    // its own output before returning `completed`.
+    const validation = validateGeneratedICPs(result.output as Record<string, unknown>);
+    if (!validation.valid) {
+      throw new Error(`ICP generation returned invalid data: ${validation.errors.join('; ')}`);
+    }
+    return validation.icps;
   }
 
-  /**
-   * Generate pain points for an ICP.
-   * Placeholder — will use OpenAIService.generatePainPoints() when implemented.
-   */
-  async generatePainPoints(icpIndex: number): Promise<Omit<ICPPainPoint, 'id' | 'icp_id' | 'created_at'>[]> {
-    return MOCK_ICP_PAIN_POINTS[icpIndex] ?? MOCK_ICP_PAIN_POINTS[0];
-  }
 
   /**
-   * Generate goals for an ICP.
-   * Placeholder — will use OpenAIService.generateGoals() when implemented.
+   * Persist a single AI-generated ICP (with all child records) to the database.
    */
-  async generateGoals(icpIndex: number): Promise<Omit<ICPGoal, 'id' | 'icp_id' | 'created_at'>[]> {
-    return MOCK_ICP_GOALS[icpIndex] ?? MOCK_ICP_GOALS[0];
-  }
-
-  /**
-   * Generate buying triggers for an ICP.
-   * Placeholder — will use OpenAIService.generateTriggers() when implemented.
-   */
-  async generateBuyingTriggers(icpIndex: number): Promise<Omit<ICPBuyingTrigger, 'id' | 'icp_id' | 'created_at'>[]> {
-    return MOCK_ICP_TRIGGERS[icpIndex] ?? MOCK_ICP_TRIGGERS[0];
-  }
-
-  /**
-   * Generate negative ICP filters for an ICP.
-   */
-  async generateNegativeICP(icpIndex: number): Promise<Omit<ICPNegativeFilter, 'id' | 'icp_id' | 'created_at'>[]> {
-    return MOCK_ICP_NEGATIVE_FILTERS[icpIndex] ?? MOCK_ICP_NEGATIVE_FILTERS[0];
-  }
-
-  /**
-   * Generate Sales Navigator filters for an ICP.
-   * Placeholder — will use OpenAIService.generateSalesNavigatorFilters() when implemented.
-   */
-  async generateSalesNavigatorFilters(icpIndex: number): Promise<Omit<SalesNavigatorFilters, 'id' | 'icp_id' | 'created_at'>> {
-    return MOCK_ICP_SALES_NAV[icpIndex] ?? MOCK_ICP_SALES_NAV[0];
-  }
-
-  /**
-   * Rank ICPs by composite score.
-   */
-  async rankICPs(): Promise<number[]> {
-    const scored = MOCK_ICPS.map((icp, i) => ({
-      index: i,
-      score: icp.opportunity_score * 0.4 + icp.revenue_score * 0.3 + icp.confidence * 0.3,
-    }));
-    scored.sort((a, b) => b.score - a.score);
-    return scored.map((s) => s.index);
-  }
-
-  /**
-   * Generate recommendations across all ICPs.
-   * Placeholder — will use OpenAIService.generateRecommendations() when implemented.
-   */
-  async generateRecommendations(): Promise<ICPRecommendations> {
-    return MOCK_RECOMMENDATIONS;
-  }
-
-  /**
-   * Save a complete ICP (with all child records) to the database.
-   */
-  async saveICP(
+  async persistGeneratedICP(
     workspaceId: string,
     businessAnalysisId: string | null,
     marketAnalysisId: string | null,
-    icpIndex: number,
+    generated: GeneratedICP,
     companyName?: string | null,
   ): Promise<string> {
-    const mockICP = MOCK_ICPS[icpIndex] ?? MOCK_ICPS[0];
-
     // Insert ICP record
     const { data: icpRow, error: icpError } = await supabase
       .from('icps')
@@ -179,15 +160,15 @@ export class ICPIntelligenceService {
         business_analysis_id: businessAnalysisId,
         market_analysis_id: marketAnalysisId,
         company_name: companyName ?? null,
-        name: mockICP.name,
-        description: mockICP.description,
-        priority: mockICP.priority,
-        confidence: mockICP.confidence,
-        opportunity_score: mockICP.opportunity_score,
-        competition_score: mockICP.competition_score,
-        revenue_score: mockICP.revenue_score,
-        conversion_rate: mockICP.conversion_rate,
-        estimated_deal_size: mockICP.estimated_deal_size,
+        name: generated.name,
+        description: generated.description,
+        priority: generated.priority,
+        confidence: generated.confidence,
+        opportunity_score: generated.opportunity_score,
+        competition_score: generated.competition_score,
+        revenue_score: generated.revenue_score,
+        conversion_rate: generated.conversion_rate,
+        estimated_deal_size: generated.estimated_deal_size,
         status: 'completed',
       })
       .select('*')
@@ -197,15 +178,14 @@ export class ICPIntelligenceService {
     const icpId = (icpRow as ICP).id;
 
     // Insert company profile
-    const profile = MOCK_ICP_PROFILES[icpIndex] ?? MOCK_ICP_PROFILES[0];
     const { error: profileError } = await supabase.from('icp_company_profile').insert({
-      ...profile,
+      ...generated.company_profile,
       icp_id: icpId,
     });
     if (profileError) throw new Error(profileError.message);
 
     // Insert decision makers
-    const dms = MOCK_ICP_DECISION_MAKERS[icpIndex] ?? MOCK_ICP_DECISION_MAKERS[0];
+    const dms = generated.decision_makers;
     if (dms.length > 0) {
       const { error } = await supabase.from('icp_decision_makers').insert(
         dms.map((dm) => ({ ...dm, icp_id: icpId })),
@@ -214,7 +194,7 @@ export class ICPIntelligenceService {
     }
 
     // Insert pain points
-    const pains = MOCK_ICP_PAIN_POINTS[icpIndex] ?? MOCK_ICP_PAIN_POINTS[0];
+    const pains = generated.pain_points;
     if (pains.length > 0) {
       const { error } = await supabase.from('icp_pain_points').insert(
         pains.map((p) => ({ ...p, icp_id: icpId })),
@@ -223,7 +203,7 @@ export class ICPIntelligenceService {
     }
 
     // Insert goals
-    const goals = MOCK_ICP_GOALS[icpIndex] ?? MOCK_ICP_GOALS[0];
+    const goals = generated.goals;
     if (goals.length > 0) {
       const { error } = await supabase.from('icp_goals').insert(
         goals.map((g) => ({ ...g, icp_id: icpId })),
@@ -232,7 +212,7 @@ export class ICPIntelligenceService {
     }
 
     // Insert buying triggers
-    const triggers = MOCK_ICP_TRIGGERS[icpIndex] ?? MOCK_ICP_TRIGGERS[0];
+    const triggers = generated.buying_triggers;
     if (triggers.length > 0) {
       const { error } = await supabase.from('icp_buying_triggers').insert(
         triggers.map((t) => ({ ...t, icp_id: icpId })),
@@ -241,7 +221,7 @@ export class ICPIntelligenceService {
     }
 
     // Insert negative filters
-    const negatives = MOCK_ICP_NEGATIVE_FILTERS[icpIndex] ?? MOCK_ICP_NEGATIVE_FILTERS[0];
+    const negatives = generated.negative_filters;
     if (negatives.length > 0) {
       const { error } = await supabase.from('icp_negative_filters').insert(
         negatives.map((n) => ({ ...n, icp_id: icpId })),
@@ -250,9 +230,8 @@ export class ICPIntelligenceService {
     }
 
     // Insert sales navigator filters
-    const salesNav = MOCK_ICP_SALES_NAV[icpIndex] ?? MOCK_ICP_SALES_NAV[0];
     const { error: salesNavError } = await supabase.from('sales_navigator_filters').insert({
-      ...salesNav,
+      ...generated.sales_navigator_filters,
       icp_id: icpId,
     });
     if (salesNavError) throw new Error(salesNavError.message);
@@ -376,22 +355,34 @@ export class ICPIntelligenceService {
   }
 
   /**
-   * Generate the full pipeline result (all ICPs + recommendations).
+   * Run the full ICP generation pipeline: load persisted business/market
+   * research as primary context, generate ICPs via icp_generation_agent,
+   * validate, and persist. Throws a retryable error on any failure —
+   * never falls back to mock data.
    */
-  async generateFullPipeline(workspaceId: string, businessAnalysisId: string | null, marketAnalysisId: string | null, companyName?: string | null): Promise<ICPGenerationResult> {
-    const icpIds: string[] = [];
+  async generateFullPipeline(workspaceId: string, companyName?: string | null): Promise<ICPGenerationResult> {
+    const { businessSummary, marketSummary, businessAnalysisId, marketAnalysisId } =
+      await this.loadResearchContext(workspaceId, companyName);
 
-    for (let i = 0; i < MOCK_ICPS.length; i++) {
-      const icpId = await this.saveICP(workspaceId, businessAnalysisId, marketAnalysisId, i, companyName);
+    const generatedICPs = await this.generateICPs({
+      workspaceId,
+      businessSummary,
+      marketSummary,
+      companyName,
+    });
+
+    const icpIds: string[] = [];
+    for (const generated of generatedICPs) {
+      const icpId = await this.persistGeneratedICP(workspaceId, businessAnalysisId, marketAnalysisId, generated, companyName);
       icpIds.push(icpId);
     }
 
-    const fullICPs = await Promise.all(icpIds.map((id) => this.loadICP(id)));
-    const recommendations = await this.generateRecommendations();
+    const fullICPs = (await Promise.all(icpIds.map((id) => this.loadICP(id))))
+      .filter((icp): icp is FullICP => icp !== null);
 
     return {
-      icps: fullICPs.filter((icp): icp is FullICP => icp !== null),
-      recommendations,
+      icps: fullICPs,
+      recommendations: buildRecommendations(fullICPs),
     };
   }
 
@@ -425,3 +416,44 @@ export class ICPIntelligenceService {
 // Singleton instance
 export const icpService = new ICPIntelligenceService();
 export { ICP_STAGES };
+
+/**
+ * Derives a recommendations summary directly from the generated (real) ICPs
+ * — no separate AI call, no mock constant.
+ */
+function buildRecommendations(icps: FullICP[]): ICPRecommendations {
+  if (icps.length === 0) {
+    return {
+      executive_summary: 'No ICPs were generated.',
+      primary_icp: '',
+      secondary_icps: [],
+      priority_order: [],
+      sales_strategy: '',
+      recommended_messaging: '',
+      estimated_pipeline: '',
+    };
+  }
+
+  const ranked = [...icps].sort((a, b) => {
+    const scoreA = a.opportunity_score * 0.4 + a.revenue_score * 0.3 + a.confidence * 0.3;
+    const scoreB = b.opportunity_score * 0.4 + b.revenue_score * 0.3 + b.confidence * 0.3;
+    return scoreB - scoreA;
+  });
+
+  const primary = ranked[0];
+  const secondary = ranked.slice(1);
+  const topPainPoint = primary.pain_points[0]?.pain_point;
+  const topTrigger = primary.buying_triggers[0]?.trigger;
+
+  return {
+    executive_summary: `${primary.name} is the highest-scoring ICP (opportunity ${primary.opportunity_score}, revenue ${primary.revenue_score}, confidence ${primary.confidence}) out of ${icps.length} generated profile(s).`,
+    primary_icp: primary.name,
+    secondary_icps: secondary.map((icp) => icp.name),
+    priority_order: ranked.map((icp) => icp.name),
+    sales_strategy: topTrigger
+      ? `Prioritize outreach when "${topTrigger}" is observed; lead with the pain point "${topPainPoint ?? 'identified in research'}".`
+      : `Lead with the pain point "${topPainPoint ?? 'identified in research'}".`,
+    recommended_messaging: primary.description ?? primary.name,
+    estimated_pipeline: primary.estimated_deal_size ?? 'Not estimated',
+  };
+}

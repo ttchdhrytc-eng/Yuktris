@@ -91,7 +91,7 @@ export function ICPIntelligencePage() {
 
   const handleGenerate = () => {
     setGenerateModalOpen(false);
-    generateMutation.mutate({ businessAnalysisId: null, marketAnalysisId: null });
+    generateMutation.mutate();
   };
 
   const handleRefresh = () => {

@@ -18,6 +18,7 @@ export { BaseAgent } from './BaseAgent';
 // Concrete agent instances
 export { websiteResearchAgent, companyIntelligenceAgent, technologyDetectionAgent, executiveSummaryAgent } from './ResearchAgents';
 export { seoAnalysisAgent, icpScoringAgent, buyingSignalAgent, linkedinIntelligenceAgent } from './IntelligenceAgents';
+export { icpGenerationAgent } from './ICPGenerationAgent';
 export { proposalGeneratorAgent, emailWriterAgent, followUpAgent, meetingPreparationAgent, crmUpdateAgent, workflowDecisionAgent } from './GenerationAgents';
 export type {
   AgentDefinition,

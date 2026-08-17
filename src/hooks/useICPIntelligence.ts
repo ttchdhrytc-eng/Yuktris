@@ -7,7 +7,6 @@ import { toast } from 'sonner';
 import { supabase } from '@/lib/supabase';
 import { useWorkspace } from '@/contexts/WorkspaceContext';
 import { icpService, ICP_STAGES } from '@/services/icp-intelligence';
-import { agentOrchestrator } from '@/services/agents';
 import type { FullICP, ICP } from '@/types/icp-intelligence';
 
 // ============================================================
@@ -38,9 +37,7 @@ export function useICP() {
 }
 
 // ============================================================
-// useGenerateICP — Generate ICPs
-// The ICP generation pipeline uses mock data internally.
-// Disabled until wired to real providers.
+// useGenerateICP — Generate ICPs from persisted business/market research
 // ============================================================
 
 export function useGenerateICP() {
@@ -48,16 +45,10 @@ export function useGenerateICP() {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: async (_params: { businessAnalysisId?: string | null; marketAnalysisId?: string | null }): Promise<FullICP[]> => {
+    mutationFn: async (): Promise<FullICP[]> => {
       if (!workspace) throw new Error('No active workspace');
-      const result = await agentOrchestrator.executeAgent({
-        agentName: 'icp_scoring_agent',
-        input: { company: { name: workspace.name ?? '', website: workspace.website ?? '' } },
-        workspaceId: workspace.id,
-        timeoutMs: 60_000,
-      });
-      if (result.status !== 'completed') throw new Error(result.error ?? 'ICP generation failed');
-      return icpService.loadAllICPs(workspace.id, selectedCompany);
+      const result = await icpService.generateFullPipeline(workspace.id, selectedCompany);
+      return result.icps;
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: icpKeys.all });
@@ -69,24 +60,18 @@ export function useGenerateICP() {
 }
 
 // ============================================================
-// useRefreshICP — Refresh a single ICP
-// Disabled until wired to real providers.
+// useRefreshICP — Regenerate ICPs from the latest research
 // ============================================================
 
 export function useRefreshICP() {
-  const { workspace } = useWorkspace();
+  const { workspace, selectedCompany } = useWorkspace();
   const queryClient = useQueryClient();
 
   return useMutation({
     mutationFn: async (icpId: string): Promise<void> => {
       if (!workspace) throw new Error('No active workspace');
-      const result = await agentOrchestrator.executeAgent({
-        agentName: 'icp_scoring_agent',
-        input: { company: { name: workspace.name ?? '', website: workspace.website ?? '' } },
-        workspaceId: workspace.id,
-        timeoutMs: 60_000,
-      });
-      if (result.status !== 'completed') throw new Error(result.error ?? 'Refresh failed');
+      await icpService.refreshICP(icpId);
+      await icpService.generateFullPipeline(workspace.id, selectedCompany);
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: icpKeys.all });
