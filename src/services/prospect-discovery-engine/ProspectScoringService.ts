@@ -3,7 +3,7 @@
 // ============================================================
 
 import { supabase } from '@/lib/supabase';
-import { aiGateway } from '@/services/ai/AIGateway';
+import { aiGateway } from '@/services/ai';
 import type {
   ProspectScoringInput, ProspectScoringResult, AIRecommendation,
   ProspectScore, SignalType,

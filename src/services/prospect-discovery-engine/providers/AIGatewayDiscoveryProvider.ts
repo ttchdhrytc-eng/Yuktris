@@ -7,7 +7,7 @@
 // generating them from the Revenue Strategy context. It's the
 // fallback provider that works without external API keys.
 
-import { aiGateway } from '@/services/ai/AIGateway';
+import { aiGateway } from '@/services/ai';
 import { BaseDiscoveryProvider } from './BaseDiscoveryProvider';
 import type {
   DiscoveryProviderDefinition,

@@ -1,7 +1,7 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import { supabase } from '@/lib/supabase';
-import { aiGateway } from '@/services/ai/AIGateway';
+import { aiGateway } from '@/services/ai';
 import { useWorkspace } from '@/contexts/WorkspaceContext';
 import type { CEOCommandCenter } from '@/types/ai-ceo';
 

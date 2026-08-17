@@ -1,6 +1,6 @@
 // FinanceIntelligenceService — Phase 14 Finance Brain
 import { supabase } from '@/lib/supabase';
-import { aiGateway } from '@/services/ai/AIGateway';
+import { aiGateway } from '@/services/ai';
 import { knowledgeGraphService } from '@/services/knowledge-graph/KnowledgeGraphService';
 import { memoryEngine } from '@/services/memory/MemoryEngine';
 import type { FinanceDashboard } from '@/types/finance';

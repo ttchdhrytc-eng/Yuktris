@@ -11,7 +11,7 @@
 //   Create Approval Workflow → Deliver → Track → Notify
 
 import { supabase } from '@/lib/supabase';
-import { aiGateway } from '@/services/ai/AIGateway';
+import { aiGateway } from '@/services/ai';
 import { knowledgeGraphService } from '@/services/knowledge-graph/KnowledgeGraphService';
 import { memoryEngine } from '@/services/memory/MemoryEngine';
 import { contextEngine } from '@/services/context/ContextEngine';

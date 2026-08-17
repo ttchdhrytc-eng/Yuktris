@@ -14,7 +14,7 @@
 
 import { BaseAgent } from './BaseAgent';
 import { ExecutionContextBuilder } from './ExecutionContext';
-import { aiGateway } from '@/services/ai/AIGateway';
+import { aiGateway } from '@/services/ai';
 import { knowledgeGraphService } from '@/services/knowledge-graph';
 import type {
   AgentDefinition,

@@ -3,7 +3,7 @@
 // ============================================================
 
 import { supabase } from '@/lib/supabase';
-import { aiGateway } from '@/services/ai/AIGateway';
+import { aiGateway } from '@/services/ai';
 import { memoryEngine } from '@/services/memory/MemoryEngine';
 import { knowledgeGraphService } from '@/services/knowledge-graph/KnowledgeGraphService';
 import type { IntegrationDashboard } from '@/types/enterprise-integration';

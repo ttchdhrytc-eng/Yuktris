@@ -15,7 +15,7 @@
 
 import { BaseAgent } from './BaseAgent';
 import { ExecutionContextBuilder } from './ExecutionContext';
-import { aiGateway } from '@/services/ai/AIGateway';
+import { aiGateway } from '@/services/ai';
 import type { AgentDefinition, ExecutionContext, AgentExecutionResult } from '@/types/agent-orchestrator';
 import { validateGeneratedICPs } from '@/services/icp-intelligence/icpValidation';
 

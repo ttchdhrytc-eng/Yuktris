@@ -11,7 +11,7 @@
 // All discovery runs asynchronously through discovery_jobs.
 
 import { supabase } from '@/lib/supabase';
-import { aiGateway } from '@/services/ai/AIGateway';
+import { aiGateway } from '@/services/ai';
 import { knowledgeGraphService } from '@/services/knowledge-graph/KnowledgeGraphService';
 import { memoryEngine } from '@/services/memory/MemoryEngine';
 import { discoveryProviderManager } from './DiscoveryProviderManager';
