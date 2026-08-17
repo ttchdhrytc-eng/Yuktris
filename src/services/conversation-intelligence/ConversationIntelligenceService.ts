@@ -108,6 +108,12 @@ class ConversationIntelligenceService {
 
     // Create notifications for high-priority events
     await this.createNotifications(workspaceId, conversationId, result);
+
+    // Autonomous meeting handoff. This only creates/updates meeting state when
+    // the AI sees genuine meeting intent. It books directly only when the
+    // prospect explicitly confirmed an exact time; ambiguous times remain
+    // meeting candidates/slots instead of being invented.
+    await this.handoffMeetingIntent(workspaceId, conversationId, result);
   }
 
   // ----------------------------------------------------------
@@ -208,12 +214,22 @@ Return ONLY valid JSON (no markdown, no code blocks) with this exact structure:
     "reason": "Why this meeting readiness level was assigned",
     "confidence": 0.8
   },
+  "scheduling": {
+    "prospect_confirmed_time": false,
+    "start_iso": null,
+    "end_iso": null,
+    "timezone": null,
+    "confidence": 0.0,
+    "evidence": null
+  },
   "risk": {
     "level": "low|medium|high|critical",
     "factors": ["List of risk factors if any"],
     "confidence": 0.8
   }
 }
+
+IMPORTANT SCHEDULING RULE: Set scheduling.prospect_confirmed_time=true ONLY when the prospect explicitly agreed to a specific date and time in the supplied messages. Never invent or infer a time. start_iso/end_iso must be valid ISO-8601 timestamps; if timezone is ambiguous, leave them null and set prospect_confirmed_time=false.
 
 Return ONLY the JSON object.`;
 
@@ -520,6 +536,50 @@ Return ONLY the JSON object.`;
   // Notifications
   // ----------------------------------------------------------
 
+  private async handoffMeetingIntent(workspaceId: string, conversationId: string, result: ConversationAnalysisResult): Promise<void> {
+    const shouldHandoff = result.recommendation.recommended_action === 'book_meeting'
+      || result.meetingReadiness.level === 'ready'
+      || result.intent.primary_intent === 'meeting_request'
+      || result.intent.primary_intent === 'demo_request';
+    if (!shouldHandoff || result.risk.level === 'critical') return;
+
+    try {
+      const { meetingIntelligenceService } = await import('@/services/meeting-intelligence/MeetingIntelligenceService');
+      await meetingIntelligenceService.detectMeetingIntent(workspaceId);
+
+      const scheduling = result.scheduling;
+      if (!scheduling?.prospect_confirmed_time || scheduling.confidence < 0.8 || !scheduling.start_iso || !scheduling.end_iso) return;
+      const start = new Date(scheduling.start_iso);
+      const end = new Date(scheduling.end_iso);
+      if (!Number.isFinite(start.getTime()) || !Number.isFinite(end.getTime()) || end <= start || start.getTime() <= Date.now()) return;
+
+      const { data: request } = await supabase.from('meeting_requests')
+        .select('id')
+        .eq('workspace_id', workspaceId)
+        .eq('conversation_id', conversationId)
+        .in('status', ['pending', 'approved'])
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (!request) return;
+
+      await meetingIntelligenceService.scheduleMeetingAtTime(
+        workspaceId,
+        request.id,
+        start.toISOString(),
+        end.toISOString(),
+        scheduling.timezone ?? 'UTC',
+      );
+    } catch (error) {
+      // Conversation analysis must remain durable even if Calendar is not yet
+      // connected. The meeting candidate stays visible for follow-up/setup.
+      console.warn('autonomous_meeting_handoff_failed', {
+        conversationId,
+        reason: error instanceof Error ? error.message : 'unknown',
+      });
+    }
+  }
+
   private async createNotifications(workspaceId: string, conversationId: string, result: ConversationAnalysisResult): Promise<void> {
     const notifs: Array<{ type: string; title: string; message: string; severity: 'info' | 'warning' | 'error' | 'success' }> = [];
 
@@ -554,6 +614,15 @@ Return ONLY the JSON object.`;
         notification_message: n.message,
         severity: n.severity,
       }).then(() => {}, () => {});
+      await supabase.from('notifications').upsert({
+        workspace_id: workspaceId,
+        event_key: `conversation:${conversationId}:${n.type}`,
+        type: n.type,
+        title: n.title,
+        body: n.message,
+        action_url: '/app/conversations',
+        metadata: { conversation_id: conversationId, severity: n.severity },
+      }, { onConflict: 'workspace_id,event_key' }).then(() => {}, () => {});
     }
   }
 

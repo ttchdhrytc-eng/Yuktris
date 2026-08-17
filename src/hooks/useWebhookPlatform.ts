@@ -80,7 +80,10 @@ export function useReplayWebhook() {
   return useMutation({
     mutationFn: async (deliveryId: string) => {
       if (!workspace) throw new Error('No workspace');
-      const res = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/webhook-dispatcher`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}` }, body: JSON.stringify({ workspace_id: workspace.id, action: 'replay', delivery_id: deliveryId }) });
+      const { data: sessionData } = await supabase.auth.getSession();
+      const token = sessionData.session?.access_token;
+      if (!token) throw new Error('Authentication required');
+      const res = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/webhook-dispatcher`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify({ workspace_id: workspace.id, action: 'replay', delivery_id: deliveryId }) });
       if (!res.ok) throw new Error('Replay failed');
       return res.json();
     },

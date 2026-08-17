@@ -2,7 +2,7 @@ import { NavLink } from 'react-router-dom';
 import {
   LayoutDashboard, Users, MessageSquare, Calendar,
   BarChart3, Plug, CreditCard, DollarSign, Settings, Sparkles, ChevronDown,
-  ListOrdered, Monitor, UserCircle, Activity, Zap,
+  ListOrdered, Monitor, UserCircle, Activity, Zap, Target, Search, Brain, Rocket,
 } from 'lucide-react';
 import { useState } from 'react';
 import { cn } from '@/lib/utils';
@@ -24,10 +24,22 @@ const sections: { label: string; items: NavItem[] }[] = [
     ],
   },
   {
-    label: 'Sales',
+    label: 'Revenue AI',
+    items: [
+      { to: '/app/revenue-strategy', label: 'Revenue Strategy', icon: Target },
+      { to: '/app/prospect-discovery', label: 'Prospect Discovery', icon: Search },
+      { to: '/app/outreach-intelligence', label: 'Outreach Intelligence', icon: Sparkles },
+      { to: '/app/linkedin-automation', label: 'LinkedIn Agent', icon: UserCircle },
+      { to: '/app/meeting-intelligence', label: 'Meeting Intelligence', icon: Brain },
+      { to: '/app/meetings', label: 'Meetings', icon: Calendar },
+      { to: '/app/autopilot', label: 'Autopilot', icon: Rocket },
+    ],
+  },
+  {
+    label: 'Data',
     items: [
       { to: '/app/prospects', label: 'Prospects', icon: Users },
-      { to: '/app/meetings', label: 'Meetings', icon: Calendar },
+      { to: '/app/notifications', label: 'Notifications', icon: Activity },
     ],
   },
   {
@@ -38,9 +50,7 @@ const sections: { label: string; items: NavItem[] }[] = [
       { to: '/app/execution-queue', label: 'Execution Queue', icon: ListOrdered },
       { to: '/app/browser', label: 'Browser Automation', icon: Monitor },
       { to: '/app/linkedin-accounts', label: 'LinkedIn Accounts', icon: UserCircle },
-      { to: '/app/linkedin-automation', label: 'LinkedIn Automation', icon: UserCircle },
-      { to: '/app/conversations', label: 'Conversations', icon: MessageSquare },
-      { to: '/app/meeting-scheduler', label: 'Meeting Scheduler', icon: Calendar },
+      { to: '/app/meeting-scheduler', label: 'Calendar Scheduler', icon: Calendar },
       { to: '/app/integration-health', label: 'Integration Health', icon: Activity },
       { to: '/app/payments', label: 'Payments', icon: CreditCard },
       { to: '/app/billing', label: 'Billing', icon: DollarSign },
@@ -73,8 +83,8 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
           <Sparkles className="h-4.5 w-4.5 text-maroon-950" />
         </div>
         <div className="flex flex-col leading-tight">
-          <span className="text-sm font-bold text-ink-50 tracking-tight">Revenue AI</span>
-          <span className="text-2xs text-ink-500">AI Operating System</span>
+          <span className="text-sm font-bold text-ink-50 tracking-tight">Yuktris</span>
+          <span className="text-2xs text-ink-500">Autonomous Revenue OS</span>
         </div>
       </div>
 

@@ -188,57 +188,67 @@ class MeetingIntelligenceService {
 
   async generateSlots(workspaceId: string, requestId: string, duration: number): Promise<void> {
     const prefs = await this.loadPreferences(workspaceId);
-    const slots: Array<{ start_time: string; end_time: string; slot_rank: number }> = [];
-
     const now = new Date();
     const minStart = new Date(now.getTime() + (prefs?.min_notice_hours ?? 2) * 60 * 60 * 1000);
+    const endWindow = new Date(minStart.getTime() + 14 * 24 * 60 * 60 * 1000);
+    const timezone = prefs?.timezone ?? 'America/New_York';
 
-    // Generate slots for next 14 days
+    // Ask Google Calendar for real busy blocks. If Google Calendar is not
+    // connected we fail visibly rather than presenting fabricated availability.
+    const { data: freeBusy, error: freeBusyError } = await supabase.functions.invoke('google-calendar-booking', {
+      body: {
+        action: 'freebusy',
+        workspace_id: workspaceId,
+        time_min: minStart.toISOString(),
+        time_max: endWindow.toISOString(),
+        timezone,
+      },
+    });
+    if (freeBusyError) throw new Error(freeBusyError.message);
+    if (freeBusy?.error) throw new Error(String(freeBusy.error));
+    const busy = (freeBusy?.busy ?? []) as Array<{ start: string; end: string }>;
+    const slots: Array<{ start_time: string; end_time: string; slot_rank: number }> = [];
+
     for (let dayOffset = 1; dayOffset <= 14 && slots.length < 5; dayOffset++) {
       const date = new Date(minStart.getTime() + dayOffset * 24 * 60 * 60 * 1000);
-      const dayName = date.toLocaleDateString('en-US', { weekday: 'long' }).toLowerCase();
-
-      if (!prefs?.working_days.includes(dayName)) continue;
+      const dayName = date.toLocaleDateString('en-US', { weekday: 'long', timeZone: timezone }).toLowerCase();
+      if (!(prefs?.working_days ?? ['monday', 'tuesday', 'wednesday', 'thursday', 'friday']).includes(dayName)) continue;
 
       const startHour = parseInt((prefs?.working_hours_start ?? '09:00').split(':')[0]);
       const endHour = parseInt((prefs?.working_hours_end ?? '17:00').split(':')[0]);
-
-      // Generate 3 slots per day: morning, midday, afternoon
-      const slotTimes = [
-        { h: startHour + 1, rank: 1 },
-        { h: Math.floor((startHour + endHour) / 2), rank: 2 },
-        { h: endHour - 1, rank: 3 },
-      ];
-
-      for (const st of slotTimes) {
-        if (st.h < startHour || st.h >= endHour) continue;
+      const slotTimes = [startHour + 1, Math.floor((startHour + endHour) / 2), endHour - 1];
+      for (const hour of slotTimes) {
+        if (hour < startHour || hour >= endHour) continue;
         const slotStart = new Date(date);
-        slotStart.setHours(st.h, 0, 0, 0);
+        slotStart.setHours(hour, 0, 0, 0);
         if (slotStart < minStart) continue;
-
         const slotEnd = new Date(slotStart.getTime() + duration * 60 * 1000);
-        slots.push({
-          start_time: slotStart.toISOString(),
-          end_time: slotEnd.toISOString(),
-          slot_rank: st.rank,
-        });
+        const conflict = busy.some((block) => new Date(block.start).getTime() < slotEnd.getTime() && new Date(block.end).getTime() > slotStart.getTime());
+        if (conflict) continue;
+        slots.push({ start_time: slotStart.toISOString(), end_time: slotEnd.toISOString(), slot_rank: slots.length + 1 });
+        if (slots.length >= 5) break;
       }
     }
 
+    await supabase.from('meeting_slots')
+      .delete()
+      .eq('workspace_id', workspaceId)
+      .eq('meeting_request_id', requestId)
+      .eq('prospect_response', 'pending');
+
     if (slots.length > 0) {
-      await supabase.from('meeting_slots').insert(
-        slots.map((s) => ({
-          workspace_id: workspaceId,
-          meeting_request_id: requestId,
-          start_time: s.start_time,
-          end_time: s.end_time,
-          slot_rank: s.slot_rank,
-          timezone: prefs?.timezone ?? 'America/New_York',
-          is_available: true,
-          is_offered: true,
-          prospect_response: 'pending',
-        })),
-      );
+      const { error } = await supabase.from('meeting_slots').insert(slots.map((slot) => ({
+        workspace_id: workspaceId,
+        meeting_request_id: requestId,
+        start_time: slot.start_time,
+        end_time: slot.end_time,
+        slot_rank: slot.slot_rank,
+        timezone,
+        is_available: true,
+        is_offered: true,
+        prospect_response: 'pending',
+      })));
+      if (error) throw new Error(error.message);
     }
   }
 
@@ -247,86 +257,159 @@ class MeetingIntelligenceService {
   // ----------------------------------------------------------
 
   async scheduleMeeting(workspaceId: string, requestId: string): Promise<MeetingSchedulerRecord | null> {
-    // Load request
-    const { data: request } = await supabase
+    const { data: request, error: requestError } = await supabase
       .from('meeting_requests')
       .select('*')
       .eq('id', requestId)
+      .eq('workspace_id', workspaceId)
       .maybeSingle();
+    if (requestError) throw new Error(requestError.message);
     if (!request) return null;
 
-    // Load best available slot
-    const { data: slots } = await supabase
+    const { data: slots, error: slotsError } = await supabase
       .from('meeting_slots')
       .select('*')
+      .eq('workspace_id', workspaceId)
       .eq('meeting_request_id', requestId)
       .eq('is_available', true)
-      .eq('prospect_response', 'pending')
+      .eq('prospect_response', 'accepted')
       .order('slot_rank', { ascending: true })
       .limit(1);
-
+    if (slotsError) throw new Error(slotsError.message);
     if (!slots || slots.length === 0) return null;
     const slot = slots[0];
 
-    // Mark slot as selected
-    await supabase.from('meeting_slots').update({
-      is_selected: true,
-      prospect_response: 'accepted',
-    }).eq('id', slot.id);
-
     const meetingType = (request.recommended_meeting_type ?? 'discovery') as MeetingTypeCode;
     const duration = request.estimated_duration ?? 30;
+    let attendeeEmail: string | null = null;
+    if (request.contact_id) {
+      const { data: contact } = await supabase.from('contacts').select('email').eq('id', request.contact_id).eq('workspace_id', workspaceId).maybeSingle();
+      attendeeEmail = contact?.email ?? null;
+    }
 
-    // Create meeting
-    const { data: meeting } = await supabase.from('meeting_scheduler').insert({
+    const title = `${meetingType.replace(/_/g, ' ')}: ${request.prospect_name ?? 'Prospect'} — ${request.company_name ?? ''}`;
+    const { data: calendarResult, error: calendarError } = await supabase.functions.invoke('google-calendar-booking', {
+      body: {
+        action: 'create',
+        workspace_id: workspaceId,
+        summary: title,
+        description: `AI-scheduled ${meetingType.replace(/_/g, ' ')} meeting via Yuktris`,
+        start: slot.start_time,
+        end: slot.end_time,
+        timezone: slot.timezone,
+        attendees: attendeeEmail ? [attendeeEmail] : [],
+        idempotency_key: `meeting-${requestId}-${slot.id}`,
+      },
+    });
+    if (calendarError || !calendarResult?.externalEventId) {
+      throw new Error(calendarError?.message ?? calendarResult?.error ?? 'Google Calendar event creation failed');
+    }
+
+    const { data: meeting, error: meetingError } = await supabase.from('meeting_scheduler').insert({
       workspace_id: workspaceId,
       meeting_request_id: requestId,
       conversation_id: request.conversation_id,
       contact_id: request.contact_id,
       company_id: request.company_id,
       meeting_type: meetingType,
-      meeting_title: `${meetingType.replace(/_/g, ' ')}: ${request.prospect_name ?? 'Prospect'} — ${request.company_name ?? ''}`,
+      meeting_title: title,
       meeting_description: `AI-scheduled ${meetingType.replace(/_/g, ' ')} meeting`,
       scheduled_start: slot.start_time,
       scheduled_end: slot.end_time,
       timezone: slot.timezone,
       duration_minutes: duration,
       platform: 'google_meet' as MeetingPlatform,
-      status: 'pending_confirmation',
+      meeting_link: calendarResult.meetLink ?? calendarResult.htmlLink ?? null,
+      google_meet_link: calendarResult.meetLink ?? null,
+      calendar_event_id: calendarResult.externalEventId,
+      status: 'confirmed',
       prospect_name: request.prospect_name,
       prospect_title: request.prospect_title,
       company_name: request.company_name,
     }).select('*').single();
-
+    if (meetingError) {
+      await supabase.functions.invoke('google-calendar-booking', { body: { action: 'delete', workspace_id: workspaceId, event_id: calendarResult.externalEventId } }).catch(() => undefined);
+      throw new Error(meetingError.message);
+    }
     if (!meeting) return null;
 
-    // Update request status
-    await supabase.from('meeting_requests').update({ status: 'scheduled' }).eq('id', requestId);
+    await supabase.from('meeting_slots').update({ is_selected: true, prospect_response: 'accepted' }).eq('id', slot.id).eq('workspace_id', workspaceId);
+    await supabase.from('meeting_requests').update({ status: 'scheduled' }).eq('id', requestId).eq('workspace_id', workspaceId);
+    await supabase.from('meeting_candidates').update({ status: 'scheduled' }).eq('meeting_request_id', requestId).eq('workspace_id', workspaceId);
+    await supabase.from('meeting_confirmations').insert({
+      workspace_id: workspaceId,
+      meeting_id: meeting.id,
+      confirmed_by: 'ai',
+      confirmation_method: 'auto',
+      notes: 'Google Calendar event and attendee invitation created automatically by Yuktris.',
+    });
 
-    // Update candidate status
-    await supabase.from('meeting_candidates').update({ status: 'scheduled' }).eq('meeting_request_id', requestId);
-
-    // Generate full preparation
     await this.generateFullPreparation(workspaceId, meeting.id);
-
-    // Record version
     await this.recordVersion(workspaceId, meeting.id, 'meeting_created', 'ai');
-
-    // Create notification
     await this.createNotification(workspaceId, meeting.id, 'meeting_scheduled',
-      'Meeting Scheduled',
-      `${meetingType.replace(/_/g, ' ')} with ${request.prospect_name ?? 'prospect'} scheduled for ${new Date(slot.start_time).toLocaleString()}.`,
+      'Meeting Booked',
+      `${meetingType.replace(/_/g, ' ')} with ${request.prospect_name ?? 'prospect'} is booked for ${new Date(slot.start_time).toLocaleString()}.`,
       'success');
-
-    // Store in memory
     await this.storeMemory(workspaceId, meeting.id, 'meeting_scheduled', {
       meetingType,
       prospect: request.prospect_name,
       company: request.company_name,
       scheduledAt: slot.start_time,
+      calendarEventId: calendarResult.externalEventId,
+      meetingLink: calendarResult.meetLink ?? null,
     });
 
     return meeting as MeetingSchedulerRecord;
+  }
+
+  /**
+   * Book a prospect-confirmed exact time. This is used only after conversation
+   * intelligence has extracted an explicit date/time with high confidence.
+   * It re-checks Google Calendar before creating the event.
+   */
+  async scheduleMeetingAtTime(workspaceId: string, requestId: string, startIso: string, endIso: string, timezone = 'UTC'): Promise<MeetingSchedulerRecord | null> {
+    const start = new Date(startIso);
+    const end = new Date(endIso);
+    if (!Number.isFinite(start.getTime()) || !Number.isFinite(end.getTime()) || end <= start || start.getTime() <= Date.now()) {
+      throw new Error('Invalid or expired prospect-confirmed meeting time');
+    }
+
+    const { data: freeBusy, error: freeBusyError } = await supabase.functions.invoke('google-calendar-booking', {
+      body: { action: 'freebusy', workspace_id: workspaceId, time_min: start.toISOString(), time_max: end.toISOString(), timezone },
+    });
+    if (freeBusyError) throw new Error(freeBusyError.message);
+    if ((freeBusy?.busy ?? []).length > 0) throw new Error('Prospect-confirmed time conflicts with the connected calendar');
+
+    const { data: existingSlot } = await supabase.from('meeting_slots')
+      .select('*')
+      .eq('workspace_id', workspaceId)
+      .eq('meeting_request_id', requestId)
+      .eq('start_time', start.toISOString())
+      .maybeSingle();
+
+    let slotId = existingSlot?.id as string | undefined;
+    if (!slotId) {
+      const { data: createdSlot, error: slotError } = await supabase.from('meeting_slots').insert({
+        workspace_id: workspaceId,
+        meeting_request_id: requestId,
+        start_time: start.toISOString(),
+        end_time: end.toISOString(),
+        slot_rank: 0,
+        timezone,
+        is_available: true,
+        is_selected: true,
+        is_offered: true,
+        prospect_response: 'accepted',
+      }).select('*').single();
+      if (slotError) throw new Error(slotError.message);
+      slotId = createdSlot.id;
+    } else {
+      await supabase.from('meeting_slots').update({ is_selected: true, prospect_response: 'accepted', is_available: true }).eq('id', slotId);
+    }
+
+    // scheduleMeeting prefers accepted slots, so this produces the same
+    // idempotent Calendar/DB path as a prospect choosing an offered slot.
+    return this.scheduleMeeting(workspaceId, requestId);
   }
 
   // ----------------------------------------------------------
@@ -577,8 +660,26 @@ Return ONLY the JSON object.`;
   // ----------------------------------------------------------
 
   async rescheduleMeeting(workspaceId: string, meetingId: string, newStart: string, newEnd: string, reason?: string): Promise<void> {
-    const { data: meeting } = await supabase.from('meeting_scheduler').select('scheduled_start, scheduled_end').eq('id', meetingId).maybeSingle();
+    const { data: meeting, error } = await supabase.from('meeting_scheduler')
+      .select('scheduled_start,scheduled_end,calendar_event_id,timezone,meeting_title,meeting_description')
+      .eq('id', meetingId).eq('workspace_id', workspaceId).maybeSingle();
+    if (error) throw new Error(error.message);
     if (!meeting) return;
+    if (!meeting.calendar_event_id) throw new Error('Meeting is missing its Google Calendar event id');
+
+    const { error: calendarError } = await supabase.functions.invoke('google-calendar-booking', {
+      body: {
+        action: 'update',
+        workspace_id: workspaceId,
+        event_id: meeting.calendar_event_id,
+        start: newStart,
+        end: newEnd,
+        timezone: meeting.timezone,
+        summary: meeting.meeting_title,
+        description: meeting.meeting_description,
+      },
+    });
+    if (calendarError) throw new Error(`Google Calendar reschedule failed: ${calendarError.message}`);
 
     await supabase.from('meeting_reschedules').insert({
       workspace_id: workspaceId,
@@ -590,13 +691,7 @@ Return ONLY the JSON object.`;
       rescheduled_by: 'ai',
       reason: reason ?? 'Auto-rescheduled',
     });
-
-    await supabase.from('meeting_scheduler').update({
-      scheduled_start: newStart,
-      scheduled_end: newEnd,
-      status: 'rescheduled',
-    }).eq('id', meetingId);
-
+    await supabase.from('meeting_scheduler').update({ scheduled_start: newStart, scheduled_end: newEnd, status: 'rescheduled' }).eq('id', meetingId).eq('workspace_id', workspaceId);
     await this.recordVersion(workspaceId, meetingId, 'meeting_rescheduled', 'ai');
   }
 
@@ -605,13 +700,16 @@ Return ONLY the JSON object.`;
   // ----------------------------------------------------------
 
   async cancelMeeting(workspaceId: string, meetingId: string, reason?: string): Promise<void> {
-    await supabase.from('meeting_scheduler').update({ status: 'cancelled' }).eq('id', meetingId);
-    await supabase.from('meeting_cancellations').insert({
-      workspace_id: workspaceId,
-      meeting_id: meetingId,
-      cancelled_by: 'ai',
-      reason: reason ?? 'Cancelled by system',
-    });
+    const { data: meeting, error } = await supabase.from('meeting_scheduler').select('calendar_event_id').eq('id', meetingId).eq('workspace_id', workspaceId).maybeSingle();
+    if (error) throw new Error(error.message);
+    if (meeting?.calendar_event_id) {
+      const { error: calendarError } = await supabase.functions.invoke('google-calendar-booking', {
+        body: { action: 'delete', workspace_id: workspaceId, event_id: meeting.calendar_event_id },
+      });
+      if (calendarError) throw new Error(`Google Calendar cancellation failed: ${calendarError.message}`);
+    }
+    await supabase.from('meeting_scheduler').update({ status: 'cancelled' }).eq('id', meetingId).eq('workspace_id', workspaceId);
+    await supabase.from('meeting_cancellations').insert({ workspace_id: workspaceId, meeting_id: meetingId, cancelled_by: 'ai', reason: reason ?? 'Cancelled by system' });
     await this.recordVersion(workspaceId, meetingId, 'meeting_cancelled', 'ai');
   }
 
@@ -998,6 +1096,15 @@ Return ONLY the JSON object.`;
       notification_message: message,
       severity,
     });
+    await supabase.from('notifications').upsert({
+      workspace_id: workspaceId,
+      event_key: meetingId ? `meeting:${meetingId}:${type}` : `meeting:${type}:${title}`,
+      type,
+      title,
+      body: message,
+      action_url: meetingId ? '/app/meetings' : '/app/meeting-intelligence',
+      metadata: { meeting_id: meetingId, severity },
+    }, { onConflict: 'workspace_id,event_key' }).then(() => {}, () => {});
   }
 
   private async storeMemory(workspaceId: string, entityId: string, memoryType: string, content: Record<string, unknown>): Promise<void> {

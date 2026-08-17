@@ -322,6 +322,14 @@ export interface ConversationAnalysisResult {
     reason: string;
     confidence: number;
   };
+  scheduling?: {
+    prospect_confirmed_time: boolean;
+    start_iso: string | null;
+    end_iso: string | null;
+    timezone: string | null;
+    confidence: number;
+    evidence: string | null;
+  };
   risk: {
     level: RiskLevel;
     factors: string[];

@@ -5,7 +5,8 @@
 // Finds free slots, generates Google Meet / Outlook meeting
 // links, sends LinkedIn messages, and manages reminders.
 
-import { createClient, type SupabaseClient } from '@supabase/supabase-js';
+import { supabase } from '@/lib/supabase';
+import type { SupabaseClient } from '@supabase/supabase-js';
 import type {
   CalendarConnection, CalendarEvent,
   LinkedInMeetingRequest, LinkedInMeetingSlot,
@@ -25,38 +26,36 @@ export class MeetingBookingEngine {
 
   constructor(workspaceId: string) {
     this.workspaceId = workspaceId;
-    this.client = createClient(
-      import.meta.env.VITE_SUPABASE_URL,
-      import.meta.env.VITE_SUPABASE_ANON_KEY
-    );
+    this.client = supabase;
   }
 
   // ── Calendar Connections ────────────────────────────────────
 
   async listConnections(): Promise<CalendarConnection[]> {
     const { data, error } = await this.client
-      .from('linkedin_calendar_connections')
-      .select('*')
+      .from('google_accounts')
+      .select('id,workspace_id,email,status,connected_at,last_synced_at,is_primary')
       .eq('workspace_id', this.workspaceId)
-      .order('created_at', { ascending: true });
+      .in('status', ['connected', 'expired'])
+      .order('is_primary', { ascending: false })
+      .order('connected_at', { ascending: true });
     if (error) return [];
-    return (data ?? []) as CalendarConnection[];
+    return (data ?? []).map((row) => ({
+      id: row.id,
+      workspace_id: row.workspace_id,
+      provider: 'google' as const,
+      email: row.email,
+      status: row.status === 'expired' ? 'expired' as const : 'active' as const,
+      calendar_id: 'primary',
+      last_synced_at: row.last_synced_at,
+      metadata: { google_account_id: row.id, is_primary: row.is_primary },
+      created_at: row.connected_at,
+      updated_at: row.last_synced_at ?? row.connected_at,
+    }));
   }
 
-  async createConnection(params: { provider: 'google' | 'outlook'; email: string; calendarId?: string }): Promise<CalendarConnection | null> {
-    const { data, error } = await this.client
-      .from('linkedin_calendar_connections')
-      .insert({
-        workspace_id: this.workspaceId,
-        provider: params.provider,
-        email: params.email,
-        calendar_id: params.calendarId ?? null,
-        status: 'active',
-      })
-      .select('*')
-      .maybeSingle();
-    if (error) { console.error('Create connection failed:', error.message); return null; }
-    return data as CalendarConnection;
+  async createConnection(_params: { provider: 'google' | 'outlook'; email: string; calendarId?: string }): Promise<CalendarConnection | null> {
+    throw new Error('Calendar connections are created through Google OAuth. Connect Google Calendar from Integrations.');
   }
 
   async deleteConnection(connectionId: string): Promise<void> {
@@ -111,49 +110,19 @@ export class MeetingBookingEngine {
     meetingRequestId: string,
     options: { startDate: string; endDate: string; durationMinutes: number; workingHoursStart?: number; workingHoursEnd?: number; timezone?: string }
   ): Promise<LinkedInMeetingSlot[]> {
-    const slots: LinkedInMeetingSlot[] = [];
-    const start = new Date(options.startDate);
-    const end = new Date(options.endDate);
-    const duration = options.durationMinutes * 60 * 1000;
-    const workStart = options.workingHoursStart ?? 9;
-    const workEnd = options.workingHoursEnd ?? 17;
-    const tz = options.timezone ?? 'UTC';
-
-    for (let day = new Date(start); day <= end; day.setDate(day.getDate() + 1)) {
-      const dayOfWeek = day.getDay();
-      if (dayOfWeek === 0 || dayOfWeek === 6) continue;
-
-      for (let hour = workStart; hour < workEnd; hour++) {
-        for (const minute of [0, 30]) {
-          const slotStart = new Date(day);
-          slotStart.setHours(hour, minute, 0, 0);
-          const slotEnd = new Date(slotStart.getTime() + duration);
-
-          if (slotEnd.getHours() > workEnd) continue;
-
-          const conflict = await this.checkConflict(slotStart.toISOString(), slotEnd.toISOString());
-
-          const { data, error } = await this.client
-            .from('linkedin_meeting_slots')
-            .insert({
-              workspace_id: this.workspaceId,
-              meeting_request_id: meetingRequestId,
-              start_time: slotStart.toISOString(),
-              end_time: slotEnd.toISOString(),
-              timezone: tz,
-              status: conflict ? 'expired' : 'available',
-              conflict_detected: conflict,
-            })
-            .select('*')
-            .maybeSingle();
-
-          if (!error && data) slots.push(data as LinkedInMeetingSlot);
-        }
-      }
-    }
-
-    await this.client.from('linkedin_meeting_requests').update({ status: 'slots_generated' }).eq('id', meetingRequestId);
-    return slots;
+    const { data, error } = await supabase.functions.invoke('linkedin-meeting-engine', {
+      body: {
+        action: 'generate_slots',
+        workspace_id: this.workspaceId,
+        meeting_request_id: meetingRequestId,
+        start_date: options.startDate,
+        end_date: options.endDate,
+        duration_minutes: options.durationMinutes,
+        timezone: options.timezone ?? 'UTC',
+      },
+    });
+    if (error) throw new Error(`Unable to generate calendar-backed slots: ${error.message}`);
+    return (data?.slots ?? []) as LinkedInMeetingSlot[];
   }
 
   async listSlots(meetingRequestId: string): Promise<LinkedInMeetingSlot[]> {
@@ -216,39 +185,17 @@ export class MeetingBookingEngine {
 
   // ── Meeting Confirmation ────────────────────────────────────
 
-  async confirmMeeting(slotId: string, options: { meetingProvider?: string; meetingUrl?: string }): Promise<LinkedInMeetingConfirmation | null> {
-    const { data: slot, error: slotError } = await this.client
-      .from('linkedin_meeting_slots')
-      .select('*')
-      .eq('id', slotId)
-      .eq('workspace_id', this.workspaceId)
-      .maybeSingle();
-    if (slotError || !slot) return null;
-
-    const s = slot as LinkedInMeetingSlot;
-    const { data, error } = await this.client
-      .from('linkedin_meeting_confirmations')
-      .insert({
+  async confirmMeeting(slotId: string, _options: { meetingProvider?: string; meetingUrl?: string } = {}): Promise<LinkedInMeetingConfirmation | null> {
+    const { data, error } = await supabase.functions.invoke('linkedin-meeting-engine', {
+      body: {
+        action: 'confirm_meeting',
         workspace_id: this.workspaceId,
-        meeting_request_id: s.meeting_request_id,
         slot_id: slotId,
-        confirmed_start: s.start_time,
-        confirmed_end: s.end_time,
-        timezone: s.timezone,
-        meeting_url: options.meetingUrl ?? null,
-        meeting_provider: options.meetingProvider ?? null,
-      })
-      .select('*')
-      .maybeSingle();
-    if (error) { console.error('Confirm meeting failed:', error.message); return null; }
-
-    const confirmation = data as LinkedInMeetingConfirmation;
-
-    await this.client.from('linkedin_meeting_slots').update({ status: 'confirmed' }).eq('id', slotId);
-    await this.client.from('linkedin_meeting_requests').update({ status: 'confirmed' }).eq('id', s.meeting_request_id);
-
-    await this.scheduleReminders(confirmation.id, s.start_time);
-
+      },
+    });
+    if (error) throw new Error(`Meeting confirmation failed: ${error.message}`);
+    const confirmation = (data?.confirmation ?? null) as LinkedInMeetingConfirmation | null;
+    if (confirmation) await this.scheduleReminders(confirmation.id, confirmation.confirmed_start);
     return confirmation;
   }
 
@@ -300,10 +247,7 @@ export class MeetingBookingEngine {
 
   // ── Google Meet Link Generation ──────────────────────────────
 
-  generateGoogleMeetLink(meetingTitle: string): string {
-    // In production, this calls the Google Calendar API via an edge function
-    // to create a calendar event with conferenceData.createRequest
-    const roomId = Math.random().toString(36).substring(2, 12).toLowerCase();
-    return `https://meet.google.com/${roomId.slice(0, 3)}-${roomId.slice(3, 7)}-${roomId.slice(7, 11)}`;
+  generateGoogleMeetLink(_meetingTitle: string): never {
+    throw new Error('Google Meet links are created only by the Google Calendar API when a meeting is confirmed.');
   }
 }

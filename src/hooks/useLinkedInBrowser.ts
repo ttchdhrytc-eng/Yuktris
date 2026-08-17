@@ -801,12 +801,25 @@ export function useCalendarConnections() {
     queryFn: async () => {
       if (!workspace) return [];
       const { data, error } = await supabase
-        .from('linkedin_calendar_connections')
-        .select('*')
+        .from('google_accounts')
+        .select('id,workspace_id,email,status,is_primary,connected_at,last_synced_at')
         .eq('workspace_id', workspace.id)
-        .order('created_at', { ascending: true });
+        .in('status', ['connected', 'expired'])
+        .order('is_primary', { ascending: false })
+        .order('connected_at', { ascending: true });
       if (error) throw error;
-      return (data ?? []) as CalendarConnection[];
+      return (data ?? []).map((row) => ({
+        id: row.id,
+        workspace_id: row.workspace_id,
+        provider: 'google' as const,
+        email: row.email,
+        status: row.status === 'expired' ? 'expired' as const : 'active' as const,
+        calendar_id: 'primary',
+        last_synced_at: row.last_synced_at,
+        metadata: { google_account_id: row.id, is_primary: row.is_primary },
+        created_at: row.connected_at,
+        updated_at: row.last_synced_at ?? row.connected_at,
+      }));
     },
     enabled: !!workspace,
   });

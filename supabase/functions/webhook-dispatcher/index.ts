@@ -1,39 +1,84 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
-const corsHeaders = { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS", "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Client-Info, Apikey" };
+import { authorizeLinkedInWorkspace, authorizationStatus } from "../_shared/linkedinAuthorization.ts";
+
+const corsHeaders = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Client-Info, Apikey",
+};
+
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") return new Response(null, { status: 200, headers: corsHeaders });
+  if (req.method !== "POST") return jsonError("Method not allowed", 405);
   try {
-    const body = await req.json();
-    const { workspace_id, action, delivery_id } = body;
-    const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
-    const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-    const headers = { Authorization: `Bearer ${serviceKey}`, apikey: serviceKey, "Content-Type": "application/json" };
+    const body = await req.json() as Record<string, unknown>;
+    const workspaceId = typeof body.workspace_id === "string" ? body.workspace_id : "";
+    if (!workspaceId) return jsonError("workspace_id is required", 400);
+    const { admin } = await authorizeLinkedInWorkspace(req, workspaceId, { allowServiceRole: true });
+    const action = typeof body.action === "string" ? body.action : "dispatch";
+
     if (action === "replay") {
-      const delRes = await fetch(`${supabaseUrl}/rest/v1/webhook_deliveries?id=eq.${delivery_id}&select=*`, { headers });
-      const delivery = (await delRes.json())[0];
-      if (!delivery) return new Response(JSON.stringify({ error: "Delivery not found" }), { status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" } });
-      const subRes = await fetch(`${supabaseUrl}/rest/v1/webhook_subscriptions?id=eq.${delivery.subscription_id}&select=*`, { headers });
-      const sub = (await subRes.json())[0];
-      if (!sub) return new Response(JSON.stringify({ error: "Subscription not found" }), { status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" } });
-      const payload = delivery.payload;
-      const response = await fetch(sub.endpoint_url, { method: "POST", headers: { "Content-Type": sub.content_type, ...sub.headers }, body: JSON.stringify(payload), signal: AbortSignal.timeout(sub.timeout_seconds * 1000) });
+      const deliveryId = typeof body.delivery_id === "string" ? body.delivery_id : "";
+      if (!deliveryId) return jsonError("delivery_id is required", 400);
+      const { data: delivery, error: deliveryError } = await admin.from("webhook_deliveries")
+        .select("*").eq("id", deliveryId).eq("workspace_id", workspaceId).maybeSingle();
+      if (deliveryError) throw new Error(deliveryError.message);
+      if (!delivery) return jsonError("Delivery not found", 404);
+      const { data: subscription, error: subscriptionError } = await admin.from("webhook_subscriptions")
+        .select("*").eq("id", delivery.subscription_id).eq("workspace_id", workspaceId).maybeSingle();
+      if (subscriptionError) throw new Error(subscriptionError.message);
+      if (!subscription) return jsonError("Subscription not found", 404);
+
+      const response = await fetch(subscription.endpoint_url, {
+        method: "POST",
+        headers: { "Content-Type": subscription.content_type ?? "application/json", ...(subscription.headers ?? {}) },
+        body: JSON.stringify(delivery.payload ?? {}),
+        signal: AbortSignal.timeout(Math.max(1, subscription.timeout_seconds ?? 10) * 1000),
+      });
       const responseBody = await response.text();
-      await fetch(`${supabaseUrl}/rest/v1/webhook_replay_logs`, { method: "POST", headers: { ...headers, Prefer: "return=minimal" }, body: JSON.stringify({ workspace_id, delivery_id, replay_status: response.ok ? "success" : "failed", replay_response: responseBody.slice(0, 2000), replay_http_status: response.status }) });
-      return new Response(JSON.stringify({ replayed: true, status: response.status }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+      await admin.from("webhook_replay_logs").insert({
+        workspace_id: workspaceId,
+        delivery_id: deliveryId,
+        replay_status: response.ok ? "success" : "failed",
+        replay_response: responseBody.slice(0, 2000),
+        replay_http_status: response.status,
+      });
+      return jsonResponse({ replayed: true, status: response.status });
     }
-    const subsRes = await fetch(`${supabaseUrl}/rest/v1/webhook_subscriptions?workspace_id=eq.${workspace_id}&is_active=eq.true&select=*`, { headers });
-    const subs = await subsRes.json();
+
+    const events = Array.isArray(body.events) ? body.events.filter((v): v is string => typeof v === "string" && !!v) : [];
+    if (events.length === 0) return jsonError("events must contain at least one event name", 400);
+    const eventId = typeof body.event_id === "string" && body.event_id ? body.event_id : crypto.randomUUID();
+    const { data: subscriptions, error: subscriptionsError } = await admin.from("webhook_subscriptions")
+      .select("*").eq("workspace_id", workspaceId).eq("is_active", true);
+    if (subscriptionsError) throw new Error(subscriptionsError.message);
+
     let dispatched = 0;
-    for (const sub of subs) {
-      const events = body.events ?? [];
+    for (const sub of subscriptions ?? []) {
+      const subscribedEvents = Array.isArray(sub.events) ? sub.events : [];
       for (const eventName of events) {
-        if (!sub.events.includes(eventName)) continue;
-        await fetch(`${supabaseUrl}/rest/v1/webhook_deliveries`, { method: "POST", headers: { ...headers, Prefer: "return=minimal" }, body: JSON.stringify({ workspace_id, subscription_id: sub.id, event_name: eventName, event_id: body.event_id ?? crypto.randomUUID(), payload: body.payload ?? {}, status: "pending" }) });
-        dispatched++;
+        if (!subscribedEvents.includes(eventName)) continue;
+        const { error } = await admin.from("webhook_deliveries").upsert({
+          workspace_id: workspaceId,
+          subscription_id: sub.id,
+          event_name: eventName,
+          event_id: eventId,
+          payload: body.payload ?? {},
+          status: "pending",
+        }, { onConflict: "subscription_id,event_id", ignoreDuplicates: true });
+        if (!error) dispatched++;
       }
     }
-    return new Response(JSON.stringify({ dispatched }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
-  } catch (err) {
-    return new Response(JSON.stringify({ error: err.message }), { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+    return jsonResponse({ dispatched, event_id: eventId });
+  } catch (error) {
+    const status = authorizationStatus(error);
+    return jsonError(error instanceof Error ? error.message : "Webhook dispatch failed", status);
   }
 });
+
+function jsonResponse(data: Record<string, unknown>): Response {
+  return new Response(JSON.stringify(data), { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+}
+function jsonError(message: string, status: number): Response {
+  return new Response(JSON.stringify({ error: message }), { status, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+}

@@ -28,7 +28,7 @@ export function MeetingSchedulerPage() {
     <div>
       <PageHeader
         title="Meeting Scheduler"
-        description="Find free slots, generate Google Meet links, send LinkedIn messages, and manage meeting reminders."
+        description="Use real Google Calendar availability, Google Meet links, attendee invites, and meeting reminders."
       />
 
       {/* Calendar Connections */}
@@ -39,7 +39,7 @@ export function MeetingSchedulerPage() {
         ) : (connections.data ?? []).length === 0 ? (
           <Card className="p-6 text-center text-sm text-ink-500">
             <Calendar className="h-6 w-6 text-ink-300 mx-auto mb-2" />
-            No calendar connections yet. Connect Google Calendar or Outlook to get started.
+            No calendar connection yet. Connect Google Calendar to enable autonomous booking.
           </Card>
         ) : (
           <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
