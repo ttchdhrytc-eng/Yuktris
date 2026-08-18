@@ -3,6 +3,7 @@
 // ============================================================
 
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { toast } from 'sonner';
 import { supabase } from '@/lib/supabase';
 import { useWorkspace } from '@/contexts/WorkspaceContext';
 import type {
@@ -211,18 +212,93 @@ export function useLinkedInConnectionAttempt(queueItemId: string | null) {
 export function useTestLinkedInConnection() {
   const { workspace } = useWorkspace();
   const queryClient = useQueryClient();
+
   return useMutation({
     mutationFn: async (accountId: string) => {
-      if (!workspace) throw new Error('No workspace');
-      const { error } = await supabase.rpc('enqueue_linkedin_connection_test', {
-        p_workspace_id: workspace.id,
-        p_account_id: accountId,
-      });
-      if (error) throw error;
-      return { message: 'Connection test queued.' };
+      if (!workspace) throw new Error('No workspace selected');
+
+      const { data, error: enqueueError } = await supabase.rpc(
+        'enqueue_linkedin_connection_test',
+        {
+          p_workspace_id: workspace.id,
+          p_account_id: accountId,
+        },
+      );
+
+      if (enqueueError) {
+        throw new Error(enqueueError.message || 'Failed to queue LinkedIn connection test');
+      }
+
+      const queueItemId = data as string | null;
+      if (!queueItemId) {
+        throw new Error('LinkedIn connection test was queued but no queue item ID was returned');
+      }
+
+      const timeoutMs = 60_000;
+      const pollIntervalMs = 1_000;
+      const startedAt = Date.now();
+
+      while (Date.now() - startedAt < timeoutMs) {
+        const { data: queueItem, error: queueError } = await supabase
+          .from('browser_execution_queue')
+          .select('id, status, error, result, worker_id, started_at, completed_at')
+          .eq('id', queueItemId)
+          .eq('workspace_id', workspace.id)
+          .maybeSingle();
+
+        if (queueError) {
+          throw new Error(queueError.message || 'Unable to read LinkedIn connection test status');
+        }
+
+        if (!queueItem) {
+          throw new Error('LinkedIn connection test queue item could not be found');
+        }
+
+        if (queueItem.status === 'completed') {
+          return {
+            queueItemId,
+            message: 'LinkedIn connection is healthy',
+            result: queueItem.result,
+            completedAt: queueItem.completed_at,
+          };
+        }
+
+        if (
+          queueItem.status === 'failed' ||
+          queueItem.status === 'dead_letter' ||
+          queueItem.status === 'cancelled'
+        ) {
+          throw new Error(
+            queueItem.error || `LinkedIn connection test ended with status: ${queueItem.status}`,
+          );
+        }
+
+        await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+      }
+
+      throw new Error(
+        'LinkedIn connection test timed out. The cloud worker did not finish within 60 seconds.',
+      );
     },
-    onSuccess: () => {
+
+    onSuccess: async () => {
+      toast.success('LinkedIn connection is healthy');
+
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['browser-exec-queue'] }),
+        queryClient.invalidateQueries({ queryKey: ['linkedin-accounts'] }),
+        queryClient.invalidateQueries({ queryKey: ['linkedin-sessions'] }),
+        queryClient.invalidateQueries({ queryKey: ['session-health'] }),
+        queryClient.invalidateQueries({ queryKey: ['linkedin-diagnostics'] }),
+      ]);
+    },
+
+    onError: (error: Error) => {
+      toast.error(error.message || 'LinkedIn connection test failed');
+
       queryClient.invalidateQueries({ queryKey: ['browser-exec-queue'] });
+      queryClient.invalidateQueries({ queryKey: ['linkedin-accounts'] });
+      queryClient.invalidateQueries({ queryKey: ['linkedin-diagnostics'] });
     },
   });
 }

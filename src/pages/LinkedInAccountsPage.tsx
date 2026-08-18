@@ -277,9 +277,19 @@ export function LinkedInAccountsPage() {
                         <button
                           onClick={() => testConnection.mutate(acc.id)}
                           disabled={testConnection.isPending}
-                          className="flex items-center gap-1.5 rounded-lg border border-gold-500/12 px-2.5 py-1.5 text-xs font-medium text-ink-200 hover:bg-card-800 transition-colors disabled:opacity-50"
+                          className="flex items-center gap-1.5 rounded-lg border border-gold-500/12 px-2.5 py-1.5 text-xs font-medium text-ink-200 hover:bg-card-800 transition-colors disabled:cursor-not-allowed disabled:opacity-50"
                         >
-                          <RefreshCw className="h-3 w-3" />Test Connection
+                          {testConnection.isPending ? (
+                            <>
+                              <Spinner className="h-3 w-3" />
+                              Testing...
+                            </>
+                          ) : (
+                            <>
+                              <RefreshCw className="h-3 w-3" />
+                              Test Connection
+                            </>
+                          )}
                         </button>
                         <button
                           onClick={() => toggleDryRun.mutate({ accountId: acc.id, enabled: !acc.dry_run_enabled })}
