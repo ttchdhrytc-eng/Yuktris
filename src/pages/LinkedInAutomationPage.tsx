@@ -1,5 +1,5 @@
 // ============================================================
-// LinkedInAutomationPage — LinkedIn browser automation control
+// LinkedInAutomationPage â€” LinkedIn browser automation control
 // ============================================================
 //
 // Tabs: Accounts, Sessions, Execution Queue, History,
@@ -100,7 +100,7 @@ export function LinkedInAutomationPage() {
   );
 }
 
-// ── Accounts Tab ─────────────────────────────────────────────
+// â”€â”€ Accounts Tab â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function AccountsTab() {
   const accounts = useLinkedInAccounts();
@@ -168,9 +168,9 @@ function AccountsTab() {
   );
 }
 
-// ── Account Card with Live Connection Panel ──────────────────
+// â”€â”€ Account Card with Live Connection Panel â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-// ── Connection State Machine Component ──────────────────────────
+// â”€â”€ Connection State Machine Component â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const STATES: { key: string; label: string }[] = [
   { key: 'creating_session', label: 'Creating Session' },
   { key: 'session_created', label: 'Session Created' },
@@ -246,7 +246,7 @@ function ConnectionStateMachine({ currentState, lastError }: { currentState: str
       {isChallenge && (
         <div className="mt-2 flex items-center gap-1.5 text-xs text-warning-400">
           <AlertOctagon className="h-3.5 w-3.5 shrink-0" />
-          <span>LinkedIn verification required — complete the challenge in the browser window.</span>
+          <span>LinkedIn verification required â€” complete the challenge in the browser window.</span>
         </div>
       )}
     </div>
@@ -301,7 +301,7 @@ function AccountCard({
   const cancelInteraction = useCancelAuthInteraction();
   const recoverSurface = useRecoverLinkedInAuthSurface();
 
-  const { progressSteps, challenge, identityVerified, repeatedSecurityChecks, cancellableInteraction, currentQueueItemId, latestStep } = useMemo(() => {
+  const { progressSteps, challenge, identityVerified, repeatedSecurityChecks, authRequired, cancellableInteraction, currentQueueItemId, latestStep } = useMemo(() => {
     const items = interactions.data ?? [];
     const currentQueueItemId = [...items].reverse().find((item) => item.queue_item_id)?.queue_item_id ?? null;
     const currentItems = currentQueueItemId
@@ -360,7 +360,7 @@ function AccountCard({
     );
   }
 
-  // ── Live Connection Panel ──────────────────────────────────
+  // â”€â”€ Live Connection Panel â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   return (
     <Card className="p-4 border-gold-500/25">
       {/* Header */}
@@ -502,7 +502,7 @@ function AccountCard({
   );
 }
 
-// ── Sessions Tab ──────────────────────────────────────────────
+// â”€â”€ Sessions Tab â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function SessionsTab() {
   const sessions = useLinkedInSessions();
@@ -527,9 +527,9 @@ function SessionsTab() {
               </div>
               <div className="text-xs text-ink-400">
                 Last used: {s.last_used_at ? new Date(s.last_used_at).toLocaleString() : 'Never'}
-                {s.last_validated_at && ` · Verified: ${new Date(s.last_validated_at).toLocaleString()}`}
-                {s.expires_at && ` · Expires: ${new Date(s.expires_at).toLocaleString()}`}
-                {s.browser_version && ` · Browser: ${s.browser_version}`}
+                {s.last_validated_at && ` Â· Verified: ${new Date(s.last_validated_at).toLocaleString()}`}
+                {s.expires_at && ` Â· Expires: ${new Date(s.expires_at).toLocaleString()}`}
+                {s.browser_version && ` Â· Browser: ${s.browser_version}`}
                 {s.failure_reason && <p className="text-error-500 mt-0.5">{s.failure_reason}</p>}
               </div>
             </div>
@@ -547,7 +547,7 @@ function SessionsTab() {
   );
 }
 
-// ── Queue Tab ──────────────────────────────────────────────────
+// â”€â”€ Queue Tab â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function QueueTab() {
   const queue = useBrowserExecutionQueue();
@@ -588,7 +588,7 @@ function QueueTab() {
   );
 }
 
-// ── History Tab ────────────────────────────────────────────────
+// â”€â”€ History Tab â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function HistoryTab() {
   const history = useBrowserExecutionHistory();
@@ -615,9 +615,9 @@ function HistoryTab() {
               <tr key={h.id} className="hover:bg-gold-500/4 table-row-luxury">
                 <td className="px-4 py-2 text-xs text-ink-200">{h.action_type}</td>
                 <td className="px-4 py-2"><Badge tone={statusTone(h.status)} size="sm">{h.status}</Badge></td>
-                <td className="px-4 py-2 text-xs text-ink-200">{h.duration_ms ? `${h.duration_ms}ms` : '—'}</td>
+                <td className="px-4 py-2 text-xs text-ink-200">{h.duration_ms ? `${h.duration_ms}ms` : 'â€”'}</td>
                 <td className="px-4 py-2 text-xs text-ink-200">{h.retry_count}</td>
-                <td className="px-4 py-2 text-xs text-ink-400">{h.completed_at ? new Date(h.completed_at).toLocaleString() : '—'}</td>
+                <td className="px-4 py-2 text-xs text-ink-400">{h.completed_at ? new Date(h.completed_at).toLocaleString() : 'â€”'}</td>
               </tr>
             ))}
           </tbody>
@@ -627,7 +627,7 @@ function HistoryTab() {
   );
 }
 
-// ── Failures Tab ────────────────────────────────────────────────
+// â”€â”€ Failures Tab â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function FailuresTab() {
   const failures = useBrowserExecutionFailures();
@@ -669,7 +669,7 @@ function FailuresTab() {
   );
 }
 
-// ── Retry Tab ────────────────────────────────────────────────
+// â”€â”€ Retry Tab â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function RetryTab() {
   const retry = useBrowserRetryQueue();
@@ -689,7 +689,7 @@ function RetryTab() {
                 <span className="text-xs font-medium text-ink-200">{r.action_type}</span>
               </div>
               <div className="text-xs text-ink-400">
-                Retry {r.retry_count}/{r.max_retries} · Next: {new Date(r.next_retry_at).toLocaleString()}
+                Retry {r.retry_count}/{r.max_retries} Â· Next: {new Date(r.next_retry_at).toLocaleString()}
               </div>
               {r.last_error && <p className="text-xs text-error-500 mt-1 truncate">{r.last_error}</p>}
             </div>
@@ -701,7 +701,7 @@ function RetryTab() {
   );
 }
 
-// ── Dead Letter Tab ────────────────────────────────────────────
+// â”€â”€ Dead Letter Tab â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function DeadLetterTab() {
   const dlq = useBrowserDeadLetterQueue();
@@ -720,7 +720,7 @@ function DeadLetterTab() {
               <span className="text-xs font-medium text-ink-200">{d.action_type}</span>
             </div>
             <p className="text-xs text-error-500 mt-1">{d.last_error}</p>
-            <p className="text-xs text-ink-400 mt-1">Retries: {d.retry_count} · {new Date(d.created_at).toLocaleString()}</p>
+            <p className="text-xs text-ink-400 mt-1">Retries: {d.retry_count} Â· {new Date(d.created_at).toLocaleString()}</p>
           </div>
         ))}
       </div>
@@ -728,7 +728,7 @@ function DeadLetterTab() {
   );
 }
 
-// ── Devices Tab ────────────────────────────────────────────────
+// â”€â”€ Devices Tab â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function DevicesTab() {
   const devices = useLinkedInDevices();
@@ -760,7 +760,7 @@ function DevicesTab() {
   );
 }
 
-// ── Events Tab ────────────────────────────────────────────────
+// â”€â”€ Events Tab â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function EventsTab() {
   const events = useLinkedInSessionEvents();
@@ -786,7 +786,7 @@ function EventsTab() {
   );
 }
 
-// ── Behavior Settings Tab ──────────────────────────────────────
+// â”€â”€ Behavior Settings Tab â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function BehaviorTab() {
   return (
