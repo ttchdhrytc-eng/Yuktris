@@ -10,6 +10,7 @@ const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const FIRECRAWL_API_KEY = Deno.env.get("FIRECRAWL_API_KEY") ?? "";
 const TAVILY_API_KEY = Deno.env.get("TAVILY_API_KEY") ?? "";
+const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY") ?? "";
 
 interface WorkerPayload {
   request_id: string;
@@ -29,8 +30,40 @@ interface ProviderResult {
   source_url: string | null;
 }
 
+type CompanyIntelligencePayload = {
+  industry: string | null;
+  sub_industry: string | null;
+  business_model: string | null;
+  company_size: string | null;
+  locations: string[];
+  summary: string | null;
+  technology_stack: Array<Record<string, unknown>>;
+  services: Array<Record<string, unknown>>;
+  products: Array<Record<string, unknown>>;
+  target_market: Array<Record<string, unknown>>;
+  brand_positioning: string | null;
+  seo_summary: Record<string, unknown>;
+  social_profiles: Array<Record<string, unknown>>;
+  contact_information: Record<string, unknown>;
+  buying_signals: Array<Record<string, unknown>>;
+  growth_signals: Array<Record<string, unknown>>;
+  decision_makers: Array<Record<string, unknown>>;
+  competitive_positioning: Record<string, unknown>;
+};
+
+function normalizeWebsite(website: string | null, companyName: string): string {
+  const fallback = `https://${companyName.toLowerCase().replace(/[^a-z0-9]+/g, "")}.com`;
+  const raw = (website ?? fallback).trim();
+  if (/^https?:\/\//i.test(raw)) return raw;
+  return `https://${raw.replace(/^\/+/, "")}`;
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
 async function updateRequest(id: string, updates: Record<string, unknown>): Promise<void> {
-  await fetch(`${SUPABASE_URL}/rest/v1/research_requests?id=eq.${id}`, {
+  const response = await fetch(`${SUPABASE_URL}/rest/v1/research_requests?id=eq.${id}`, {
     method: "PATCH",
     headers: {
       "Content-Type": "application/json",
@@ -39,15 +72,32 @@ async function updateRequest(id: string, updates: Record<string, unknown>): Prom
     },
     body: JSON.stringify(updates),
   });
+
+  if (!response.ok) {
+    console.error("[research-worker] Failed to update research request:", response.status, await response.text());
+  }
 }
+
+// -----------------------------------------------------------------------------
+// Website research
+// Firecrawl is primary. Jina Reader is a no-key fallback when Firecrawl fails.
+// -----------------------------------------------------------------------------
 
 async function firecrawlResearch(companyName: string, website: string | null): Promise<ProviderResult> {
   const start = Date.now();
-  if (!FIRECRAWL_API_KEY) {
-    return { provider: "firecrawl", success: false, data: {}, confidence: 0, latency_ms: 0, error: "API key not configured", source_url: null };
-  }
+  const targetUrl = normalizeWebsite(website, companyName);
 
-  const targetUrl = website ?? `https://${companyName.toLowerCase().replace(/\s+/g, "")}.com`;
+  if (!FIRECRAWL_API_KEY) {
+    return {
+      provider: "firecrawl",
+      success: false,
+      data: {},
+      confidence: 0,
+      latency_ms: Date.now() - start,
+      error: "Firecrawl API key not configured",
+      source_url: targetUrl,
+    };
+  }
 
   try {
     const response = await fetch("https://api.firecrawl.dev/v1/scrape", {
@@ -56,47 +106,183 @@ async function firecrawlResearch(companyName: string, website: string | null): P
         "Authorization": `Bearer ${FIRECRAWL_API_KEY}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ url: targetUrl, formats: ["markdown"], onlyMainContent: true }),
+      body: JSON.stringify({
+        url: targetUrl,
+        formats: ["markdown"],
+        onlyMainContent: true,
+      }),
     });
 
     if (!response.ok) {
-      return { provider: "firecrawl", success: false, data: {}, confidence: 0, latency_ms: Date.now() - start, error: `HTTP ${response.status}`, source_url: targetUrl };
+      const body = await response.text().catch(() => "");
+      return {
+        provider: "firecrawl",
+        success: false,
+        data: {},
+        confidence: 0,
+        latency_ms: Date.now() - start,
+        error: `Firecrawl HTTP ${response.status}${body ? `: ${body.slice(0, 300)}` : ""}`,
+        source_url: targetUrl,
+      };
     }
 
     const json = await response.json();
     const data = json.data ?? json;
+    const markdown = typeof data.markdown === "string" ? data.markdown.trim() : "";
+
+    if (!markdown) {
+      return {
+        provider: "firecrawl",
+        success: false,
+        data: {},
+        confidence: 0,
+        latency_ms: Date.now() - start,
+        error: "Firecrawl returned no readable markdown",
+        source_url: targetUrl,
+      };
+    }
 
     return {
       provider: "firecrawl",
       success: true,
       data: {
-        markdown: data.markdown ?? "",
+        markdown,
         metadata: data.metadata ?? {},
         title: data.metadata?.title ?? "",
         description: data.metadata?.description ?? "",
       },
-      confidence: 0.85,
+      confidence: 0.9,
       latency_ms: Date.now() - start,
       error: null,
       source_url: targetUrl,
     };
   } catch (err) {
-    return { provider: "firecrawl", success: false, data: {}, confidence: 0, latency_ms: Date.now() - start, error: err.message, source_url: targetUrl };
+    return {
+      provider: "firecrawl",
+      success: false,
+      data: {},
+      confidence: 0,
+      latency_ms: Date.now() - start,
+      error: errorMessage(err),
+      source_url: targetUrl,
+    };
   }
 }
 
-async function tavilyResearch(companyName: string, website: string | null, requestType: string): Promise<ProviderResult> {
+async function jinaResearch(companyName: string, website: string | null): Promise<ProviderResult> {
   const start = Date.now();
+  const targetUrl = normalizeWebsite(website, companyName);
+  const readerUrl = `https://r.jina.ai/${targetUrl}`;
+
+  try {
+    const response = await fetch(readerUrl, {
+      method: "GET",
+      headers: {
+        "Accept": "text/plain",
+        "X-Return-Format": "markdown",
+      },
+    });
+
+    if (!response.ok) {
+      const body = await response.text().catch(() => "");
+      return {
+        provider: "jina",
+        success: false,
+        data: {},
+        confidence: 0,
+        latency_ms: Date.now() - start,
+        error: `Jina HTTP ${response.status}${body ? `: ${body.slice(0, 300)}` : ""}`,
+        source_url: targetUrl,
+      };
+    }
+
+    const markdown = (await response.text()).trim();
+    if (!markdown) {
+      return {
+        provider: "jina",
+        success: false,
+        data: {},
+        confidence: 0,
+        latency_ms: Date.now() - start,
+        error: "Jina returned no readable content",
+        source_url: targetUrl,
+      };
+    }
+
+    return {
+      provider: "jina",
+      success: true,
+      data: { markdown },
+      confidence: 0.82,
+      latency_ms: Date.now() - start,
+      error: null,
+      source_url: targetUrl,
+    };
+  } catch (err) {
+    return {
+      provider: "jina",
+      success: false,
+      data: {},
+      confidence: 0,
+      latency_ms: Date.now() - start,
+      error: errorMessage(err),
+      source_url: targetUrl,
+    };
+  }
+}
+
+async function websiteResearch(companyName: string, website: string | null): Promise<ProviderResult> {
+  const firecrawl = await firecrawlResearch(companyName, website);
+  if (firecrawl.success) return firecrawl;
+
+  console.warn("[research-worker] Firecrawl failed; trying Jina Reader fallback:", firecrawl.error);
+  const jina = await jinaResearch(companyName, website);
+  if (jina.success) return jina;
+
+  return {
+    provider: "website",
+    success: false,
+    data: {},
+    confidence: 0,
+    latency_ms: firecrawl.latency_ms + jina.latency_ms,
+    error: `Firecrawl failed (${firecrawl.error}); Jina failed (${jina.error})`,
+    source_url: normalizeWebsite(website, companyName),
+  };
+}
+
+// -----------------------------------------------------------------------------
+// Tavily enrichment
+// -----------------------------------------------------------------------------
+
+async function tavilyResearch(
+  companyName: string,
+  website: string | null,
+  requestType: string,
+): Promise<ProviderResult> {
+  const start = Date.now();
+
   if (!TAVILY_API_KEY) {
-    return { provider: "tavily", success: false, data: {}, confidence: 0, latency_ms: 0, error: "API key not configured", source_url: null };
+    return {
+      provider: "tavily",
+      success: false,
+      data: {},
+      confidence: 0,
+      latency_ms: 0,
+      error: "Tavily API key not configured",
+      source_url: website,
+    };
   }
 
-  const queries = [`${companyName} company overview business model`];
+  const domain = normalizeWebsite(website, companyName).replace(/^https?:\/\//, "").replace(/\/.*$/, "");
+  const queries = [
+    `${companyName} ${domain} company overview services products business model`,
+  ];
+
   if (requestType === "full_intelligence") {
-    queries.push(`${companyName} hiring growth expansion funding`);
-    queries.push(`${companyName} technology stack tools software`);
-    queries.push(`${companyName} CEO CTO executives leadership team`);
-    queries.push(`${companyName} competitors market position`);
+    queries.push(`${companyName} ${domain} customers target market`);
+    queries.push(`${companyName} ${domain} technology stack`);
+    queries.push(`${companyName} ${domain} leadership executives`);
+    queries.push(`${companyName} ${domain} competitors market position`);
   }
 
   try {
@@ -119,9 +305,10 @@ async function tavilyResearch(companyName: string, website: string | null, reque
 
       const json = await response.json();
       if (json.answer) allResults.push({ type: "answer", content: json.answer, query });
-      if (json.results) {
-        for (const r of json.results) {
-          allResults.push({ type: "result", ...r, query });
+
+      if (Array.isArray(json.results)) {
+        for (const result of json.results) {
+          allResults.push({ type: "result", ...result, query });
         }
       }
     }
@@ -130,15 +317,272 @@ async function tavilyResearch(companyName: string, website: string | null, reque
       provider: "tavily",
       success: allResults.length > 0,
       data: { results: allResults },
-      confidence: 0.8,
+      confidence: allResults.length > 0 ? 0.8 : 0,
       latency_ms: Date.now() - start,
-      error: allResults.length > 0 ? null : "No results",
+      error: allResults.length > 0 ? null : "No Tavily results",
       source_url: website,
     };
   } catch (err) {
-    return { provider: "tavily", success: false, data: {}, confidence: 0, latency_ms: Date.now() - start, error: err.message, source_url: null };
+    return {
+      provider: "tavily",
+      success: false,
+      data: {},
+      confidence: 0,
+      latency_ms: Date.now() - start,
+      error: errorMessage(err),
+      source_url: website,
+    };
   }
 }
+
+// -----------------------------------------------------------------------------
+// OpenAI normalization
+// Converts raw website + Tavily evidence into the company_intelligence shape
+// already consumed by Yuktris' BusinessIntelligenceService.
+// -----------------------------------------------------------------------------
+
+function emptyIntelligence(summary: string | null): CompanyIntelligencePayload {
+  return {
+    industry: null,
+    sub_industry: null,
+    business_model: null,
+    company_size: null,
+    locations: [],
+    summary,
+    technology_stack: [],
+    services: [],
+    products: [],
+    target_market: [],
+    brand_positioning: null,
+    seo_summary: {},
+    social_profiles: [],
+    contact_information: {},
+    buying_signals: [],
+    growth_signals: [],
+    decision_makers: [],
+    competitive_positioning: {},
+  };
+}
+
+function safeArray(value: unknown): Array<Record<string, unknown>> {
+  return Array.isArray(value)
+    ? value.filter((item) => item && typeof item === "object" && !Array.isArray(item)) as Array<Record<string, unknown>>
+    : [];
+}
+
+function safeStringArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    : [];
+}
+
+function normalizeAIIntelligence(value: unknown, fallbackSummary: string | null): CompanyIntelligencePayload {
+  const raw = value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+
+  return {
+    industry: typeof raw.industry === "string" ? raw.industry : null,
+    sub_industry: typeof raw.sub_industry === "string" ? raw.sub_industry : null,
+    business_model: typeof raw.business_model === "string" ? raw.business_model : null,
+    company_size: typeof raw.company_size === "string" ? raw.company_size : null,
+    locations: safeStringArray(raw.locations),
+    summary: typeof raw.summary === "string" && raw.summary.trim() ? raw.summary : fallbackSummary,
+    technology_stack: safeArray(raw.technology_stack),
+    services: safeArray(raw.services),
+    products: safeArray(raw.products),
+    target_market: safeArray(raw.target_market),
+    brand_positioning: typeof raw.brand_positioning === "string" ? raw.brand_positioning : null,
+    seo_summary: raw.seo_summary && typeof raw.seo_summary === "object" && !Array.isArray(raw.seo_summary)
+      ? raw.seo_summary as Record<string, unknown>
+      : {},
+    social_profiles: safeArray(raw.social_profiles),
+    contact_information: raw.contact_information && typeof raw.contact_information === "object" && !Array.isArray(raw.contact_information)
+      ? raw.contact_information as Record<string, unknown>
+      : {},
+    buying_signals: safeArray(raw.buying_signals),
+    growth_signals: safeArray(raw.growth_signals),
+    decision_makers: safeArray(raw.decision_makers),
+    competitive_positioning:
+      raw.competitive_positioning &&
+      typeof raw.competitive_positioning === "object" &&
+      !Array.isArray(raw.competitive_positioning)
+        ? raw.competitive_positioning as Record<string, unknown>
+        : {},
+  };
+}
+
+function buildEvidence(
+  companyName: string,
+  website: string | null,
+  websiteResult: ProviderResult,
+  tavilyResult: ProviderResult,
+): string {
+  const markdown = typeof websiteResult.data.markdown === "string"
+    ? websiteResult.data.markdown
+    : "";
+
+  const description = typeof websiteResult.data.description === "string"
+    ? websiteResult.data.description
+    : "";
+
+  const tavilyResults = Array.isArray(tavilyResult.data.results)
+    ? tavilyResult.data.results as Record<string, unknown>[]
+    : [];
+
+  const tavilyText = tavilyResults
+    .slice(0, 20)
+    .map((item) => {
+      const title = typeof item.title === "string" ? item.title : "";
+      const content =
+        typeof item.content === "string"
+          ? item.content
+          : typeof item.answer === "string"
+            ? item.answer
+            : typeof item.content === "number"
+              ? String(item.content)
+              : "";
+      const url = typeof item.url === "string" ? item.url : "";
+      return [title, content, url].filter(Boolean).join("\n");
+    })
+    .filter(Boolean)
+    .join("\n\n");
+
+  return [
+    `Company: ${companyName}`,
+    `Website: ${website ?? ""}`,
+    description ? `Website metadata description:\n${description}` : "",
+    markdown ? `Website content:\n${markdown.slice(0, 24000)}` : "",
+    tavilyText ? `External research:\n${tavilyText.slice(0, 14000)}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+async function analyzeCompany(
+  companyName: string,
+  website: string | null,
+  websiteResult: ProviderResult,
+  tavilyResult: ProviderResult,
+): Promise<CompanyIntelligencePayload> {
+  const websiteDescription =
+    typeof websiteResult.data.description === "string" && websiteResult.data.description.trim()
+      ? websiteResult.data.description.trim()
+      : null;
+
+  if (!OPENAI_API_KEY) {
+    console.warn("[research-worker] OPENAI_API_KEY missing; storing raw research without AI normalization");
+    return emptyIntelligence(websiteDescription);
+  }
+
+  const evidence = buildEvidence(companyName, website, websiteResult, tavilyResult);
+
+  const systemPrompt = [
+    "You are Yuktris' company intelligence analyst.",
+    "Analyze only the supplied evidence. Do not invent facts that are not supported.",
+    "Return one valid JSON object and no markdown.",
+    "Use null or [] when evidence is insufficient.",
+    "Keep array items as objects so downstream systems can use them.",
+  ].join(" ");
+
+  const userPrompt = `Analyze this company evidence and return JSON with exactly these top-level keys:
+
+{
+  "industry": string|null,
+  "sub_industry": string|null,
+  "business_model": string|null,
+  "company_size": string|null,
+  "locations": string[],
+  "summary": string|null,
+  "technology_stack": [{"name": string, "evidence": string}],
+  "services": [{"name": string, "description": string}],
+  "products": [{"name": string, "description": string}],
+  "target_market": [{"segment": string, "industry": string, "company_size": string, "location": string}],
+  "brand_positioning": string|null,
+  "seo_summary": {"title": string, "description": string, "keywords": string[]},
+  "social_profiles": [{"platform": string, "url": string}],
+  "contact_information": {"email": string|null, "phone": string|null, "address": string|null},
+  "buying_signals": [{"signal": string, "description": string}],
+  "growth_signals": [{"signal": string, "description": string}],
+  "decision_makers": [{"name": string, "title": string}],
+  "competitive_positioning": {
+    "positioning": string|null,
+    "direct_competitors": [{"name": string, "reason": string}],
+    "strengths": [{"description": string}],
+    "weaknesses": [{"description": string}],
+    "opportunities": [{"description": string}],
+    "risks": [{"description": string}]
+  }
+}
+
+Evidence:
+${evidence}`;
+
+  try {
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        temperature: 0.2,
+        response_format: { type: "json_object" },
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userPrompt },
+        ],
+      }),
+    });
+
+    if (!response.ok) {
+      console.error("[research-worker] OpenAI normalization failed:", response.status, await response.text());
+      return emptyIntelligence(websiteDescription);
+    }
+
+    const json = await response.json();
+    const content = json.choices?.[0]?.message?.content ?? "{}";
+    const parsed = JSON.parse(content);
+
+    return normalizeAIIntelligence(parsed, websiteDescription);
+  } catch (err) {
+    console.error("[research-worker] OpenAI normalization error:", errorMessage(err));
+    return emptyIntelligence(websiteDescription);
+  }
+}
+
+async function persistSources(intelligenceId: string, results: ProviderResult[]): Promise<void> {
+  const sources = results
+    .filter((result) => result.success)
+    .map((result) => ({
+      company_intelligence_id: intelligenceId,
+      provider: result.provider,
+      source_url: result.source_url,
+      confidence_score: result.confidence,
+      retrieved_at: new Date().toISOString(),
+    }));
+
+  if (sources.length === 0) return;
+
+  const response = await fetch(`${SUPABASE_URL}/rest/v1/research_sources`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${SERVICE_ROLE_KEY}`,
+      "apikey": SERVICE_ROLE_KEY,
+    },
+    body: JSON.stringify(sources),
+  });
+
+  // Older schemas may not yet allow "jina" in the provider constraint.
+  // Source logging must not make onboarding fail.
+  if (!response.ok) {
+    console.warn("[research-worker] Could not persist one or more research_sources:", response.status, await response.text());
+  }
+}
+
+let activePayload: WorkerPayload | null = null;
 
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
@@ -147,75 +591,72 @@ Deno.serve(async (req: Request) => {
 
   try {
     const payload: WorkerPayload = await req.json();
+    activePayload = payload;
+
+    if (!payload.request_id || !payload.company_name) {
+      return new Response(
+        JSON.stringify({ error: "request_id and company_name are required" }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
+    }
 
     await updateRequest(payload.request_id, { status: "in_progress" });
 
-    // Run providers in parallel
-    const [firecrawlResult, tavilyResult] = await Promise.all([
-      firecrawlResearch(payload.company_name, payload.website),
+    // Firecrawl primary with Jina fallback, while Tavily enriches in parallel.
+    const [websiteResult, tavilyResult] = await Promise.all([
+      websiteResearch(payload.company_name, payload.website),
       tavilyResearch(payload.company_name, payload.website, payload.request_type),
     ]);
 
-    const results = [firecrawlResult, tavilyResult];
-    const successful = results.filter((r) => r.success);
+    const results = [websiteResult, tavilyResult];
+    const successful = results.filter((result) => result.success);
 
     if (successful.length === 0) {
+      const error = results
+        .map((result) => `${result.provider}: ${result.error ?? "failed"}`)
+        .join("; ");
+
       await updateRequest(payload.request_id, {
         status: "failed",
-        error_message: "All providers failed",
+        error_message: error || "All providers failed",
         completed_at: new Date().toISOString(),
       });
 
       return new Response(
-        JSON.stringify({ request_id: payload.request_id, status: "failed", error: "All providers failed" }),
-        { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        JSON.stringify({
+          request_id: payload.request_id,
+          status: "failed",
+          error: error || "All providers failed",
+        }),
+        { status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" } },
       );
     }
 
     await updateRequest(payload.request_id, { status: "aggregating" });
 
-    // Merge results
-    const merged: Record<string, unknown> = {};
-    for (const result of successful) {
-      for (const [key, value] of Object.entries(result.data)) {
-        if (value === null || value === undefined) continue;
-        if (key in merged) {
-          if (Array.isArray(merged[key]) && Array.isArray(value)) {
-            merged[key] = [...(merged[key] as unknown[]), ...value];
-          } else if (typeof merged[key] === "string" && typeof value === "string") {
-            merged[key] = (merged[key] as string).length >= value.length ? merged[key] : value;
-          }
-        } else {
-          merged[key] = value;
-        }
-      }
-    }
-
-    // Calculate confidence
-    const totalConfidence = successful.reduce((sum, r) => sum + r.confidence, 0) / successful.length;
-    const providerBonus = Math.min(successful.length * 0.05, 0.15);
-    const confidenceScore = Math.min(totalConfidence + providerBonus, 1.0);
+    const totalConfidence =
+      successful.reduce((sum, result) => sum + result.confidence, 0) / successful.length;
+    const providerBonus = Math.min(successful.length * 0.05, 0.1);
+    const confidenceScore = Math.min(totalConfidence + providerBonus, 1);
 
     await updateRequest(payload.request_id, { status: "normalizing" });
 
-    // Build intelligence record
+    const normalized = await analyzeCompany(
+      payload.company_name,
+      payload.website,
+      websiteResult,
+      tavilyResult,
+    );
+
     const intelligence: Record<string, unknown> = {
       workspace_id: payload.workspace_id,
       company_name: payload.company_name,
       website: payload.website,
-      summary: (merged.description as string) ?? (merged.summary as string) ?? null,
+      ...normalized,
       confidence_score: confidenceScore,
       last_updated: new Date().toISOString(),
     };
 
-    // Extract from Tavily results
-    const tavilyResults = (tavilyResult.data.results as Record<string, unknown>[]) ?? [];
-    const answers = tavilyResults.filter((r) => r.type === "answer");
-    if (answers.length > 0 && !intelligence.summary) {
-      intelligence.summary = answers.map((a) => a.content as string).join(" ").slice(0, 2000);
-    }
-
-    // Persist intelligence
     const intelRes = await fetch(`${SUPABASE_URL}/rest/v1/company_intelligence`, {
       method: "POST",
       headers: {
@@ -227,41 +668,32 @@ Deno.serve(async (req: Request) => {
       body: JSON.stringify(intelligence),
     });
 
-    let intelligenceId: string | null = null;
-    if (intelRes.ok) {
-      const intelData = await intelRes.json();
-      if (intelData && intelData.length > 0) {
-        intelligenceId = intelData[0].id;
-      }
+    if (!intelRes.ok) {
+      const body = await intelRes.text();
+      throw new Error(`Failed to persist company intelligence (HTTP ${intelRes.status}): ${body}`);
     }
 
-    // Persist sources
-    if (intelligenceId) {
-      const sources = successful.map((r) => ({
-        company_intelligence_id: intelligenceId,
-        provider: r.provider,
-        source_url: r.source_url,
-        confidence_score: r.confidence,
-        retrieved_at: new Date().toISOString(),
-      }));
+    const intelData = await intelRes.json();
+    const intelligenceId =
+      Array.isArray(intelData) && intelData.length > 0 && typeof intelData[0]?.id === "string"
+        ? intelData[0].id
+        : null;
 
-      await fetch(`${SUPABASE_URL}/rest/v1/research_sources`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${SERVICE_ROLE_KEY}`,
-          "apikey": SERVICE_ROLE_KEY,
-        },
-        body: JSON.stringify(sources),
-      });
+    if (!intelligenceId) {
+      throw new Error("Company intelligence was persisted but no intelligence id was returned");
     }
 
-    // Complete
+    await persistSources(intelligenceId, results);
+
     await updateRequest(payload.request_id, {
       status: "completed",
       confidence_score: confidenceScore,
       completed_at: new Date().toISOString(),
-      result_summary: { intelligence_id: intelligenceId, providers_used: successful.map((r) => r.provider) },
+      result_summary: {
+        intelligence_id: intelligenceId,
+        providers_used: successful.map((result) => result.provider),
+        website_provider: websiteResult.provider,
+      },
     });
 
     return new Response(
@@ -270,14 +702,38 @@ Deno.serve(async (req: Request) => {
         status: "completed",
         intelligence_id: intelligenceId,
         confidence: confidenceScore,
-        providers_used: successful.map((r) => r.provider),
+        providers_used: successful.map((result) => result.provider),
+        website_provider: websiteResult.provider,
       }),
-      { headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      {
+        status: 200,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      },
     );
   } catch (err) {
+    const message = errorMessage(err);
+    console.error("[research-worker]", message);
+
+    try {
+      if (activePayload?.request_id) {
+        await updateRequest(activePayload.request_id, {
+          status: "failed",
+          error_message: message,
+          completed_at: new Date().toISOString(),
+        });
+      }
+    } catch {
+      // Best-effort failure update only.
+    } finally {
+      activePayload = null;
+    }
+
     return new Response(
-      JSON.stringify({ error: err.message }),
-      { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      JSON.stringify({ error: message }),
+      {
+        status: 500,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      },
     );
   }
 });

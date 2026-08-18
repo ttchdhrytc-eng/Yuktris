@@ -110,20 +110,118 @@ async function openaiGenerateText(body: Record<string, unknown>, apiKey: string)
   });
 }
 
+function makeOpenAISchemaNullable(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+
+  const schema = { ...(value as Record<string, unknown>) };
+  const type = schema.type;
+
+  if (typeof type === "string") {
+    if (type !== "null") schema.type = [type, "null"];
+    return schema;
+  }
+
+  if (Array.isArray(type)) {
+    if (!type.includes("null")) schema.type = [...type, "null"];
+    return schema;
+  }
+
+  if (Array.isArray(schema.anyOf)) {
+    const hasNull = schema.anyOf.some(
+      (entry) =>
+        entry &&
+        typeof entry === "object" &&
+        !Array.isArray(entry) &&
+        (entry as Record<string, unknown>).type === "null",
+    );
+    if (!hasNull) schema.anyOf = [...schema.anyOf, { type: "null" }];
+    return schema;
+  }
+
+  if (Array.isArray(schema.oneOf)) {
+    const hasNull = schema.oneOf.some(
+      (entry) =>
+        entry &&
+        typeof entry === "object" &&
+        !Array.isArray(entry) &&
+        (entry as Record<string, unknown>).type === "null",
+    );
+    if (!hasNull) schema.oneOf = [...schema.oneOf, { type: "null" }];
+    return schema;
+  }
+
+  return { anyOf: [schema, { type: "null" }] };
+}
+
+function normalizeOpenAIStrictSchema(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(normalizeOpenAIStrictSchema);
+  if (!value || typeof value !== "object") return value;
+
+  const source = value as Record<string, unknown>;
+  const normalized: Record<string, unknown> = {};
+
+  for (const [key, child] of Object.entries(source)) {
+    if (key === "required" || key === "additionalProperties" || key === "properties" || key === "items") continue;
+    normalized[key] = normalizeOpenAIStrictSchema(child);
+  }
+
+  if (source.type === "object" || source.properties) {
+    const properties =
+      source.properties && typeof source.properties === "object" && !Array.isArray(source.properties)
+        ? source.properties as Record<string, unknown>
+        : {};
+
+    const originalRequired = new Set(
+      Array.isArray(source.required)
+        ? source.required.filter((item): item is string => typeof item === "string")
+        : [],
+    );
+
+    const normalizedProperties: Record<string, unknown> = {};
+    for (const [name, propertySchema] of Object.entries(properties)) {
+      let property = normalizeOpenAIStrictSchema(propertySchema);
+      if (!originalRequired.has(name)) property = makeOpenAISchemaNullable(property);
+      normalizedProperties[name] = property;
+    }
+
+    normalized.properties = normalizedProperties;
+    normalized.required = Object.keys(normalizedProperties);
+    normalized.additionalProperties = false;
+  }
+
+  if (source.items !== undefined) {
+    normalized.items = normalizeOpenAIStrictSchema(source.items);
+  }
+
+  return normalized;
+}
+
 async function openaiGenerateStructured(body: Record<string, unknown>, apiKey: string): Promise<Response> {
   const model = body.model as string ?? "gpt-4o";
   const systemPrompt = body.system_prompt as string | undefined;
   const userPrompt = body.user_prompt as string;
   const temperature = body.temperature as number ?? 0.3;
   const maxTokens = body.max_tokens as number | undefined;
+  const schema = body.schema as Record<string, unknown> | undefined;
 
   const messages: Record<string, unknown>[] = [];
   if (systemPrompt) messages.push({ role: "system", content: systemPrompt });
   messages.push({ role: "user", content: userPrompt });
 
   const requestBody: Record<string, unknown> = {
-    model, messages, temperature,
-    response_format: { type: "json_object" },
+    model,
+    messages,
+    temperature,
+    response_format: schema
+      ? {
+          type: "json_schema",
+          json_schema: {
+            name: "yuktris_structured_response",
+            strict: true,
+            schema: normalizeOpenAIStrictSchema(schema),
+          },
+        }
+      : { type: "json_object" },
   };
   if (maxTokens) requestBody.max_tokens = maxTokens;
 
@@ -148,7 +246,7 @@ async function openaiGenerateStructured(body: Record<string, unknown>, apiKey: s
   } catch {
     const jsonMatch = rawContent.match(/\{[\s\S]*\}/);
     if (jsonMatch) {
-      try { structuredData = JSON.parse(jsonMatch[0]); } catch { /* leave empty */ }
+      try { structuredData = JSON.parse(jsonMatch[0]); } catch { /* downstream validation handles empty data */ }
     }
   }
 
@@ -157,6 +255,7 @@ async function openaiGenerateStructured(body: Record<string, unknown>, apiKey: s
     raw: rawContent,
     prompt_tokens: data.usage?.prompt_tokens ?? 0,
     completion_tokens: data.usage?.completion_tokens ?? 0,
+    total_tokens: data.usage?.total_tokens ?? 0,
     model: data.model ?? model,
   });
 }

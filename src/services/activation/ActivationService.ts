@@ -185,39 +185,35 @@ class ActivationService {
     const capName = name.charAt(0).toUpperCase() + name.slice(1);
 
     try {
-      const analysis = await biService.startAnalysis(workspaceId, website, capName);
+      const result = await biService.runResearchAnalysis(workspaceId, website, capName, (status) => {
+        if (status === 'pending' || status === 'planning' || status === 'in_progress') {
+          this.updateStep('research', 'Researching your website and market...', false);
+        } else if (status === 'aggregating' || status === 'normalizing') {
+          this.updateStep('research', 'Website research complete', true);
+          this.updateStep('analysis', 'Building your business profile...', false);
+        }
+      });
 
-      this.updateStep('research', 'Website analyzed', true);
-
-      const summary = await biService.generateBusinessSummary('');
-      const insights = await biService.generateInsights('');
-
-      await biService.saveAnalysis(
-        analysis.id,
-        summary,
-        await biService.crawlWebsite(website),
-        insights,
-      );
-
+      this.updateStep('research', 'Website research complete', true);
       this.updateStep('analysis', 'Business analysis complete', true);
 
       return {
-        name: summary.company_name ?? capName,
+        name: result.profile.name || capName,
         website,
-        description: summary.description ?? '',
-        industry: summary.industry ?? '',
-        services: summary.services ?? [],
-        usp: summary.usp ?? '',
-        competitors: (insights.raw_json as any)?.competitive_landscape?.direct_competitors ?? [],
-        targetCustomers: summary.target_audience ?? '',
-        pricingModel: summary.pricing_model ?? '',
-        technologies: [],
-        businessModel: summary.business_model ?? '',
+        description: result.profile.description,
+        industry: result.profile.industry,
+        services: result.profile.services,
+        usp: result.profile.usp,
+        competitors: result.profile.competitors,
+        targetCustomers: result.profile.targetCustomers,
+        pricingModel: result.profile.pricingModel,
+        technologies: result.profile.technologies,
+        businessModel: result.profile.businessModel,
       };
     } catch (error) {
       this.updateStep('research', 'Website analysis failed', false);
       this.updateStep('analysis', 'Business analysis failed', false);
-      throw new Error(error instanceof Error ? error.message : `Unable to analyze ${capName}. Please verify the website and AI/research integrations, then retry.`);
+      throw new Error(error instanceof Error ? error.message : `Unable to analyze ${capName}. Please verify the website and research integrations, then retry.`);
     }
   }
 

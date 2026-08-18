@@ -1,20 +1,12 @@
 // ============================================================
-// BusinessIntelligenceService — Architecture
+// BusinessIntelligenceService — Real Research Pipeline
 // ============================================================
 //
-// This is the main orchestrator for the Business Intelligence Agent.
-// It coordinates website crawling (Firecrawl), AI analysis (OpenAI),
-// and external research (Tavily) to produce a complete business analysis.
+// Onboarding path:
+//   research-start -> research-worker -> Firecrawl/Tavily
+//   -> research_requests/company_intelligence -> business_analysis
 //
-// The actual API integrations are NOT implemented yet. This service
-// defines the full method architecture and uses mock data to simulate
-// the analysis workflow. When the real APIs are ready, replace the
-// mock implementations with calls to the respective service interfaces.
-//
-// Data is persisted to Supabase tables:
-//   - business_analysis
-//   - website_pages
-//   - business_insights
+// No mock business data is used in this service.
 
 import { supabase } from '@/lib/supabase';
 import type {
@@ -26,32 +18,189 @@ import type {
   AnalysisStageInfo,
   TimelineEvent,
 } from '@/types/business-intelligence';
-import { MOCK_ANALYSIS, MOCK_PAGES, MOCK_INSIGHTS } from './mockData';
-
-// ============================================================
-// Analysis Stages
-// ============================================================
+import type { CompanyIntelligenceRecord } from '@/types/research-intelligence';
 
 export const ANALYSIS_STAGES: AnalysisStageInfo[] = [
   { stage: 'connecting', label: 'Connecting', description: 'Establishing connection to the website' },
   { stage: 'crawling', label: 'Crawling Website', description: 'Discovering and mapping site pages' },
   { stage: 'reading', label: 'Reading Content', description: 'Extracting text from discovered pages' },
   { stage: 'extracting_services', label: 'Extracting Services', description: 'Identifying products, services, and pricing' },
-  { stage: 'understanding', label: 'Understanding Business', description: 'AI analysis of business model and value proposition' },
+  { stage: 'understanding', label: 'Understanding Business', description: 'Analyzing the business and market' },
   { stage: 'generating_summary', label: 'Generating Summary', description: 'Creating executive summary and insights' },
   { stage: 'saving', label: 'Saving Analysis', description: 'Persisting results to the database' },
 ];
 
-// ============================================================
-// Service Definition
-// ============================================================
+const POLL_INTERVAL_MS = 2_000;
+const RESEARCH_TIMEOUT_MS = 120_000;
+
+type ResearchStatus =
+  | 'pending'
+  | 'planning'
+  | 'in_progress'
+  | 'aggregating'
+  | 'normalizing'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
+  | string;
+
+type ResearchRequestRow = {
+  id: string;
+  workspace_id: string | null;
+  company_name: string;
+  website: string | null;
+  status: ResearchStatus;
+  error_message?: string | null;
+  result_summary?: Record<string, unknown> | null;
+  created_at?: string;
+};
+
+export type ResearchBusinessProfile = {
+  name: string;
+  description: string;
+  industry: string;
+  services: string[];
+  usp: string;
+  competitors: string[];
+  targetCustomers: string;
+  pricingModel: string;
+  technologies: string[];
+  businessModel: string;
+};
+
+export type ResearchAnalysisResult = {
+  analysis: BusinessAnalysis;
+  intelligence: CompanyIntelligenceRecord;
+  profile: ResearchBusinessProfile;
+};
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function firstString(value: unknown, keys: string[] = []): string {
+  if (typeof value === 'string') return value.trim();
+  const record = asRecord(value);
+  for (const key of keys) {
+    const candidate = record[key];
+    if (typeof candidate === 'string' && candidate.trim()) return candidate.trim();
+  }
+  return '';
+}
+
+function itemNames(items: unknown, keys: string[]): string[] {
+  if (!Array.isArray(items)) return [];
+  return [...new Set(items.map((item) => firstString(item, keys)).filter(Boolean))];
+}
+
+function targetMarketText(items: unknown): string {
+  if (!Array.isArray(items)) return '';
+  const values = items
+    .map((item) => {
+      if (typeof item === 'string') return item.trim();
+      const record = asRecord(item);
+      const parts = [
+        firstString(record, ['name', 'segment', 'market', 'audience', 'description']),
+        firstString(record, ['industry']),
+        firstString(record, ['company_size', 'size']),
+        firstString(record, ['location', 'region', 'country']),
+      ].filter(Boolean);
+      return [...new Set(parts)].join(' — ');
+    })
+    .filter(Boolean);
+  return [...new Set(values)].join('; ');
+}
+
+function competitorNames(value: unknown): string[] {
+  const root = asRecord(value);
+  const candidates =
+    root.direct_competitors ??
+    root.competitors ??
+    root.directCompetitors ??
+    [];
+  return itemNames(candidates, ['name', 'company_name', 'company', 'competitor']);
+}
+
+function derivePricingModel(intelligence: CompanyIntelligenceRecord): string {
+  const raw = intelligence as unknown as Record<string, unknown>;
+  return firstString(raw, ['pricing_model', 'pricing', 'revenue_model']);
+}
+
+function deriveUSP(intelligence: CompanyIntelligenceRecord): string {
+  return intelligence.brand_positioning?.trim()
+    || firstString(intelligence.competitive_positioning, ['positioning', 'differentiation', 'summary', 'advantage'])
+    || intelligence.summary?.trim()
+    || '';
+}
+
+function buildProfile(intelligence: CompanyIntelligenceRecord): ResearchBusinessProfile {
+  return {
+    name: intelligence.company_name ?? '',
+    description: intelligence.summary ?? '',
+    industry: intelligence.industry ?? '',
+    services: itemNames(intelligence.services, ['name', 'service_name', 'title', 'description']),
+    usp: deriveUSP(intelligence),
+    competitors: competitorNames(intelligence.competitive_positioning),
+    targetCustomers: targetMarketText(intelligence.target_market),
+    pricingModel: derivePricingModel(intelligence),
+    technologies: itemNames(intelligence.technology_stack, ['name', 'technology', 'title']),
+    businessModel: intelligence.business_model ?? '',
+  };
+}
+
+function buildSummary(intelligence: CompanyIntelligenceRecord): Partial<BusinessAnalysis> {
+  const profile = buildProfile(intelligence);
+  const products = itemNames(intelligence.products, ['name', 'product_name', 'title', 'description']);
+  const location = intelligence.locations?.[0] ?? '';
+
+  return {
+    company_name: profile.name,
+    industry: profile.industry,
+    country: location,
+    description: profile.description,
+    business_model: profile.businessModel,
+    products,
+    services: profile.services,
+    pricing_model: profile.pricingModel,
+    target_audience: profile.targetCustomers,
+    usp: profile.usp,
+    competitive_position: firstString(intelligence.competitive_positioning, ['positioning', 'summary', 'description']),
+  };
+}
+
+function buildInsights(intelligence: CompanyIntelligenceRecord): Omit<BusinessInsights, 'id' | 'analysis_id' | 'created_at'> {
+  const competitive = asRecord(intelligence.competitive_positioning);
+  const strengths = itemNames(competitive.strengths, ['name', 'title', 'description', 'value']);
+  const weaknesses = itemNames(competitive.weaknesses, ['name', 'title', 'description', 'value']);
+  const opportunities = [
+    ...itemNames(intelligence.growth_signals, ['name', 'signal', 'title', 'description']),
+    ...itemNames(intelligence.buying_signals, ['name', 'signal', 'title', 'description']),
+  ];
+  const risks = itemNames(competitive.risks ?? competitive.threats, ['name', 'title', 'description', 'value']);
+  const competitors = competitorNames(intelligence.competitive_positioning);
+
+  return {
+    strengths,
+    weaknesses,
+    opportunities: [...new Set(opportunities)],
+    risks,
+    executive_summary: intelligence.summary ?? '',
+    raw_json: {
+      company_intelligence: intelligence,
+      competitive_landscape: {
+        direct_competitors: competitors,
+      },
+    },
+  };
+}
 
 export class BusinessIntelligenceService {
-  /**
-   * Start a new business analysis for a website.
-   * Creates a record with status 'queued', then simulates the
-   * analysis pipeline by progressing through stages.
-   */
   async startAnalysis(workspaceId: string, website: string, companyName?: string | null): Promise<BusinessAnalysis> {
     const { data, error } = await supabase
       .from('business_analysis')
@@ -71,108 +220,256 @@ export class BusinessIntelligenceService {
   }
 
   /**
-   * Crawl the website to discover and extract pages.
-   * Placeholder — will use FirecrawlService.crawlSite() when implemented.
+   * Real onboarding analysis. Starts the server-side research pipeline,
+   * waits for the worker to finish, loads the exact intelligence record,
+   * maps it into business_analysis, and returns a UI-ready profile.
    */
-  async crawlWebsite(_url: string): Promise<WebsitePage[]> {
-    // TODO: Replace with FirecrawlService.crawlSite(url)
-    return MOCK_PAGES as WebsitePage[];
+  async runResearchAnalysis(
+    workspaceId: string,
+    website: string,
+    companyName: string,
+    onStatus?: (status: ResearchStatus) => void,
+  ): Promise<ResearchAnalysisResult> {
+    const analysis = await this.startAnalysis(workspaceId, website, companyName);
+
+    try {
+      await this.updateAnalysis(analysis.id, {
+        analysis_status: 'processing',
+        completion_percentage: 10,
+      });
+
+      const requestId = await this.startResearchRequest(workspaceId, website, companyName);
+      const request = await this.waitForResearch(requestId, analysis.id, onStatus);
+      const intelligence = await this.loadResearchIntelligence(request, workspaceId, website, companyName);
+
+      const summary = buildSummary(intelligence);
+      const insights = buildInsights(intelligence);
+
+      await this.saveAnalysis(
+        analysis.id,
+        {
+          ...summary,
+          confidence_score: Math.round((intelligence.confidence_score ?? 0) * (intelligence.confidence_score && intelligence.confidence_score <= 1 ? 100 : 1)),
+        },
+        [],
+        insights,
+      );
+
+      const completed = await this.loadAnalysis(analysis.id);
+      if (!completed) throw new Error('Business analysis was saved but could not be reloaded.');
+
+      return {
+        analysis: completed,
+        intelligence,
+        profile: buildProfile(intelligence),
+      };
+    } catch (error) {
+      await supabase
+        .from('business_analysis')
+        .update({
+          analysis_status: 'failed',
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', analysis.id);
+      throw error;
+    }
   }
 
-  /**
-   * Extract structured pages from crawled content.
-   * Placeholder — will use FirecrawlService.detectPageType() when implemented.
-   */
-  async extractPages(_url: string): Promise<WebsitePage[]> {
-    // TODO: Replace with FirecrawlService.crawlSite() + detectPageType()
-    return MOCK_PAGES as WebsitePage[];
+  private async startResearchRequest(workspaceId: string, website: string, companyName: string): Promise<string> {
+    const apiUrl = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/research-start`;
+    const response = await fetch(apiUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`,
+      },
+      body: JSON.stringify({
+        company_name: companyName,
+        website,
+        request_type: 'full_intelligence',
+        workspace_id: workspaceId,
+      }),
+    });
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ error: 'Research request failed' }));
+      throw new Error(error.error ?? `Research start failed (HTTP ${response.status})`);
+    }
+
+    const payload = await response.json();
+    if (!payload?.request_id) throw new Error('Research service did not return a request_id.');
+    return payload.request_id as string;
   }
 
-  /**
-   * Generate a complete business summary from extracted content.
-   * Placeholder — will use OpenAIService.generateFullSummary() when implemented.
-   */
-  async generateBusinessSummary(_content: string): Promise<Partial<BusinessAnalysis>> {
-    // TODO: Replace with OpenAIService.generateFullSummary(content)
-    return {
-      company_name: MOCK_ANALYSIS.company_name,
-      industry: MOCK_ANALYSIS.industry,
-      country: MOCK_ANALYSIS.country,
-      language: MOCK_ANALYSIS.language,
-      timezone: MOCK_ANALYSIS.timezone,
-      description: MOCK_ANALYSIS.description,
-      business_model: MOCK_ANALYSIS.business_model,
-      products: MOCK_ANALYSIS.products,
-      services: MOCK_ANALYSIS.services,
-      pricing_model: MOCK_ANALYSIS.pricing_model,
-      target_audience: MOCK_ANALYSIS.target_audience,
-      usp: MOCK_ANALYSIS.usp,
-      customer_problems: MOCK_ANALYSIS.customer_problems,
-      business_goals: MOCK_ANALYSIS.business_goals,
-      revenue_model: MOCK_ANALYSIS.revenue_model,
-      competitive_position: MOCK_ANALYSIS.competitive_position,
-      business_category: MOCK_ANALYSIS.business_category,
-      primary_icp: MOCK_ANALYSIS.primary_icp,
+  private async waitForResearch(
+    requestId: string,
+    analysisId: string,
+    onStatus?: (status: ResearchStatus) => void,
+  ): Promise<ResearchRequestRow> {
+    const startedAt = Date.now();
+    let lastStatus = '';
+
+    while (Date.now() - startedAt < RESEARCH_TIMEOUT_MS) {
+      const { data, error } = await supabase
+        .from('research_requests')
+        .select('*')
+        .eq('id', requestId)
+        .maybeSingle();
+
+      if (error) throw new Error(`Failed to read research status: ${error.message}`);
+      if (!data) throw new Error('Research request disappeared before completion.');
+
+      const request = data as ResearchRequestRow;
+      if (request.status !== lastStatus) {
+        lastStatus = request.status;
+        onStatus?.(request.status);
+        await this.syncAnalysisProgress(analysisId, request.status);
+      }
+
+      if (request.status === 'completed') return request;
+      if (request.status === 'failed' || request.status === 'cancelled') {
+        throw new Error(request.error_message || `Research ${request.status}.`);
+      }
+
+      await sleep(POLL_INTERVAL_MS);
+    }
+
+    throw new Error('Business research timed out after 120 seconds. Please retry.');
+  }
+
+  private async syncAnalysisProgress(analysisId: string, status: ResearchStatus): Promise<void> {
+    const progress: Record<string, number> = {
+      pending: 15,
+      planning: 20,
+      in_progress: 45,
+      aggregating: 70,
+      normalizing: 85,
+      completed: 95,
     };
+
+    const completion = progress[status];
+    if (completion === undefined) return;
+
+    await supabase
+      .from('business_analysis')
+      .update({
+        analysis_status: status === 'completed' ? 'processing' : 'processing',
+        completion_percentage: completion,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', analysisId);
+  }
+
+  private async loadResearchIntelligence(
+    request: ResearchRequestRow,
+    workspaceId: string,
+    website: string,
+    companyName: string,
+  ): Promise<CompanyIntelligenceRecord> {
+    const resultSummary = asRecord(request.result_summary);
+    const intelligenceId = firstString(resultSummary, ['intelligence_id', 'company_intelligence_id']);
+
+    if (intelligenceId) {
+      const { data, error } = await supabase
+        .from('company_intelligence')
+        .select('*')
+        .eq('id', intelligenceId)
+        .maybeSingle();
+      if (error) throw new Error(`Failed to load company intelligence: ${error.message}`);
+      if (data) return data as CompanyIntelligenceRecord;
+    }
+
+    // Fallback for workers that complete before storing intelligence_id in result_summary.
+    let query = supabase
+      .from('company_intelligence')
+      .select('*')
+      .eq('workspace_id', workspaceId);
+
+    if (website) query = query.eq('website', website);
+
+    const { data: byWebsite, error: websiteError } = await query
+      .order('last_updated', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (websiteError) throw new Error(`Failed to load company intelligence: ${websiteError.message}`);
+    if (byWebsite) return byWebsite as CompanyIntelligenceRecord;
+
+    const { data: byName, error: nameError } = await supabase
+      .from('company_intelligence')
+      .select('*')
+      .eq('workspace_id', workspaceId)
+      .eq('company_name', companyName)
+      .order('last_updated', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (nameError) throw new Error(`Failed to load company intelligence: ${nameError.message}`);
+    if (!byName) throw new Error('Research completed but no company intelligence record was found.');
+    return byName as CompanyIntelligenceRecord;
+  }
+
+  // Kept for compatibility with existing callers. These now return persisted
+  // real research data rather than mock content.
+  async crawlWebsite(_url: string): Promise<WebsitePage[]> {
+    return [];
+  }
+
+  async extractPages(_url: string): Promise<WebsitePage[]> {
+    return [];
+  }
+
+  async generateBusinessSummary(_content: string): Promise<Partial<BusinessAnalysis>> {
+    throw new Error('generateBusinessSummary(content) is deprecated. Use runResearchAnalysis() so the summary comes from real research.');
   }
 
   async generateUSP(_content: string): Promise<string> {
-    return MOCK_ANALYSIS.usp ?? '';
+    throw new Error('generateUSP(content) is deprecated. Use runResearchAnalysis().');
   }
 
   async generateBusinessModel(_content: string): Promise<string> {
-    return MOCK_ANALYSIS.business_model ?? '';
+    throw new Error('generateBusinessModel(content) is deprecated. Use runResearchAnalysis().');
   }
 
   async generateTargetAudience(_content: string): Promise<string> {
-    return MOCK_ANALYSIS.target_audience ?? '';
+    throw new Error('generateTargetAudience(content) is deprecated. Use runResearchAnalysis().');
   }
 
   async generateProducts(_content: string): Promise<string[]> {
-    return MOCK_ANALYSIS.products ?? [];
+    throw new Error('generateProducts(content) is deprecated. Use runResearchAnalysis().');
   }
 
   async generateServices(_content: string): Promise<string[]> {
-    return MOCK_ANALYSIS.services ?? [];
+    throw new Error('generateServices(content) is deprecated. Use runResearchAnalysis().');
   }
 
   async generatePricing(_content: string): Promise<string> {
-    return MOCK_ANALYSIS.pricing_model ?? '';
+    throw new Error('generatePricing(content) is deprecated. Use runResearchAnalysis().');
   }
 
   async generateProblems(_content: string): Promise<string[]> {
-    return MOCK_ANALYSIS.customer_problems ?? [];
+    throw new Error('generateProblems(content) is deprecated. Use runResearchAnalysis().');
   }
 
   async generateGoals(_content: string): Promise<string[]> {
-    return MOCK_ANALYSIS.business_goals ?? [];
+    throw new Error('generateGoals(content) is deprecated. Use runResearchAnalysis().');
   }
 
-  /**
-   * Generate strategic insights (strengths, weaknesses, opportunities, risks).
-   * Placeholder — will use OpenAIService.generateInsights() when implemented.
-   */
   async generateInsights(_content: string): Promise<Omit<BusinessInsights, 'id' | 'analysis_id' | 'created_at'>> {
-    return {
-      strengths: MOCK_INSIGHTS.strengths,
-      weaknesses: MOCK_INSIGHTS.weaknesses,
-      opportunities: MOCK_INSIGHTS.opportunities,
-      risks: MOCK_INSIGHTS.risks,
-      executive_summary: MOCK_INSIGHTS.executive_summary,
-      raw_json: MOCK_INSIGHTS.raw_json,
-    };
+    throw new Error('generateInsights(content) is deprecated. Use runResearchAnalysis().');
   }
 
-  /**
-   * Save the complete analysis (analysis record + pages + insights) to the database.
-   */
-  async saveAnalysis(analysisId: string, summary: Partial<BusinessAnalysis>, pages: WebsitePage[], insights: Omit<BusinessInsights, 'id' | 'analysis_id' | 'created_at'>): Promise<void> {
+  async saveAnalysis(
+    analysisId: string,
+    summary: Partial<BusinessAnalysis>,
+    pages: WebsitePage[],
+    insights: Omit<BusinessInsights, 'id' | 'analysis_id' | 'created_at'>,
+  ): Promise<void> {
     const { error: updateError } = await supabase
       .from('business_analysis')
       .update({
         ...summary,
         analysis_status: 'completed',
-        confidence_score: 92,
         completion_percentage: 100,
         updated_at: new Date().toISOString(),
       })
@@ -180,18 +477,19 @@ export class BusinessIntelligenceService {
 
     if (updateError) throw new Error(updateError.message);
 
-    const pageRows = pages.map((p) => ({
-      analysis_id: analysisId,
-      page_title: p.page_title,
-      url: p.url,
-      page_type: p.page_type,
-      content: p.content,
-      summary: p.summary,
-      metadata: p.metadata,
-    }));
-
-    const { error: pagesError } = await supabase.from('website_pages').insert(pageRows);
-    if (pagesError) throw new Error(pagesError.message);
+    if (pages.length > 0) {
+      const pageRows = pages.map((p) => ({
+        analysis_id: analysisId,
+        page_title: p.page_title,
+        url: p.url,
+        page_type: p.page_type,
+        content: p.content,
+        summary: p.summary,
+        metadata: p.metadata,
+      }));
+      const { error: pagesError } = await supabase.from('website_pages').insert(pageRows);
+      if (pagesError) throw new Error(pagesError.message);
+    }
 
     const { error: insightsError } = await supabase.from('business_insights').insert({
       analysis_id: analysisId,
@@ -200,9 +498,6 @@ export class BusinessIntelligenceService {
     if (insightsError) throw new Error(insightsError.message);
   }
 
-  /**
-   * Load a complete analysis (analysis + pages + insights) from the database.
-   */
   async loadAnalysis(analysisId: string): Promise<FullAnalysis | null> {
     const { data: analysis, error } = await supabase
       .from('business_analysis')
@@ -232,18 +527,13 @@ export class BusinessIntelligenceService {
     };
   }
 
-  /**
-   * Load the latest analysis for a workspace.
-   */
   async loadLatestAnalysis(workspaceId: string, companyName?: string | null): Promise<FullAnalysis | null> {
     let query = supabase
       .from('business_analysis')
       .select('*')
       .eq('workspace_id', workspaceId);
 
-    if (companyName) {
-      query = query.eq('company_name', companyName);
-    }
+    if (companyName) query = query.eq('company_name', companyName);
 
     const { data: analysis, error } = await query
       .order('created_at', { ascending: false })
@@ -252,13 +542,9 @@ export class BusinessIntelligenceService {
 
     if (error) throw new Error(error.message);
     if (!analysis) return null;
-
     return this.loadAnalysis(analysis.id);
   }
 
-  /**
-   * Refresh an existing analysis by re-running the pipeline.
-   */
   async refreshAnalysis(analysisId: string): Promise<BusinessAnalysis> {
     const { data, error } = await supabase
       .from('business_analysis')
@@ -276,9 +562,6 @@ export class BusinessIntelligenceService {
     return data as BusinessAnalysis;
   }
 
-  /**
-   * Update an analysis record (e.g., editing company info).
-   */
   async updateAnalysis(analysisId: string, updates: Partial<BusinessAnalysis>): Promise<BusinessAnalysis> {
     const { data, error } = await supabase
       .from('business_analysis')
@@ -291,35 +574,24 @@ export class BusinessIntelligenceService {
     return data as BusinessAnalysis;
   }
 
-  /**
-   * Delete an analysis and all related data (cascades to pages + insights).
-   */
   async deleteAnalysis(analysisId: string): Promise<void> {
     const { error } = await supabase
       .from('business_analysis')
       .delete()
       .eq('id', analysisId);
-
     if (error) throw new Error(error.message);
   }
 
-  /**
-   * Generate timeline events for the analysis workflow.
-   */
   getTimelineEvents(analysis: BusinessAnalysis): TimelineEvent[] {
-    const events: TimelineEvent[] = [
+    return [
       { id: 'submitted', label: 'Website Submitted', description: `URL: ${analysis.website}`, timestamp: analysis.created_at, completed: true },
       { id: 'crawled', label: 'Website Crawled', description: 'Pages discovered and extracted', timestamp: analysis.analysis_status === 'queued' ? null : analysis.updated_at, completed: analysis.analysis_status !== 'queued' },
-      { id: 'ai_analysis', label: 'AI Analysis', description: 'Business model and value proposition extracted', timestamp: analysis.analysis_status === 'completed' ? analysis.updated_at : null, completed: analysis.analysis_status === 'completed' || analysis.analysis_status === 'processing' },
+      { id: 'ai_analysis', label: 'Business Analysis', description: 'Business and market intelligence extracted', timestamp: analysis.analysis_status === 'completed' ? analysis.updated_at : null, completed: analysis.analysis_status === 'completed' || analysis.analysis_status === 'processing' },
       { id: 'summary', label: 'Business Summary', description: 'Executive summary and insights generated', timestamp: analysis.analysis_status === 'completed' ? analysis.updated_at : null, completed: analysis.analysis_status === 'completed' },
       { id: 'completed', label: 'Completed', description: 'Analysis ready for review', timestamp: analysis.analysis_status === 'completed' ? analysis.updated_at : null, completed: analysis.analysis_status === 'completed' },
     ];
-    return events;
   }
 
-  /**
-   * Get the current analysis stage based on completion percentage.
-   */
   getCurrentStage(completion: number): AnalysisStage {
     if (completion < 10) return 'connecting';
     if (completion < 25) return 'crawling';
@@ -331,5 +603,4 @@ export class BusinessIntelligenceService {
   }
 }
 
-// Singleton instance
 export const biService = new BusinessIntelligenceService();
