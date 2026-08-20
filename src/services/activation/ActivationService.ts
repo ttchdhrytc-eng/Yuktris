@@ -114,6 +114,57 @@ class ActivationService {
     this.emit();
   }
 
+  async markOnboardingStage(workspaceId: string, stage: string, extra: Record<string, unknown> = {}): Promise<void> {
+    const { error } = await supabase.from('workspaces').update({ onboarding_stage: stage, ...extra }).eq('id', workspaceId);
+    if (error) throw new Error(`Could not save onboarding progress: ${error.message}`);
+  }
+
+  async loadPersistedOnboarding(workspaceId: string): Promise<{
+    analysis: BusinessProfile | null;
+    analysisStatus: string | null;
+    icps: ICPRecommendation[];
+    campaignInitialized: boolean;
+  }> {
+    const [{ data: analysis }, fullIcps, { data: campaigns }] = await Promise.all([
+      supabase.from('business_analysis').select('*').eq('workspace_id', workspaceId).order('created_at', { ascending: false }).limit(1).maybeSingle(),
+      icpService.loadAllICPs(workspaceId),
+      supabase.from('customer_campaigns').select('id').eq('workspace_id', workspaceId).limit(1),
+    ]);
+    const persistedAnalysis = analysis as Record<string, unknown> | null;
+    const profile = persistedAnalysis ? {
+      analysisId: String(persistedAnalysis.id),
+      name: String(persistedAnalysis.company_name ?? ''),
+      website: String(persistedAnalysis.website ?? ''),
+      description: String(persistedAnalysis.description ?? ''),
+      industry: String(persistedAnalysis.industry ?? ''),
+      services: Array.isArray(persistedAnalysis.services) ? persistedAnalysis.services.map(String) : [],
+      usp: String(persistedAnalysis.usp ?? ''),
+      competitors: [],
+      targetCustomers: String(persistedAnalysis.target_audience ?? ''),
+      pricingModel: String(persistedAnalysis.pricing_model ?? ''),
+      technologies: [],
+      businessModel: String(persistedAnalysis.business_model ?? ''),
+    } : null;
+    const icps: ICPRecommendation[] = fullIcps.map((icp, index) => ({
+      id: icp.id, name: icp.name, description: icp.description,
+      industry: icp.company_profile.industry, companySize: icp.company_profile.company_size,
+      jobTitles: icp.decision_makers.map((item) => item.job_title),
+      painPoints: icp.pain_points.map((item) => item.pain_point),
+      goals: icp.goals.map((item) => item.goal),
+      estimatedTam: icp.estimated_deal_size ?? '$10K+ ARR per deal',
+      estimatedReplyRate: `${icp.conversion_rate}%`, estimatedMeetingRate: `${Math.round(icp.conversion_rate * 0.3)}%`,
+      competition: icp.competition_score > 70 ? 'High' : icp.competition_score > 50 ? 'Medium' : 'Low',
+      difficulty: icp.opportunity_score > 90 ? 'Medium' : icp.opportunity_score > 75 ? 'Easy' : 'Hard',
+      confidence: icp.confidence, recommended: index === 0,
+    }));
+    return {
+      analysis: profile,
+      analysisStatus: persistedAnalysis ? String(persistedAnalysis.analysis_status ?? '') : null,
+      icps,
+      campaignInitialized: (campaigns?.length ?? 0) > 0,
+    };
+  }
+
   // ----------------------------------------------------------
   // Step 1: Create workspace from website
   // ----------------------------------------------------------

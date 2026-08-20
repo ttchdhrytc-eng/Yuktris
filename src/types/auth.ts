@@ -71,6 +71,8 @@ export type AuthWorkspace = {
   country: string | null;
   timezone: string;
   onboarding_completed: boolean;
+  onboarding_welcome_completed?: boolean;
+  onboarding_stage?: 'linkedin' | 'business_input' | 'business_research' | 'business_ready' | 'icp_generating' | 'icp_ready' | 'ai_review' | 'setup_ready' | 'completed';
   owner_id: string | null;
   created_at: string;
   updated_at: string;

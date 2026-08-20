@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { AlertTriangle, CheckCircle2, ChevronLeft, ChevronRight, Rocket } from 'lucide-react';
 import { toast } from 'sonner';
@@ -15,6 +15,7 @@ import { useLinkedInAccounts } from '@/hooks/useLinkedInBrowser';
 import { supabase } from '@/lib/supabase';
 import { GOOGLE_SCOPES } from '@/types/google-auth';
 import type { FullICP } from '@/types/icp-intelligence';
+import { buildCampaignMetrics, CAMPAIGN_STATUS_LABELS } from '@/services/campaign-metrics';
 
 const STEPS = ['Campaign', 'ICP', 'LinkedIn account', 'Outreach', 'Limits & Schedule', 'Review & Launch'];
 
@@ -33,6 +34,7 @@ export function CampaignsPage() {
   const [days, setDays] = useState('Monday–Friday');
   const [hours, setHours] = useState('09:00–17:00');
   const [launching, setLaunching] = useState(false);
+  const initializationKey = useRef(crypto.randomUUID());
 
   const connectedAccounts = (accounts.data ?? []).filter(a => a.connection_state === 'connected' && ['healthy', 'degraded'].includes(a.health_status) && a.profile_url);
   const selectedIcp = (icps.data ?? []).find(i => i.id === icpId);
@@ -47,7 +49,19 @@ export function CampaignsPage() {
     queryFn: async () => {
       const { data, error } = await supabase.from('customer_campaigns').select('*').eq('workspace_id', workspace!.id).order('created_at', { ascending: false });
       if (error && error.code !== '42P01') throw error;
-      return data ?? [];
+      const ids = (data ?? []).map(c => c.id);
+      if (!ids.length) return { campaigns: data ?? [], metrics: {} };
+      const [jobs, conversations, messages, confirmations] = await Promise.all([
+        supabase.from('linkedin_execution_jobs').select('contact_id,action_type,status,action_payload').eq('workspace_id', workspace!.id),
+        supabase.from('linkedin_conversations').select('id,stage,metadata,prospect_profile_url').eq('workspace_id', workspace!.id),
+        supabase.from('linkedin_messages').select('conversation_id,direction,classification,metadata').eq('workspace_id', workspace!.id),
+        supabase.from('linkedin_meeting_confirmations').select('id,metadata').eq('workspace_id', workspace!.id),
+      ]);
+      return { campaigns: data ?? [], metrics: buildCampaignMetrics({
+        campaignIds: ids,
+        jobs: jobs.error ? undefined : jobs.data ?? [], conversations: conversations.error ? undefined : conversations.data ?? [],
+        messages: messages.error ? undefined : messages.data ?? [], confirmations: confirmations.error ? undefined : confirmations.data ?? [],
+      }) };
     },
   });
 
@@ -58,12 +72,13 @@ export function CampaignsPage() {
     try {
       const { data, error } = await supabase.functions.invoke('linkedin-v1-pipeline', { body: {
         action: 'launch', workspace_id: workspace.id, linkedin_account_id: selectedAccount.id,
-        campaign: { name, strategy, daily_limit: dailyLimit, operating_days: days, operating_hours: hours },
+        campaign: { name, strategy, daily_limit: dailyLimit, operating_days: days, operating_hours: hours, initialization_key: initializationKey.current },
         icp: payload, max_prospects: Math.min(dailyLimit, 5), require_calendar: true,
       }});
       if (error || !['launched', 'partially_launched'].includes(data?.status)) throw new Error(data?.error ?? error?.message ?? 'Campaign could not be launched');
       toast.success('Campaign launched. Yuktris will continue working in the background.');
       queryClient.invalidateQueries({ queryKey: ['customer-campaigns'] });
+      initializationKey.current = crypto.randomUUID();
       setStep(0); setName(''); setIcpId(''); setAccountId('');
     } catch (error) { toast.error(error instanceof Error ? error.message : 'Campaign could not be launched'); }
     finally { setLaunching(false); }
@@ -85,7 +100,7 @@ export function CampaignsPage() {
       {step === 5 && <div className="space-y-4"><div className="grid gap-3 md:grid-cols-2"><Review label="Campaign" value={name} /><Review label="ICP" value={selectedIcp?.name ?? ''} /><Review label="LinkedIn account" value={selectedAccount?.profile_name ?? selectedAccount?.account_name ?? ''} /><Review label="Estimated target pool" value={`Up to ${Math.min(dailyLimit, 5)} verified prospects in the initial run`} /><Review label="Message strategy" value={strategy} /><Review label="Limits" value={`${dailyLimit}/day · ${days} · ${hours}`} /></div><div className="flex items-center gap-2"><Badge tone={calendarConnected ? 'success' : 'warning'} dot>{calendarConnected ? 'Calendar connected' : 'Calendar connection required'}</Badge></div>{!calendarConnected && <Reason text="Connect Google Calendar to enable automatic meeting booking and launch." />}</div>}
       <div className="mt-8 flex justify-between"><Button variant="secondary" disabled={step === 0} onClick={() => setStep(s => s - 1)}><ChevronLeft className="h-4 w-4" />Back</Button>{step < 5 ? <Button disabled={!canContinue} onClick={() => setStep(s => s + 1)}>Continue<ChevronRight className="h-4 w-4" /></Button> : <Button disabled={!calendarConnected} loading={launching} onClick={launch}><Rocket className="h-4 w-4" />Launch Campaign</Button>}</div>
     </Card>
-    {(existing.data?.length ?? 0) > 0 && <section><h2 className="mb-3 text-base font-semibold text-ink-100">Your campaigns</h2><div className="space-y-3">{existing.data!.map((c: Record<string, unknown>) => <Card key={String(c.id)} className="flex items-center justify-between p-4"><div><p className="text-sm font-medium text-ink-100">{String(c.name)}</p><p className="mt-1 text-xs text-ink-500">{String(c.status_reason ?? 'Yuktris is processing this campaign.')}</p></div><Badge tone={c.status === 'running' ? 'success' : c.status === 'action_required' || c.status === 'failed' ? 'warning' : 'neutral'} dot>{String(c.status).replace('_', ' ')}</Badge></Card>)}</div></section>}
+    {(existing.data?.campaigns.length ?? 0) > 0 && <section><h2 className="mb-3 text-base font-semibold text-ink-100">Your campaigns</h2><div className="space-y-3">{existing.data!.campaigns.map((c: Record<string, unknown>) => { const m = existing.data!.metrics[String(c.id)] ?? {}; return <Card key={String(c.id)} className="p-4"><div className="flex items-start justify-between"><div><p className="text-sm font-medium text-ink-100">{String(c.name)}</p><p className="mt-1 text-xs text-ink-500">{String(c.status_reason ?? 'Campaign status is available below.')}</p></div><Badge tone={c.status === 'running' ? 'success' : ['action_required','blocked_prerequisite','failed'].includes(String(c.status)) ? 'warning' : 'neutral'} dot>{CAMPAIGN_STATUS_LABELS[String(c.status)] ?? String(c.status)}</Badge></div><div className="mt-4 grid grid-cols-2 gap-2 md:grid-cols-4">{([['Prospects',m.prospects],['Connections Sent',m.connectionsSent],['Connections Accepted',m.connectionsAccepted],['Messages Sent',m.messagesSent],['Replies',m.replies],['Positive Replies',m.positiveReplies],['Qualified Leads',m.qualifiedLeads],['Meetings Booked',m.meetingsBooked]] as const).map(([label,value]) => <div key={label} className="rounded-lg border border-gold-500/8 bg-maroon-900/50 px-2.5 py-2"><p className="text-xs text-ink-500">{label}</p><p className="mt-0.5 text-sm font-semibold text-ink-300">{value === undefined ? 'Not available' : value}</p></div>)}</div></Card>; })}</div></section>}
   </div>;
 }
 

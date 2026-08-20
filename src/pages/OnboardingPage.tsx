@@ -67,6 +67,7 @@ export function OnboardingPage() {
   const [businessDesc, setBusinessDesc] = useState('');
   const [icpDesc, setIcpDesc] = useState('');
   const [loading, setLoading] = useState(false);
+  const [restoring, setRestoring] = useState(true);
   const [activationPhase, setActivationPhase] = useState<'analysis' | 'icp'>('analysis');
   const [researchStage, setResearchStage] = useState(0);
   const [businessProfile, setBusinessProfile] = useState<BusinessProfile | null>(null);
@@ -81,6 +82,7 @@ export function OnboardingPage() {
   const linkedinCompletionHandledRef = useRef(false);
   const linkedinConnectionIntentRef = useRef<{ id: string; active: boolean } | null>(null);
   const creatingRef = useRef(false);
+  const restorationRef = useRef<string | null>(null);
 
   // Handle Google OAuth callback redirects
   useEffect(() => {
@@ -179,6 +181,71 @@ export function OnboardingPage() {
   const grantedScopes = googleConnection.data?.token?.scope?.split(' ') ?? [];
   const gmailConnected = googleConnected && grantedScopes.includes(GOOGLE_SCOPES.GMAIL_SEND);
   const calendarConnected = googleConnected && grantedScopes.includes(GOOGLE_SCOPES.CALENDAR);
+
+  useEffect(() => {
+    if (wsLoading || !user) return;
+    if (!workspace) {
+      setRestoring(false);
+      return;
+    }
+    if (workspace.onboarding_completed || workspace.onboarding_stage === 'completed') {
+      navigate('/app', { replace: true });
+      return;
+    }
+    if (restorationRef.current === workspace.id) return;
+    restorationRef.current = workspace.id;
+    let cancelled = false;
+    const restore = async () => {
+      try {
+        const persisted = await activationService.loadPersistedOnboarding(workspace.id);
+        if (cancelled) return;
+        setWebsite(workspace.website ?? persisted.analysis?.website ?? '');
+        if (persisted.analysis) setBusinessProfile(persisted.analysis);
+        if (persisted.icps.length) {
+          setIcps(persisted.icps);
+          setSelectedIcp(persisted.icps[0].id);
+        }
+        if (persisted.campaignInitialized || workspace.onboarding_stage === 'setup_ready') {
+          setStep('launch');
+          return;
+        }
+        if (persisted.analysisStatus === 'completed' && persisted.analysis) {
+          if (persisted.icps.length) {
+            setStep(workspace.onboarding_stage === 'ai_review' ? 'review'
+              : ['icp_ready', 'icp_generating', 'business_ready'].includes(workspace.onboarding_stage ?? '') ? 'icp' : 'icp');
+            return;
+          }
+          setStep('icp');
+          setLoading(true);
+          setActivationPhase('icp');
+          const generated = await activationService.generateICPs(workspace.id, persisted.analysis);
+          if (!cancelled) { setIcps(generated); setSelectedIcp(generated[0]?.id ?? null); setStep('icp'); }
+          return;
+        }
+        if (persisted.analysis && ['queued', 'processing'].includes(persisted.analysisStatus ?? '')) {
+          setStep('business');
+          setLoading(true);
+          setActivationPhase('analysis');
+          const profile = await activationService.runBusinessAnalysis(workspace.id, persisted.analysis.website);
+          if (cancelled) return;
+          setBusinessProfile(profile);
+          setActivationPhase('icp');
+          const generated = await activationService.generateICPs(workspace.id, profile);
+          if (!cancelled) { setIcps(generated); setSelectedIcp(generated[0]?.id ?? null); setStep('icp'); }
+          return;
+        }
+        if (!workspace.onboarding_welcome_completed) setStep('welcome');
+        else setStep(linkedinConnected ? 'business' : 'linkedin');
+      } catch (error) {
+        restorationRef.current = null;
+        if (!cancelled) toast.error(error instanceof Error ? error.message : 'Could not restore onboarding. Please retry.');
+      } finally {
+        if (!cancelled) { setLoading(false); setRestoring(false); }
+      }
+    };
+    void restore();
+    return () => { cancelled = true; };
+  }, [linkedinConnected, navigate, user, workspace, wsLoading]);
 
   useEffect(() => {
     const unsub = activationService.subscribe(setProgress);
@@ -343,11 +410,28 @@ export function OnboardingPage() {
     return true;
   };
 
+  const advanceToLinkedIn = async () => {
+    if (workspace) await activationService.markOnboardingStage(workspace.id, 'linkedin', { onboarding_welcome_completed: true });
+    setStep('linkedin');
+  };
+
+  const advanceToBusiness = async () => {
+    if (workspace) await activationService.markOnboardingStage(workspace.id, 'business_input');
+    setStep('business');
+  };
+
+  const advanceToReview = async () => {
+    if (workspace) await activationService.markOnboardingStage(workspace.id, 'ai_review');
+    setStep('review');
+  };
+
   const goNext = () => {
     const idx = stepOrder.indexOf(step);
     if (idx < stepOrder.length - 1) {
       if (step === 'business') {
         handleBusinessSubmit();
+      } else if (step === 'linkedin') {
+        void advanceToBusiness();
       } else {
         setStep(stepOrder[idx + 1]);
       }
@@ -358,6 +442,8 @@ export function OnboardingPage() {
     const idx = stepOrder.indexOf(step);
     if (idx > 0) setStep(stepOrder[idx - 1]);
   };
+
+  if (restoring) return <div className="min-h-screen bg-maroon-950 flex items-center justify-center"><Loader2 className="h-8 w-8 animate-spin text-gold-400" /></div>;
 
   return (
     <div className="min-h-screen bg-maroon-950 flex flex-col">
@@ -443,7 +529,7 @@ export function OnboardingPage() {
                   </div>
                 ))}
               </div>
-              <Button variant="glow" size="xl" onClick={() => setStep('linkedin')}>
+              <Button variant="glow" size="xl" onClick={() => void advanceToLinkedIn()}>
                 Get Started <ArrowRight className="h-4 w-4" />
               </Button>
               <p className="text-sm text-ink-400">Takes 3 minutes · No credit card required</p>
@@ -761,7 +847,7 @@ export function OnboardingPage() {
 
                   <div className="flex justify-between pt-2">
                     <Button variant="ghost" onClick={goBack}><ArrowLeft className="h-4 w-4" /> Back</Button>
-                    <Button variant="glow" size="lg" onClick={() => setStep('review')}>
+                    <Button variant="glow" size="lg" onClick={() => void advanceToReview()}>
                       Continue <ArrowRight className="h-4 w-4" />
                     </Button>
                   </div>

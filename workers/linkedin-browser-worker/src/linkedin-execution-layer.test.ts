@@ -22,6 +22,10 @@ const onboardingPage = readFileSync(resolve(process.cwd(), '../../src/pages/Onbo
 const researchStart = readFileSync(resolve(process.cwd(), '../../supabase/functions/research-start/index.ts'), 'utf8');
 const researchWorker = readFileSync(resolve(process.cwd(), '../../supabase/functions/research-worker/index.ts'), 'utf8');
 const dashboardPage = readFileSync(resolve(process.cwd(), '../../src/pages/DashboardPage.tsx'), 'utf8');
+const campaignsPage = readFileSync(resolve(process.cwd(), '../../src/pages/CampaignsPage.tsx'), 'utf8');
+const campaignMetrics = readFileSync(resolve(process.cwd(), '../../src/services/campaign-metrics.ts'), 'utf8');
+const releaseClosure = readFileSync(resolve(process.cwd(), '../../supabase/migrations/20260820233000_campaign_release_closure.sql'), 'utf8');
+const sidebar = readFileSync(resolve(process.cwd(), '../../src/components/layout/Sidebar.tsx'), 'utf8');
 const conversationReconciliation = readFileSync(resolve(process.cwd(), '../../supabase/migrations/20260820120000_linkedin_conversation_reconciliation_idempotency.sql'), 'utf8');
 
 test('all current writes share one preflight before the switch', () => {
@@ -174,6 +178,40 @@ test('onboarding retries reuse analysis and persisted complete ICP records', () 
   assert.match(icpIntelligenceService, /business_analysis_id[\s\S]*status', 'completed'[\s\S]*return \{ icps: existing/);
   assert.match(onboardingPage, /creatingRef\.current = true[\s\S]*disabled=\{loading \|\| !canProceed\(\)\}/);
 });
+test('onboarding reload derives every meaningful state from persisted backend truth', () => {
+  for (const state of ['onboarding_completed', 'setup_ready', 'completed', 'queued', 'processing', 'icp_ready', 'ai_review']) assert.match(onboardingPage, new RegExp(state));
+  assert.match(onboardingPage, /loadPersistedOnboarding\(workspace\.id\)/);
+  assert.match(onboardingPage, /runBusinessAnalysis\(workspace\.id, persisted\.analysis\.website\)/);
+  assert.match(activationService, /loadAllICPs\(workspaceId\)/);
+  assert.match(onboardingPage, /workspace\.onboarding_completed[\s\S]*loadPersistedOnboarding/);
+});
+test('onboarding reload and navigation preserve research and ICP idempotency', () => {
+  assert.match(onboardingPage, /restorationRef\.current === workspace\.id/);
+  assert.match(onboardingPage, /persisted\.analysisStatus === 'completed'[\s\S]*persisted\.icps\.length/);
+  assert.match(businessIntelligenceService, /loadLatestAnalysisByWebsite/);
+  assert.match(icpIntelligenceService, /status', 'completed'[\s\S]*return \{ icps: existing/);
+});
+test('campaign initialization records deterministic success and prerequisite outcomes', () => {
+  const initialize = linkedinV1Pipeline.slice(linkedinV1Pipeline.indexOf('if (action === "initialize")'), linkedinV1Pipeline.indexOf('if (action === "launch")'));
+  assert.match(initialize, /missing_prerequisite/);
+  for (const prerequisite of ['linkedin_connection', 'linkedin_session_health', 'calendar_authorization']) assert.match(initialize, new RegExp(prerequisite));
+  assert.match(initialize, /status = missing\.length \? "blocked_prerequisite" : "ready"/);
+});
+test('campaign launch failure, backend exception and timeout cannot remain initializing', () => {
+  assert.match(linkedinV1Pipeline, /lifecycleCampaignId[\s\S]*status: "failed"[\s\S]*initialization_failed/);
+  assert.match(linkedinV1Pipeline, /discovery_failed/);
+  assert.match(releaseClosure, /status = 'initializing'[\s\S]*interval '10 minutes'/);
+  assert.match(releaseClosure, /initialization_timeout/);
+});
+test('duplicate initialization and retry use one stable campaign identity', () => {
+  assert.match(campaignsPage, /initializationKey = useRef\(crypto\.randomUUID\(\)\)/);
+  assert.match(linkedinV1Pipeline, /onConflict: "workspace_id,initialization_key"/);
+  assert.match(releaseClosure, /UNIQUE INDEX[\s\S]*workspace_id, initialization_key/i);
+});
+test('stale initialization reconciles prerequisites without blindly marking ready', () => {
+  assert.match(releaseClosure, /linkedin_connection_required[\s\S]*linkedin_unhealthy[\s\S]*initialization_timeout/);
+  assert.doesNotMatch(releaseClosure, /SET status = 'ready'/);
+});
 test('persisted ICP loading retains targeting child records', () => {
   assert.match(icpIntelligenceService, /icp_company_profile[\s\S]*icp_decision_makers[\s\S]*icp_pain_points[\s\S]*icp_goals[\s\S]*sales_navigator_filters/);
 });
@@ -192,6 +230,16 @@ test('dashboard metrics use canonical customer and execution records', () => {
   assert.match(dashboardPage, /from\('customer_campaigns'\)[\s\S]*from\('linkedin_execution_jobs'\)[\s\S]*from\('linkedin_messages'\)/);
   assert.match(dashboardPage, /Prospects Discovered/);
   assert.doesNotMatch(dashboardPage, /Best Time to Send" value="Tue/);
+});
+test('customer campaign cards use canonical lifecycle labels and persisted V1 metrics', () => {
+  for (const label of ['Prospects', 'Connections Sent', 'Connections Accepted', 'Messages Sent', 'Replies', 'Positive Replies', 'Qualified Leads', 'Meetings Booked']) assert.match(campaignsPage, new RegExp(label));
+  for (const status of ['Active', 'Ready', 'Action Required', 'Paused', 'Needs Attention', 'Completed']) assert.match(campaignMetrics, new RegExp(status));
+  assert.match(campaignMetrics, /action_payload[\s\S]*source_campaign_id/);
+  assert.doesNotMatch(dashboardPage, />—</);
+});
+test('normal customer navigation excludes internal architecture routes', () => {
+  for (const label of ['Dashboard', 'Campaigns', 'ICP / Audience', 'Inbox', 'Meetings', 'Connections', 'Settings']) assert.match(sidebar, new RegExp(`label: '${label.replace('/', '\\/')}'`));
+  for (const internal of ['Revenue Strategy', 'Prospect Discovery', 'Outreach Intelligence', 'Integration Health', 'Execution Queue']) assert.doesNotMatch(sidebar, new RegExp(internal));
 });
 test('conversation reconciliation derives its projection from authoritative messages', () => {
   assert.match(conversationReconciliation, /reconcile_linkedin_v1_pipeline_state_transitions/);

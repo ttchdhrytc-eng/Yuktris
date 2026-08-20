@@ -33,11 +33,18 @@ Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") return new Response(null, { status: 200, headers: corsHeaders });
   if (req.method !== "POST") return json({ error: "Method not allowed" }, 405);
 
+  let lifecycleCampaignId: string | null = null;
+  let lifecycleAdmin: any = null;
   try {
     const body = await req.json() as Json;
     const workspaceId = requireString(body.workspace_id, "workspace_id");
     const action = typeof body.action === "string" ? body.action : "launch";
     const { admin } = await authorizeLinkedInWorkspace(req, workspaceId, { allowServiceRole: true });
+    lifecycleAdmin = admin;
+    if (["initialize", "launch"].includes(action)) {
+      const { error: staleError } = await admin.rpc("reconcile_stale_customer_campaigns", { p_workspace_id: workspaceId });
+      if (staleError) throw new Error(`Campaign reconciliation failed: ${staleError.message}`);
+    }
 
     if (action === "preview_discovery") {
       const icp = (body.icp ?? {}) as ICP;
@@ -64,6 +71,7 @@ Deno.serve(async (req: Request) => {
       const selectedAccountId = optionalString(body.linkedin_account_id);
       const campaignInput = (body.campaign ?? {}) as Json;
       const sourceCampaignId = optionalString(campaignInput.source_campaign_id);
+      const initializationKey = optionalString(campaignInput.initialization_key);
       const missing: string[] = [];
 
       if (!icp.name?.trim() || !icp.industry?.trim() || !icp.companySize?.trim()
@@ -105,12 +113,17 @@ Deno.serve(async (req: Request) => {
         icp,
         linkedin_account_id: linkedin?.id ?? null,
         source_campaign_id: sourceCampaignId ?? null,
+        initialization_key: initializationKey ?? null,
         status,
         status_reason: message,
+        failure_code: missing.length ? "missing_prerequisite" : null,
+        blocker: missing.length ? [...new Set(missing)].map(requirementLabel).join(", ") : null,
       };
       const query = sourceCampaignId
         ? admin.from("customer_campaigns").upsert(row, { onConflict: "workspace_id,source_campaign_id" })
-        : admin.from("customer_campaigns").insert(row);
+        : initializationKey
+          ? admin.from("customer_campaigns").upsert(row, { onConflict: "workspace_id,initialization_key" })
+          : admin.from("customer_campaigns").insert(row);
       const { data: campaign, error: campaignError } = await query.select("id").single();
       if (campaignError) throw new Error(`Campaign initialization failed: ${campaignError.message}`);
       return json({ ok: true, status, campaign_id: campaign.id, missing_requirements: [...new Set(missing)], message });
@@ -154,14 +167,21 @@ Deno.serve(async (req: Request) => {
       let customerCampaignId: string | null = null;
       const campaignInput = (body.campaign ?? {}) as Json;
       if (typeof campaignInput.name === "string" && campaignInput.name.trim()) {
-        const { data: customerCampaign, error: customerCampaignError } = await admin.from("customer_campaigns").insert({
+        const initializationKey = optionalString(campaignInput.initialization_key);
+        const campaignRow = {
           workspace_id: workspaceId, name: campaignInput.name.trim(), icp: icp,
           linkedin_account_id: account.id, strategy: campaignInput.strategy ?? null,
           daily_limit: clampNumber(campaignInput.daily_limit, 1, 20, 10), operating_days: campaignInput.operating_days ?? null,
-          operating_hours: campaignInput.operating_hours ?? null, status: "initializing", status_reason: "Validating and discovering verified prospects.",
-        }).select("id").single();
+          operating_hours: campaignInput.operating_hours ?? null, initialization_key: initializationKey ?? null,
+          status: "initializing", status_reason: "Validating and discovering verified prospects.", failure_code: null, blocker: null,
+        };
+        const campaignQuery = initializationKey
+          ? admin.from("customer_campaigns").upsert(campaignRow, { onConflict: "workspace_id,initialization_key" })
+          : admin.from("customer_campaigns").insert(campaignRow);
+        const { data: customerCampaign, error: customerCampaignError } = await campaignQuery.select("id").single();
         if (customerCampaignError) throw new Error(`Campaign creation failed: ${customerCampaignError.message}`);
         customerCampaignId = customerCampaign.id;
+        lifecycleCampaignId = customerCampaignId;
       }
 
       const prospects = await discoverVerifiedProspects(icp, maxProspects);
@@ -172,12 +192,13 @@ Deno.serve(async (req: Request) => {
       const createdJobs: string[] = [];
       const createdContacts: string[] = [];
       const skippedExistingContacts: string[] = [];
+      let completedExistingJobs = 0;
 
       for (const prospect of prospects) {
         const company = await findOrCreateCompany(admin, workspaceId, prospect);
         const contact = await findOrCreateContact(admin, workspaceId, company.id, prospect);
         const { data: existingConnectionJob, error: existingJobError } = await admin.from("linkedin_execution_jobs")
-          .select("id")
+          .select("id,status")
           .eq("workspace_id", workspaceId)
           .eq("contact_id", contact.id)
           .eq("action_type", "connection_request")
@@ -187,6 +208,8 @@ Deno.serve(async (req: Request) => {
         if (existingJobError) throw new Error(`Existing connection job lookup failed: ${existingJobError.message}`);
         if (existingConnectionJob) {
           skippedExistingContacts.push(String(contact.id));
+          if (["queued", "retry", "failed"].includes(existingConnectionJob.status)) createdJobs.push(existingConnectionJob.id);
+          if (existingConnectionJob.status === "completed") completedExistingJobs += 1;
           continue;
         }
         const copy = await generateLinkedInCopy(icp, prospect);
@@ -267,15 +290,6 @@ Deno.serve(async (req: Request) => {
         createdContacts.push(contact.id);
       }
 
-      if (customerCampaignId) {
-        await admin.from("customer_campaigns").update({
-          status: bridgeFailures.length ? "action_required" : createdJobs.length ? "running" : "action_required",
-          status_reason: bridgeFailures.length ? "Some outreach could not be queued. Review the campaign before resuming."
-            : createdJobs.length ? "Outreach is running in the background." : "No new eligible prospects were available for outreach.",
-          launched_at: new Date().toISOString(),
-        }).eq("id", customerCampaignId);
-      }
-
       // Bridge the initial jobs immediately. The Railway worker handles the resulting browser queue.
       const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
       const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
@@ -297,6 +311,21 @@ Deno.serve(async (req: Request) => {
           }
           bridgeFailures.push({ job_id: jobId, status: response.status, error });
         }
+      }
+
+      if (customerCampaignId) {
+        const hasRunnableOutreach = createdJobs.length > 0 || completedExistingJobs > 0;
+        const finalStatus = bridgeFailures.length || !hasRunnableOutreach ? "failed" : "running";
+        const finalReason = bridgeFailures.length ? "Some outreach jobs could not be queued. Retry after reviewing the campaign."
+          : hasRunnableOutreach ? "Outreach is running in the background." : "No new eligible prospects were available for outreach.";
+        const { error: lifecycleError } = await admin.from("customer_campaigns").update({
+          status: finalStatus, status_reason: finalReason,
+          failure_code: bridgeFailures.length ? "job_bridge_failed" : hasRunnableOutreach ? null : "no_eligible_prospects",
+          blocker: bridgeFailures.length ? "LinkedIn execution queue" : hasRunnableOutreach ? null : "Verified prospects",
+          launched_at: hasRunnableOutreach ? new Date().toISOString() : null, updated_at: new Date().toISOString(),
+        }).eq("id", customerCampaignId);
+        if (lifecycleError) throw new Error(`Campaign lifecycle finalization failed: ${lifecycleError.message}`);
+        lifecycleCampaignId = null;
       }
 
       return json({
@@ -323,6 +352,14 @@ Deno.serve(async (req: Request) => {
 
     return json({ error: `Unknown action: ${action}` }, 400);
   } catch (error) {
+    if (lifecycleAdmin && lifecycleCampaignId) {
+      const message = error instanceof Error ? error.message : "Campaign initialization failed";
+      await lifecycleAdmin.from("customer_campaigns").update({
+        status: "failed", failure_code: message.includes("No verifiable") ? "discovery_failed" : "initialization_failed",
+        blocker: message.slice(0, 500), status_reason: "Campaign setup did not complete. Review the error and retry.",
+        updated_at: new Date().toISOString(),
+      }).eq("id", lifecycleCampaignId);
+    }
     return json({ error: error instanceof Error ? error.message : "LinkedIn V1 pipeline failed" }, authorizationStatus(error));
   }
 });
