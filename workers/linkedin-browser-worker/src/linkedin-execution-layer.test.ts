@@ -15,6 +15,7 @@ const acceptanceOverride = readFileSync(resolve(process.cwd(), '../../supabase/m
 const writeAcceptancePurpose = readFileSync(resolve(process.cwd(), '../../supabase/migrations/20260816090000_controlled_write_acceptance_purpose.sql'), 'utf8');
 const conversationEngine = readFileSync(resolve(process.cwd(), '../../supabase/functions/linkedin-conversation-engine/index.ts'), 'utf8');
 const linkedinV1Pipeline = readFileSync(resolve(process.cwd(), '../../supabase/functions/linkedin-v1-pipeline/index.ts'), 'utf8');
+const conversationReconciliation = readFileSync(resolve(process.cwd(), '../../supabase/migrations/20260820120000_linkedin_conversation_reconciliation_idempotency.sql'), 'utf8');
 
 test('all current writes share one preflight before the switch', () => {
   for (const action of ['connection_request','send_message','follow_up_message','like_post','follow_company']) assert.ok(LINKEDIN_WRITE_ACTIONS.has(action));
@@ -127,6 +128,12 @@ test('V1 discovery requires company and role evidence and reports bridge failure
   assert.match(linkedinV1Pipeline, /evidence\.includes\(companyName[\s\S]*&& evidence\.includes\(role/);
   assert.match(linkedinV1Pipeline, /if \(!response\.ok\)[\s\S]*bridgeFailures\.push/);
   assert.match(linkedinV1Pipeline, /partially_launched[\s\S]*bridge_failures/);
+});
+test('conversation reconciliation derives its projection from authoritative messages', () => {
+  assert.match(conversationReconciliation, /reconcile_linkedin_v1_pipeline_state_transitions/);
+  assert.match(conversationReconciliation, /count\(\*\)::integer AS total_messages/);
+  assert.match(conversationReconciliation, /array_agg\(m\.direction ORDER BY/);
+  assert.match(conversationReconciliation, /IS DISTINCT FROM s\.total_messages/);
 });
 
 const fixtures: Array<[string,string,string]> = [
