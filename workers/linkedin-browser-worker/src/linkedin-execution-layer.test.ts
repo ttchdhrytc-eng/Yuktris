@@ -13,6 +13,7 @@ const meeting = readFileSync(resolve(process.cwd(), '../../supabase/migrations/2
 const digestFix = readFileSync(resolve(process.cwd(), '../../supabase/migrations/20260815100000_fix_linkedin_write_preflight_digest.sql'), 'utf8');
 const acceptanceOverride = readFileSync(resolve(process.cwd(), '../../supabase/migrations/20260815110000_linkedin_one_time_acceptance_override.sql'), 'utf8');
 const writeAcceptancePurpose = readFileSync(resolve(process.cwd(), '../../supabase/migrations/20260816090000_controlled_write_acceptance_purpose.sql'), 'utf8');
+const conversationEngine = readFileSync(resolve(process.cwd(), '../../supabase/functions/linkedin-conversation-engine/index.ts'), 'utf8');
 
 test('all current writes share one preflight before the switch', () => {
   for (const action of ['connection_request','send_message','follow_up_message','like_post','follow_company']) assert.ok(LINKEDIN_WRITE_ACTIONS.has(action));
@@ -100,6 +101,18 @@ test('successful persistent authentication reconciles a historical false-expiry 
 test('reply ingestion maps context and suppresses duplicate external events', () => {
   assert.match(worker,/p_contact_id[\s\S]*p_campaign_id[\s\S]*p_classification/);
   assert.match(replies,/UNIQUE\s*\(linkedin_account_id,\s*external_reply_id\)/);
+});
+test('automated replies reuse the inbound reply job and persist processing metadata together', () => {
+  const queueReplySource = conversationEngine.slice(conversationEngine.indexOf('async function queueReply'), conversationEngine.indexOf('async function markProcessed'));
+  assert.match(conversationEngine, /contains\("action_payload", \{ automated_reply: true, inbound_reply_id: inboundReply\.id \}\)/);
+  assert.match(conversationEngine, /response_job_id: responseJobId/);
+  assert.doesNotMatch(queueReplySource, /linkedin_inbound_replies/);
+  assert.match(conversationEngine, /Unable to mark inbound reply processed/);
+});
+test('conversation maintenance logs only structured Edge Function errors', () => {
+  assert.match(worker, /readSafeFunctionError\(conversationResponse\)/);
+  assert.doesNotMatch(worker, /response_body: responseBody/);
+  assert.match(worker, /Non-JSON Edge Function error response/);
 });
 
 const fixtures: Array<[string,string,string]> = [

@@ -337,11 +337,11 @@ export class Worker {
         body: JSON.stringify({ action: 'process_pending', workspace_id: workspaceId }),
       });
       if (!conversationResponse.ok) {
-        const responseBody = (await conversationResponse.text()).slice(0, 1000);
+        const responseError = await readSafeFunctionError(conversationResponse);
         logger.warn('Conversation maintenance failed', {
           workspace_id: workspaceId,
           status: conversationResponse.status,
-          response_body: responseBody,
+          ...responseError,
         });
       }
     }
@@ -1877,6 +1877,22 @@ export class Worker {
       logger.error('Session recovery failed', { error: String(err) });
       return false;
     }
+  }
+}
+
+async function readSafeFunctionError(response: Response): Promise<{ error_code?: string; error_message?: string }> {
+  const text = (await response.text()).slice(0, 2000);
+  try {
+    const payload = JSON.parse(text) as Record<string, unknown>;
+    const code = typeof payload.code === 'string' ? payload.code : undefined;
+    const message = typeof payload.error === 'string' ? payload.error :
+      typeof payload.message === 'string' ? payload.message : undefined;
+    return {
+      ...(code ? { error_code: code.slice(0, 100) } : {}),
+      ...(message ? { error_message: message.slice(0, 500) } : {}),
+    };
+  } catch {
+    return { error_message: 'Non-JSON Edge Function error response' };
   }
 }
 

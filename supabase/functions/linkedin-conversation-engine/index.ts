@@ -73,6 +73,7 @@ Deno.serve(async (req: Request) => {
           availableSlots: slots,
         });
 
+        let responseJobId: string | null = null;
         if (decision.action === "stop") {
           await admin.from("linkedin_conversations").update({ stage: "closed", health: "inactive", updated_at: new Date().toISOString() })
             .eq("id", reply.conversation_id).eq("workspace_id", workspaceId);
@@ -86,7 +87,7 @@ Deno.serve(async (req: Request) => {
           const confirmationText = decision.reply_text || (meetingUrl
             ? `Perfect — you're booked. Here is the meeting link: ${meetingUrl}`
             : "Perfect — the meeting is booked. You will receive the calendar details shortly.");
-          await queueReply(admin, workspaceId, conversation, contact, reply, confirmationText);
+          responseJobId = await queueReply(admin, workspaceId, conversation, contact, reply, confirmationText);
           await admin.from("linkedin_conversations").update({ stage: "meeting_scheduled", health: "active", updated_at: new Date().toISOString() })
             .eq("id", reply.conversation_id).eq("workspace_id", workspaceId);
           meetingsBooked++;
@@ -133,7 +134,7 @@ Deno.serve(async (req: Request) => {
           const message = decision.reply_text
             ? `${decision.reply_text}\n\n${options}\n\nWhich works best?`
             : `Happy to set this up. Here are a few options:\n${options}\n\nWhich works best?`;
-          await queueReply(admin, workspaceId, conversation, contact, reply, message);
+          responseJobId = await queueReply(admin, workspaceId, conversation, contact, reply, message);
           await admin.from("linkedin_meeting_slots").update({ status: "proposed" })
             .in("id", offered.map((s) => s.id));
           await admin.from("linkedin_conversations").update({ stage: "qualified", updated_at: new Date().toISOString() })
@@ -141,7 +142,7 @@ Deno.serve(async (req: Request) => {
           meetingsOffered++;
           responsesQueued++;
         } else if (["reply", "nurture"].includes(decision.action) && decision.reply_text) {
-          await queueReply(admin, workspaceId, conversation, contact, reply, decision.reply_text);
+          responseJobId = await queueReply(admin, workspaceId, conversation, contact, reply, decision.reply_text);
           responsesQueued++;
         }
 
@@ -149,7 +150,7 @@ Deno.serve(async (req: Request) => {
           decision.qualification_state === "disqualified" ? "disqualified" : "engaged";
         await admin.from("contacts").update({ status: contactStatus, updated_at: new Date().toISOString() })
           .eq("id", reply.contact_id).eq("workspace_id", workspaceId);
-        await markProcessed(admin, reply.id, metadata, decision as unknown as Json);
+        await markProcessed(admin, reply.id, metadata, decision as unknown as Json, responseJobId);
         processed++;
       }
 
@@ -213,8 +214,19 @@ async function decideReply(input: { replyBody: string; classification: string; p
   } as any;
 }
 
-async function queueReply(admin: any, workspaceId: string, conversation: Json, contact: Json | null, inboundReply: Json, message: string): Promise<void> {
+async function queueReply(admin: any, workspaceId: string, conversation: Json, contact: Json | null, inboundReply: Json, message: string): Promise<string> {
   if (!contact?.id) throw new Error("Matched contact is required to queue a LinkedIn reply");
+  const { data: existing, error: existingError } = await admin.from("linkedin_execution_jobs")
+    .select("id")
+    .eq("workspace_id", workspaceId)
+    .eq("action_type", "follow_up_message")
+    .contains("action_payload", { automated_reply: true, inbound_reply_id: inboundReply.id })
+    .order("created_at", { ascending: true })
+    .limit(1)
+    .maybeSingle();
+  if (existingError) throw new Error(`Unable to check existing LinkedIn reply job: ${existingError.message}`);
+  if (existing?.id) return String(existing.id);
+
   const { data: job, error } = await admin.from("linkedin_execution_jobs").insert({
     workspace_id: workspaceId,
     linkedin_account_id: conversation.account_id,
@@ -235,16 +247,19 @@ async function queueReply(admin: any, workspaceId: string, conversation: Json, c
     },
   }).select("id").single();
   if (error) throw new Error(`Unable to queue LinkedIn reply: ${error.message}`);
-  const { error: markError } = await admin.from("linkedin_inbound_replies").update({
-    metadata: { ...((inboundReply.metadata ?? {}) as Json), response_job_id: job.id },
-  }).eq("id", inboundReply.id).eq("workspace_id", workspaceId);
-  if (markError) throw new Error(markError.message);
+  return String(job.id);
 }
 
-async function markProcessed(admin: any, replyId: string, previousMetadata: Json, decision: Json): Promise<void> {
-  await admin.from("linkedin_inbound_replies").update({
-    metadata: { ...previousMetadata, ai_processed_at: new Date().toISOString(), ai_decision: decision },
+async function markProcessed(admin: any, replyId: string, previousMetadata: Json, decision: Json, responseJobId: string | null = null): Promise<void> {
+  const { error } = await admin.from("linkedin_inbound_replies").update({
+    metadata: {
+      ...previousMetadata,
+      ai_processed_at: new Date().toISOString(),
+      ai_decision: decision,
+      ...(responseJobId ? { response_job_id: responseJobId } : {}),
+    },
   }).eq("id", replyId);
+  if (error) throw new Error(`Unable to mark inbound reply processed: ${error.message}`);
 }
 
 async function invokeFunction(name: string, body: Json): Promise<Json> {
