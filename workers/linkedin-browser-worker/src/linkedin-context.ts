@@ -192,11 +192,29 @@ export class LinkedInContextService {
   }
 
   async certifyIdentity(context: ContextRecord, canonicalProfileUrl: string): Promise<void> {
-    const { error } = await this.client.rpc('certify_linkedin_context_identity', {
+    const certify = async () => this.client.rpc('certify_linkedin_context_identity', {
       p_context_id: context.id, p_workspace_id: context.workspace_id, p_account_id: context.account_id,
       p_provider_context_id: context.provider_context_id, p_context_generation: context.generation,
       p_canonical_profile_url: canonicalProfileUrl, p_proof_version: 1,
     });
+
+    let { error } = await certify();
+    if (error && /bound account identity mismatch/i.test(error.message ?? '')) {
+      // The browser has supplied an authenticated self-profile proof, but the stored
+      // account binding can be stale after a previous/manual connection. Repair is
+      // service-role-only and requires this exact active Context generation; the RPC
+      // also rejects a profile already bound to another account in the workspace.
+      const { error: repairError } = await this.client.rpc('repair_linkedin_account_identity_from_context', {
+        p_context_id: context.id,
+        p_workspace_id: context.workspace_id,
+        p_account_id: context.account_id,
+        p_provider_context_id: context.provider_context_id,
+        p_context_generation: context.generation,
+        p_canonical_profile_url: canonicalProfileUrl,
+      });
+      if (repairError) throw new Error(`Context identity repair failed: ${repairError.message}`);
+      ({ error } = await certify());
+    }
     if (error) throw new Error(`Context identity certification failed: ${error.message}`);
   }
 

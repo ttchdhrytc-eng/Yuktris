@@ -27,7 +27,7 @@ Deno.serve(async (req: Request) => {
 
     // Load available LinkedIn accounts
     const accountsRes = await fetch(
-      `${supabaseUrl}/rest/v1/linkedin_accounts?workspace_id=eq.${workspace_id}&connection_status=in.(active,warming_up)&select=*&order=created_at.asc`,
+      `${supabaseUrl}/rest/v1/linkedin_accounts?workspace_id=eq.${workspace_id}&connection_state=eq.connected&connection_status=in.(active,warming_up)&status=not.in.(paused,restricted)&select=*&order=created_at.asc`,
       { headers: { Authorization: `Bearer ${serviceKey}`, apikey: serviceKey } },
     );
     const accounts = await accountsRes.json();
@@ -40,6 +40,13 @@ Deno.serve(async (req: Request) => {
 
     let scheduled = 0;
     for (const decision of decisions) {
+      const existingRes = await fetch(
+        `${supabaseUrl}/rest/v1/linkedin_execution_jobs?workspace_id=eq.${workspace_id}&outreach_decision_id=eq.${decision.id}&action_type=in.(connection_request,profile_visit)&status=not.in.(failed,cancelled)&select=id&limit=1`,
+        { headers: { Authorization: `Bearer ${serviceKey}`, apikey: serviceKey } },
+      );
+      const existing = await existingRes.json();
+      if (Array.isArray(existing) && existing.length > 0) continue;
+
       const account = accounts[scheduled % accounts.length];
       const actionType = decision.decision === "engage_content_first" ? "profile_visit" : "connection_request";
 

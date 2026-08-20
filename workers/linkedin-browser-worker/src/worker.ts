@@ -38,6 +38,7 @@ export class Worker {
   private currentTaskId: string | null = null;
   private activeTasks = new Map<string, Promise<void>>();
   private workspaceId: string | null = null;
+  private lastAutonomousMaintenanceAt = 0;
 
   constructor() {
     const supabaseUrl = process.env.SUPABASE_URL;
@@ -246,6 +247,12 @@ export class Worker {
         if (browserbase.isConfigured()) {
           await this.linkedinContexts.processOneDeletion(this.workerId);
         }
+        if (Date.now() - this.lastAutonomousMaintenanceAt >= 60_000) {
+          this.lastAutonomousMaintenanceAt = Date.now();
+          await this.runAutonomousMaintenance().catch((error) => {
+            logger.warn('LinkedIn autonomous maintenance failed', { error: this.sanitizeError(error) });
+          });
+        }
         logger.info(`Poll #${pollCount}: calling claimNext()`, { worker_id: this.workerId });
         if (this.activeTasks.size >= MAX_CONCURRENT_ACCOUNTS) {
           logger.info('Cloud agent concurrency capacity reached', { active_tasks: this.activeTasks.size, capacity: MAX_CONCURRENT_ACCOUNTS });
@@ -278,6 +285,60 @@ export class Worker {
       await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL));
     }
     logger.info('Poll loop stopped', { worker_id: this.workerId });
+  }
+
+  private async runAutonomousMaintenance(): Promise<void> {
+    const supabaseUrl = process.env.SUPABASE_URL!;
+    const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY!;
+    const { data: rows, error } = await this.client.from('linkedin_accounts')
+      .select('workspace_id')
+      .eq('connection_state', 'connected')
+      .limit(100);
+    if (error) throw new Error(`Unable to load connected LinkedIn workspaces: ${error.message}`);
+    const workspaceIds = [...new Set((rows ?? []).map((row: { workspace_id?: string | null }) => row.workspace_id).filter(Boolean))] as string[];
+
+    for (const workspaceId of workspaceIds) {
+      const { error: reconcileError } = await this.client.rpc('reconcile_linkedin_v1_pipeline', { p_workspace_id: workspaceId });
+      if (reconcileError && !/function .* does not exist/i.test(reconcileError.message)) {
+        logger.warn('Pipeline reconciliation RPC failed', { workspace_id: workspaceId, error: reconcileError.message });
+      }
+      const { error: followupError } = await this.client.rpc('schedule_due_linkedin_followups', { p_workspace_id: workspaceId, p_limit: 50 });
+      if (followupError) logger.warn('Follow-up scheduler RPC failed', { workspace_id: workspaceId, error: followupError.message });
+      const { error: replyCheckError } = await this.client.rpc('schedule_linkedin_reply_checks', { p_workspace_id: workspaceId, p_limit: 50 });
+      if (replyCheckError) logger.warn('Reply-check scheduler RPC failed', { workspace_id: workspaceId, error: replyCheckError.message });
+
+      // Bridge due execution jobs to the browser queue. This removes any dependency
+      // on a user clicking a button or on a separate cron worker.
+      const { data: jobs } = await this.client.from('linkedin_execution_jobs')
+        .select('id,status,scheduled_at')
+        .eq('workspace_id', workspaceId)
+        .in('status', ['queued', 'scheduled'])
+        .order('priority', { ascending: true })
+        .order('created_at', { ascending: true })
+        .limit(20);
+      const now = Date.now();
+      for (const job of jobs ?? []) {
+        if (job.scheduled_at && new Date(job.scheduled_at).getTime() > now) continue;
+        const response = await fetch(`${supabaseUrl}/functions/v1/linkedin-job-runner`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${serviceKey}`, apikey: serviceKey },
+          body: JSON.stringify({ workspace_id: workspaceId, job_id: job.id }),
+        });
+        if (!response.ok && response.status !== 409) {
+          logger.warn('Execution-job bridge failed', { workspace_id: workspaceId, job_id: job.id, status: response.status });
+        }
+      }
+
+      // AI-process any matched inbound replies and queue objection handling or meeting actions.
+      const conversationResponse = await fetch(`${supabaseUrl}/functions/v1/linkedin-conversation-engine`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${serviceKey}`, apikey: serviceKey },
+        body: JSON.stringify({ action: 'process_pending', workspace_id: workspaceId }),
+      });
+      if (!conversationResponse.ok) {
+        logger.warn('Conversation maintenance failed', { workspace_id: workspaceId, status: conversationResponse.status });
+      }
+    }
   }
 
   private async processTask(item: QueueItem): Promise<void> {
@@ -335,6 +396,7 @@ export class Worker {
           break;
         case 'profile_visit':
         case 'read_profile':
+        case 'check_connection_acceptance':
         case 'connection_request':
         case 'send_message':
         case 'follow_up_message':
@@ -1089,6 +1151,28 @@ export class Worker {
           } else {
             result = { success: true, data: { result_code: 'success', visited: parsed.origin + parsed.pathname } };
           }
+          break;
+        }
+        case 'check_connection_acceptance': {
+          const url = params.profile_url as string;
+          if (!url) throw new Error('profile_url required');
+          const target = normalizeLinkedInTarget(url);
+          if (!target) throw new Error('A valid LinkedIn personal profile URL is required');
+          await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+          await page.waitForTimeout(1200 + Math.random() * 1000);
+          const presented = normalizeLinkedInTarget(await page.evaluate(() =>
+            document.querySelector<HTMLLinkElement>('link[rel="canonical"]')?.href || location.href));
+          if (presented !== target) {
+            result = { success: false, error: 'Presented LinkedIn profile does not match the acceptance-check target' };
+            break;
+          }
+          const hasPending = !!(await page.$('button span:has-text("Pending")'));
+          const hasConnect = !!(await page.$('button span:has-text("Connect")'));
+          const hasMessage = !!(await page.$('button span:has-text("Message")'));
+          const degreeText = await page.locator('main').innerText().catch(() => '');
+          const firstDegree = /(?:^|\s)1st(?:\s|$)/i.test(degreeText);
+          const accepted = (hasMessage || firstDegree) && !hasPending && !hasConnect;
+          result = { success: true, data: { accepted, pending: hasPending, connect_available: hasConnect, message_available: hasMessage, first_degree: firstDegree } };
           break;
         }
         case 'connection_request': {
