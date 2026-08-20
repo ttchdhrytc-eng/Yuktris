@@ -11,6 +11,16 @@ export type CampaignMetricSet = {
 
 type Row = Record<string, unknown>;
 
+export function isTestFixture(row: Row): boolean {
+  const metadata = row.metadata && typeof row.metadata === 'object' ? row.metadata as Row : {};
+  const payload = row.action_payload && typeof row.action_payload === 'object' ? row.action_payload as Row : {};
+  const marker = metadata.fixture ?? metadata.is_fixture ?? metadata.test_fixture ?? payload.fixture ?? payload.is_fixture;
+  const source = String(metadata.source ?? payload.source ?? '').toLowerCase();
+  const name = String(row.prospect_name ?? row.name ?? '').trim().toLowerCase();
+  return marker === true || ['fixture', 'test', 'regression_test', 'acceptance_test'].includes(source)
+    || name === 'execution fixture';
+}
+
 function sourceId(row: Row): string | null {
   const payload = row.action_payload && typeof row.action_payload === 'object' ? row.action_payload as Row : {};
   const metadata = row.metadata && typeof row.metadata === 'object' ? row.metadata as Row : {};
@@ -25,14 +35,17 @@ export function buildCampaignMetrics(params: {
   messages?: Row[];
   confirmations?: Row[];
 }): Record<string, CampaignMetricSet> {
-  const result = Object.fromEntries(params.campaignIds.map((id) => [id, {} as CampaignMetricSet]));
+  const result = Object.fromEntries(params.campaignIds.map((id) => [id, {
+    prospects: 0, connectionsSent: 0, connectionsAccepted: 0, messagesSent: 0,
+    replies: 0, positiveReplies: 0, qualifiedLeads: 0, meetingsBooked: 0,
+  } as CampaignMetricSet]));
   const contacts = new Map<string, Set<string>>();
   const profileCampaign = new Map<string, string>();
   for (const id of params.campaignIds) contacts.set(id, new Set());
 
   if (params.jobs) {
-    for (const id of params.campaignIds) Object.assign(result[id], { prospects: 0, connectionsSent: 0, connectionsAccepted: 0 });
     for (const job of params.jobs) {
+      if (isTestFixture(job)) continue;
       const id = sourceId(job); if (!id || !result[id]) continue;
       if (typeof job.contact_id === 'string') contacts.get(id)?.add(job.contact_id);
       const payload = job.action_payload && typeof job.action_payload === 'object' ? job.action_payload as Row : {};
@@ -45,8 +58,8 @@ export function buildCampaignMetrics(params: {
 
   const conversationCampaign = new Map<string, string>();
   if (params.conversations) {
-    for (const id of params.campaignIds) result[id].qualifiedLeads = 0;
     for (const conversation of params.conversations) {
+      if (isTestFixture(conversation)) continue;
       const profile = typeof conversation.prospect_profile_url === 'string' ? conversation.prospect_profile_url.replace(/\/$/, '').toLowerCase() : '';
       const id = sourceId(conversation) ?? profileCampaign.get(profile) ?? null; if (!id || !result[id]) continue;
       if (typeof conversation.id === 'string') conversationCampaign.set(conversation.id, id);
@@ -54,8 +67,8 @@ export function buildCampaignMetrics(params: {
     }
   }
   if (params.messages) {
-    for (const id of params.campaignIds) Object.assign(result[id], { messagesSent: 0, replies: 0, positiveReplies: 0 });
     for (const message of params.messages) {
+      if (isTestFixture(message)) continue;
       const id = sourceId(message) ?? (typeof message.conversation_id === 'string' ? conversationCampaign.get(message.conversation_id) ?? null : null);
       if (!id || !result[id]) continue;
       if (message.direction === 'outbound') result[id].messagesSent!++;
@@ -66,8 +79,8 @@ export function buildCampaignMetrics(params: {
     }
   }
   if (params.confirmations) {
-    for (const id of params.campaignIds) result[id].meetingsBooked = 0;
     for (const confirmation of params.confirmations) {
+      if (isTestFixture(confirmation)) continue;
       const metadata = confirmation.metadata && typeof confirmation.metadata === 'object' ? confirmation.metadata as Row : {};
       const conversationId = typeof metadata.conversation_id === 'string' ? metadata.conversation_id : null;
       const id = sourceId(confirmation) ?? (conversationId ? conversationCampaign.get(conversationId) ?? null : null);

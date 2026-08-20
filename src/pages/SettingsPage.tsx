@@ -121,12 +121,7 @@ import { Inbox, Send, Search, Star, Archive, Mail as MailIcon, AlertTriangle, Wi
 const tabs = [
   { id: 'workspace', label: 'Workspace', icon: SettingsIcon },
   { id: 'users', label: 'Users', icon: Users },
-  { id: 'api-keys', label: 'API Keys', icon: Key },
   { id: 'notifications', label: 'Notifications', icon: Bell },
-  { id: 'integrations', label: 'Integrations', icon: Plug },
-  { id: 'ai', label: 'AI', icon: Sparkles },
-  { id: 'ai-agents', label: 'AI Agents', icon: Bot },
-  { id: 'execution', label: 'Execution Engine', icon: Server },
   { id: 'billing', label: 'Billing', icon: CreditCard },
 ] as const;
 
@@ -1003,12 +998,7 @@ export function SettingsPage() {
         <div className="flex-1 min-w-0">
           {tab === 'workspace' && <WorkspaceTab />}
           {tab === 'users' && <UsersTab />}
-          {tab === 'api-keys' && <ApiKeysTab />}
           {tab === 'notifications' && <NotificationsTab />}
-          {tab === 'integrations' && <IntegrationsTab />}
-          {tab === 'ai' && <AITab />}
-          {tab === 'ai-agents' && <AgentsTab />}
-          {tab === 'execution' && <ExecutionEngineTab />}
           {tab === 'billing' && <BillingTab />}
         </div>
       </div>

@@ -46,6 +46,58 @@ Deno.serve(async (req: Request) => {
       if (staleError) throw new Error(`Campaign reconciliation failed: ${staleError.message}`);
     }
 
+    if (action === "preflight") {
+      const selectedAccountId = optionalString(body.linkedin_account_id);
+      const campaignId = optionalString(body.campaign_id);
+      let linkedinQuery = admin.from("linkedin_accounts")
+        .select("id,workspace_id,connection_state,health_status,profile_url,expected_profile_url")
+        .eq("workspace_id", workspaceId);
+      if (selectedAccountId) linkedinQuery = linkedinQuery.eq("id", selectedAccountId);
+      const { data: linkedin, error: linkedinError } = await linkedinQuery.limit(1).maybeSingle();
+      if (linkedinError) throw pipelineError("linkedin_lookup_failed", `LinkedIn validation failed: ${linkedinError.message}`, 500);
+      const { data: campaign, error: campaignError } = campaignId
+        ? await admin.from("customer_campaigns").select("id,workspace_id,status,icp,linkedin_account_id").eq("workspace_id", workspaceId).eq("id", campaignId).maybeSingle()
+        : { data: null, error: null };
+      if (campaignError) throw pipelineError("campaign_lookup_failed", `Campaign validation failed: ${campaignError.message}`, 500);
+      const google = await googleAuthorization(admin, workspaceId);
+      const identityMatches = Boolean(linkedin?.profile_url && linkedin?.expected_profile_url
+        && normalizeLinkedInProfile(linkedin.profile_url) === normalizeLinkedInProfile(linkedin.expected_profile_url));
+      const linkedInReady = Boolean(linkedin?.connection_state === "connected"
+        && ["healthy", "degraded"].includes(linkedin?.health_status) && identityMatches);
+      const icpReady = !campaignId || Boolean(campaign?.icp && Object.keys(campaign.icp as Json).length);
+      return json({ ok: linkedInReady && icpReady, status: linkedInReady && icpReady ? "ready" : "blocked_prerequisite",
+        workspace_id: workspaceId, campaign_id: campaign?.id ?? null, linkedin_account_id: linkedin?.id ?? null,
+        checks: { linkedin_connected: linkedin?.connection_state === "connected", linkedin_health: linkedin?.health_status ?? "missing",
+          linkedin_identity: identityMatches, persistent_context: Boolean(linkedin?.id), campaign_icp: icpReady,
+          gmail_authorized: google.gmail, calendar_authorized: google.calendar,
+          worker_available: Boolean(Deno.env.get("LINKEDIN_JOB_RUNNER_URL")) },
+        write_performed: false });
+    }
+
+    if (action === "reconcile_prerequisites") {
+      const { data: campaigns, error: campaignsError } = await admin.from("customer_campaigns")
+        .select("id,icp,linkedin_account_id,blocker,status_reason")
+        .eq("workspace_id", workspaceId).eq("status", "blocked_prerequisite");
+      if (campaignsError) throw pipelineError("campaign_lookup_failed", `Campaign validation failed: ${campaignsError.message}`, 500);
+      let reconciled = 0;
+      for (const campaign of campaigns ?? []) {
+        const googleOnlyBlocker = /google|gmail|calendar/i.test(`${campaign.blocker ?? ""} ${campaign.status_reason ?? ""}`);
+        if (!googleOnlyBlocker || !campaign.linkedin_account_id || !campaign.icp || !Object.keys(campaign.icp as Json).length) continue;
+        const { data: account } = await admin.from("linkedin_accounts")
+          .select("connection_state,health_status,profile_url,expected_profile_url")
+          .eq("workspace_id", workspaceId).eq("id", campaign.linkedin_account_id).maybeSingle();
+        const identityMatches = Boolean(account?.profile_url && account?.expected_profile_url
+          && normalizeLinkedInProfile(account.profile_url) === normalizeLinkedInProfile(account.expected_profile_url));
+        if (account?.connection_state !== "connected" || !["healthy", "degraded"].includes(account?.health_status) || !identityMatches) continue;
+        const { error: updateError } = await admin.from("customer_campaigns").update({ status: "ready",
+          status_reason: "Prerequisites validated. Launch explicitly when ready.", failure_code: null, blocker: null,
+          updated_at: new Date().toISOString() }).eq("workspace_id", workspaceId).eq("id", campaign.id);
+        if (updateError) throw pipelineError("campaign_reconciliation_failed", `Campaign reconciliation failed: ${updateError.message}`, 500);
+        reconciled += 1;
+      }
+      return json({ ok: true, status: "reconciled", campaigns_reconciled: reconciled });
+    }
+
     if (action === "preview_discovery") {
       const icp = (body.icp ?? {}) as ICP;
       const maxProspects = clampNumber(body.max_prospects, 1, 5, 3);
@@ -77,17 +129,12 @@ Deno.serve(async (req: Request) => {
       if (!icp.name?.trim() || !icp.industry?.trim() || !icp.companySize?.trim()
         || !icp.jobTitles?.length || !icp.painPoints?.length) missing.push("meaningful_icp");
 
-      const { data: googleAccounts, error: googleError } = await admin.from("google_accounts")
-        .select("id,oauth_tokens!inner(scope,refresh_token)").eq("workspace_id", workspaceId)
-        .eq("status", "connected").eq("is_primary", true).limit(1);
-      if (googleError) throw new Error(`Google connection validation failed: ${googleError.message}`);
-      const tokenRelation = (googleAccounts?.[0] as Json | undefined)?.oauth_tokens as Array<Json> | Json | undefined;
-      const token = Array.isArray(tokenRelation) ? tokenRelation[0] : tokenRelation;
-      const scopes = String(token?.scope ?? "").split(/\s+/);
-      if (!googleAccounts?.length || !token?.refresh_token) missing.push("google_reauthorization");
-      if (body.require_gmail === true && !scopes.some((scope) => scope.includes("gmail."))) missing.push("gmail_authorization");
-      if (!scopes.includes("https://www.googleapis.com/auth/calendar")
-        && !scopes.includes("https://www.googleapis.com/auth/calendar.events")) missing.push("calendar_authorization");
+      if (body.require_gmail === true || body.require_calendar === true) {
+        const google = await googleAuthorization(admin, workspaceId);
+        if (!google.connected) missing.push("google_reauthorization");
+        if (body.require_gmail === true && !google.gmail) missing.push("gmail_authorization");
+        if (body.require_calendar === true && !google.calendar) missing.push("calendar_authorization");
+      }
 
       let linkedinQuery = admin.from("linkedin_accounts")
         .select("id,connection_state,status,health_status,profile_url,expected_profile_url")
@@ -135,16 +182,13 @@ Deno.serve(async (req: Request) => {
       const selectedAccountId = optionalString(body.linkedin_account_id);
       const maxProspects = clampNumber(body.max_prospects, 1, 10, 5);
 
-      if (body.require_calendar !== false) {
-        const { data: googleAccounts, error: calendarError } = await admin.from("google_accounts")
-          .select("id,oauth_tokens!inner(scope,refresh_token)").eq("workspace_id", workspaceId)
-          .eq("status", "connected").eq("is_primary", true).limit(1);
-        if (calendarError) throw new Error(`Calendar connection validation failed: ${calendarError.message}`);
-        const token = (googleAccounts?.[0] as Json | undefined)?.oauth_tokens as Array<Json> | Json | undefined;
-        const tokenRow = Array.isArray(token) ? token[0] : token;
-        const granted = String(tokenRow?.scope ?? "").split(" ");
-        const hasCalendar = granted.includes("https://www.googleapis.com/auth/calendar") || granted.includes("https://www.googleapis.com/auth/calendar.events");
-        if (!googleAccounts?.length || !tokenRow?.refresh_token || !hasCalendar) throw new Error("Google Calendar connection required");
+      if (body.require_calendar === true) {
+        const google = await googleAuthorization(admin, workspaceId);
+        if (!google.calendar) throw pipelineError("calendar_authorization_required", "Connect Google Calendar before enabling automatic meeting booking", 409);
+      }
+      if (body.require_gmail === true) {
+        const google = await googleAuthorization(admin, workspaceId);
+        if (!google.gmail) throw pipelineError("gmail_authorization_required", "Authorize Gmail before enabling email outreach", 409);
       }
 
       let accountQuery = admin.from("linkedin_accounts")
@@ -360,7 +404,8 @@ Deno.serve(async (req: Request) => {
         updated_at: new Date().toISOString(),
       }).eq("id", lifecycleCampaignId);
     }
-    return json({ error: error instanceof Error ? error.message : "LinkedIn V1 pipeline failed" }, authorizationStatus(error));
+    const message = error instanceof Error ? error.message : "LinkedIn V1 pipeline failed";
+    return json({ ok: false, error: message, code: errorCode(error), campaign_id: lifecycleCampaignId }, errorStatus(error));
   }
 });
 
@@ -564,3 +609,30 @@ function requirementLabel(code: string): string {
 function requireString(value: unknown, name: string): string { const s = optionalString(value); if (!s) throw new Error(`${name} is required`); return s; }
 function clampNumber(value: unknown, min: number, max: number, fallback: number): number { const n = typeof value === "number" ? value : Number(value); return Number.isFinite(n) ? Math.max(min, Math.min(max, Math.floor(n))) : fallback; }
 function json(data: Json, status = 200): Response { return new Response(JSON.stringify(data), { status, headers: { ...corsHeaders, "Content-Type": "application/json" } }); }
+
+async function googleAuthorization(admin: any, workspaceId: string) {
+  const { data, error } = await admin.from("google_accounts")
+    .select("id,oauth_tokens!inner(scope,refresh_token)").eq("workspace_id", workspaceId)
+    .eq("status", "connected").eq("is_primary", true).limit(1);
+  if (error) throw pipelineError("google_authorization_lookup_failed", `Google connection validation failed: ${error.message}`, 500);
+  const relation = (data?.[0] as Json | undefined)?.oauth_tokens as Array<Json> | Json | undefined;
+  const token = Array.isArray(relation) ? relation[0] : relation;
+  const scopes = new Set(String(token?.scope ?? "").split(/\s+/).filter(Boolean));
+  const connected = Boolean(data?.length && token?.refresh_token);
+  return {
+    connected,
+    gmail: connected && [...scopes].some((scope) => scope.includes("gmail.")),
+    calendar: connected && (scopes.has("https://www.googleapis.com/auth/calendar") || scopes.has("https://www.googleapis.com/auth/calendar.events")),
+  };
+}
+
+function pipelineError(code: string, message: string, status: number): Error {
+  return Object.assign(new Error(message), { code, status });
+}
+function errorCode(error: unknown): string {
+  return typeof (error as { code?: unknown })?.code === "string" ? String((error as { code: string }).code) : "pipeline_failed";
+}
+function errorStatus(error: unknown): number {
+  const status = (error as { status?: unknown })?.status;
+  return typeof status === "number" ? status : authorizationStatus(error);
+}

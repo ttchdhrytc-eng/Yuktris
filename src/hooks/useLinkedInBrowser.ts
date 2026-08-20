@@ -6,6 +6,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import { supabase } from '@/lib/supabase';
 import { useWorkspace } from '@/contexts/WorkspaceContext';
+import { isTestFixture } from '@/services/campaign-metrics';
 import type {
   LinkedInAccount, LinkedInSession, LinkedInSessionBackup,
   LinkedInLoginHistory, LinkedInDevice, LinkedInSessionEvent,
@@ -830,7 +831,7 @@ export function useLinkedInConversations() {
         .eq('workspace_id', workspace.id)
         .order('last_message_at', { ascending: false, nullsFirst: false });
       if (error) throw error;
-      return (data ?? []) as LinkedInConversation[];
+      return (data ?? []).filter((row) => !isTestFixture(row as Record<string, unknown>)) as LinkedInConversation[];
     },
     enabled: !!workspace,
     refetchInterval: 15000,

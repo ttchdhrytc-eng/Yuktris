@@ -70,6 +70,16 @@ export function DashboardPage() {
         messages: linkedinMessages.error ? undefined : linkedinMessages.data ?? [],
         confirmations: meetingConfirmations.error ? undefined : meetingConfirmations.data ?? [],
       });
+      const canonicalTotals = Object.values(campaignMetrics).reduce((totals, metric) => ({
+        prospects: totals.prospects + (metric.prospects ?? 0),
+        connectionsSent: totals.connectionsSent + (metric.connectionsSent ?? 0),
+        connectionsAccepted: totals.connectionsAccepted + (metric.connectionsAccepted ?? 0),
+        messagesSent: totals.messagesSent + (metric.messagesSent ?? 0),
+        replies: totals.replies + (metric.replies ?? 0),
+        positiveReplies: totals.positiveReplies + (metric.positiveReplies ?? 0),
+        qualifiedLeads: totals.qualifiedLeads + (metric.qualifiedLeads ?? 0),
+        meetingsBooked: totals.meetingsBooked + (metric.meetingsBooked ?? 0),
+      }), { prospects: 0, connectionsSent: 0, connectionsAccepted: 0, messagesSent: 0, replies: 0, positiveReplies: 0, qualifiedLeads: 0, meetingsBooked: 0 });
 
       return {
         campaigns: campaigns.data ?? [],
@@ -85,15 +95,15 @@ export function DashboardPage() {
         campaignMetrics,
         metrics: {
           activeCampaigns: customerCampaigns.data?.filter(c => c.status === 'running').length ?? activeCampaigns.length,
-          prospectsDiscovered: prospects.count ?? 0,
-          prospectsContacted: new Set((executionJobs.data ?? []).map(j => j.contact_id).filter(Boolean)).size,
-          connectionsSent: executionJobs.data?.filter(j => j.action_type === 'connection_request' && j.status === 'completed').length ?? 0,
-          connectionsAccepted: executionJobs.data?.filter(j => j.action_type === 'check_connection_acceptance' && j.status === 'completed').length ?? 0,
-          messagesSent: linkedinMessages.data?.filter(m => m.direction === 'outbound').length ?? 0,
-          replies: linkedinMessages.data?.filter(m => m.direction === 'inbound').length ?? 0,
-          positiveReplies: linkedinMessages.data?.filter(m => ['positive', 'meeting_interest'].includes(m.classification ?? '')).length ?? 0,
-          qualifiedLeads: qualifiedContacts.count ?? linkedinConversations.data?.filter(c => c.stage === 'qualified').length ?? 0,
-          meetingsBooked: meetingConfirmations.data?.length ?? 0,
+          prospectsDiscovered: canonicalTotals.prospects,
+          prospectsContacted: canonicalTotals.prospects,
+          connectionsSent: canonicalTotals.connectionsSent,
+          connectionsAccepted: canonicalTotals.connectionsAccepted,
+          messagesSent: canonicalTotals.messagesSent,
+          replies: canonicalTotals.replies,
+          positiveReplies: canonicalTotals.positiveReplies,
+          qualifiedLeads: canonicalTotals.qualifiedLeads,
+          meetingsBooked: canonicalTotals.meetingsBooked,
         },
       };
     },

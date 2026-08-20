@@ -31,6 +31,8 @@ const errorBoundary = readFileSync(resolve(process.cwd(), '../../src/components/
 const protectedRoute = readFileSync(resolve(process.cwd(), '../../src/components/ProtectedRoute.tsx'), 'utf8');
 const workspaceContext = readFileSync(resolve(process.cwd(), '../../src/contexts/WorkspaceContext.tsx'), 'utf8');
 const conversationReconciliation = readFileSync(resolve(process.cwd(), '../../supabase/migrations/20260820120000_linkedin_conversation_reconciliation_idempotency.sql'), 'utf8');
+const settingsPage = readFileSync(resolve(process.cwd(), '../../src/pages/SettingsPage.tsx'), 'utf8');
+const linkedinHooks = readFileSync(resolve(process.cwd(), '../../src/hooks/useLinkedInBrowser.ts'), 'utf8');
 
 test('all current writes share one preflight before the switch', () => {
   for (const action of ['connection_request','send_message','follow_up_message','like_post','follow_company']) assert.ok(LINKEDIN_WRITE_ACTIONS.has(action));
@@ -200,6 +202,51 @@ test('campaign initialization records deterministic success and prerequisite out
   assert.match(initialize, /missing_prerequisite/);
   for (const prerequisite of ['linkedin_connection', 'linkedin_session_health', 'calendar_authorization']) assert.match(initialize, new RegExp(prerequisite));
   assert.match(initialize, /status = missing\.length \? "blocked_prerequisite" : "ready"/);
+});
+test('Connections and launch validation share workspace-scoped google_accounts OAuth truth', () => {
+  assert.match(linkedinV1Pipeline, /googleAuthorization\(admin, workspaceId\)/);
+  assert.match(linkedinV1Pipeline, /from\("google_accounts"\)[\s\S]*eq\("workspace_id", workspaceId\)[\s\S]*oauth_tokens/);
+  assert.match(linkedinV1Pipeline, /calendar: connected/);
+});
+test('LinkedIn-only launch does not require Gmail or Calendar and feature-specific validation remains available', () => {
+  assert.match(campaignsPage, /require_calendar: false, require_gmail: false/);
+  assert.match(linkedinV1Pipeline, /body\.require_gmail === true/);
+  assert.match(linkedinV1Pipeline, /body\.require_calendar === true/);
+  assert.match(campaignsPage, /Calendar optional/);
+});
+test('preflight is read-only, workspace-bound and reports canonical authorization checks', () => {
+  const preflight = linkedinV1Pipeline.slice(linkedinV1Pipeline.indexOf('if (action === "preflight")'), linkedinV1Pipeline.indexOf('if (action === "reconcile_prerequisites")'));
+  assert.match(preflight, /eq\("workspace_id", workspaceId\)/);
+  for (const check of ['linkedin_identity', 'persistent_context', 'campaign_icp', 'gmail_authorized', 'calendar_authorized', 'worker_available', 'write_performed: false']) assert.match(preflight, new RegExp(check));
+  assert.doesNotMatch(preflight, /\.insert\(|\.update\(|linkedin-job-runner/);
+});
+test('non-2xx launch responses expose structured actionable errors', () => {
+  assert.match(linkedinV1Pipeline, /ok: false[\s\S]*code: errorCode\(error\)/);
+  assert.match(campaignsPage, /context\.clone\(\)\.json\(\)[\s\S]*body\.error/);
+  assert.doesNotMatch(campaignsPage, /error\?\.message \?\? 'Campaign could not be launched'/);
+});
+test('fixture conversations and metrics are excluded from normal customer queries', () => {
+  assert.match(campaignMetrics, /isTestFixture[\s\S]*execution fixture/);
+  assert.match(linkedinHooks, /filter\(\(row\) => !isTestFixture/);
+  assert.match(campaignMetrics, /if \(isTestFixture\(job\)\) continue/);
+});
+test('dashboard and campaign cards aggregate the same canonical zero-safe metrics', () => {
+  assert.match(dashboardPage, /Object\.values\(campaignMetrics\)\.reduce/);
+  assert.match(dashboardPage, /prospectsContacted: canonicalTotals\.prospects/);
+  assert.match(campaignMetrics, /prospects: 0[\s\S]*meetingsBooked: 0/);
+});
+test('customer Settings exposes only supported V1 tabs', () => {
+  const tabBlock = settingsPage.slice(settingsPage.indexOf('const tabs = ['), settingsPage.indexOf('] as const;'));
+  for (const label of ['Workspace', 'Users', 'Notifications', 'Billing']) assert.match(tabBlock, new RegExp(`label: '${label}'`));
+  for (const label of ['API Keys', 'Integrations', 'AI', 'AI Agents', 'Execution Engine']) assert.doesNotMatch(tabBlock, new RegExp(`label: '${label}'`));
+});
+test('Google-only blocked campaigns reconcile to ready without auto-launching', () => {
+  const reconcile = linkedinV1Pipeline.slice(linkedinV1Pipeline.indexOf('if (action === "reconcile_prerequisites")'), linkedinV1Pipeline.indexOf('if (action === "preview_discovery")'));
+  assert.match(reconcile, /google\|gmail\|calendar/);
+  assert.match(reconcile, /connection_state !== "connected"[\s\S]*"healthy", "degraded"/);
+  assert.match(reconcile, /status: "ready"/);
+  assert.doesNotMatch(reconcile, /status: "running"/);
+  assert.match(campaignsPage, /action: 'reconcile_prerequisites'/);
 });
 test('campaign launch failure, backend exception and timeout cannot remain initializing', () => {
   assert.match(linkedinV1Pipeline, /lifecycleCampaignId[\s\S]*status: "failed"[\s\S]*initialization_failed/);
