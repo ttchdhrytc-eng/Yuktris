@@ -63,7 +63,8 @@ export class Worker {
     this.linkedin = new LinkedInBrowser(this.client, true, this.encryptionSecret);
     this.linkedinContexts = new LinkedInContextService(this.client);
     logger.info('Worker environment identity', {
-      environment: process.env.NODE_ENV || 'unspecified',
+      deployment_environment: process.env.RAILWAY_ENVIRONMENT_NAME || process.env.RAILWAY_ENVIRONMENT || 'unspecified',
+      node_env: process.env.NODE_ENV || 'unspecified',
       supabase_host: new URL(supabaseUrl).hostname,
       browserbase_project_suffix: process.env.BROWSERBASE_PROJECT_ID?.slice(-6) || null,
     });
