@@ -94,6 +94,7 @@ Deno.serve(async (req: Request) => {
         website: website ?? null,
         request_type: request_type ?? "full_intelligence",
         workspace_id: workspace_id ?? null,
+        business_analysis_id: analysis_id,
       }),
     }).catch((err) => {
       console.error("[research-start] Failed to trigger worker:", err);

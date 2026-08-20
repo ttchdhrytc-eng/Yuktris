@@ -18,6 +18,7 @@ interface WorkerPayload {
   website: string | null;
   request_type: string;
   workspace_id: string | null;
+  business_analysis_id?: string | null;
 }
 
 interface ProviderResult {
@@ -684,6 +685,35 @@ Deno.serve(async (req: Request) => {
     }
 
     await persistSources(intelligenceId, results);
+
+    if (payload.business_analysis_id) {
+      const serviceNames = (normalized.services ?? []).map((item) => String(item.name ?? item.title ?? item.description ?? "").trim()).filter(Boolean);
+      const productNames = (normalized.products ?? []).map((item) => String(item.name ?? item.title ?? item.description ?? "").trim()).filter(Boolean);
+      const targetAudience = (normalized.target_market ?? []).map((item) => String(item.name ?? item.segment ?? item.description ?? "").trim()).filter(Boolean).join("; ");
+      const analysisRes = await fetch(`${SUPABASE_URL}/rest/v1/business_analysis?id=eq.${payload.business_analysis_id}&workspace_id=eq.${payload.workspace_id}`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json", Authorization: `Bearer ${SERVICE_ROLE_KEY}`, apikey: SERVICE_ROLE_KEY,
+        },
+        body: JSON.stringify({
+          company_name: payload.company_name,
+          website: payload.website,
+          industry: normalized.industry,
+          description: normalized.summary,
+          business_model: normalized.business_model,
+          products: productNames,
+          services: serviceNames,
+          target_audience: targetAudience,
+          usp: normalized.brand_positioning,
+          confidence_score: Math.round(confidenceScore * 100),
+          analysis_status: "completed",
+          completion_percentage: 100,
+          error_message: null,
+          updated_at: new Date().toISOString(),
+        }),
+      });
+      if (!analysisRes.ok) throw new Error(`Failed to complete business analysis (HTTP ${analysisRes.status})`);
+    }
 
     await updateRequest(payload.request_id, {
       status: "completed",

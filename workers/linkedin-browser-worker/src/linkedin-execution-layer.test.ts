@@ -20,6 +20,7 @@ const businessIntelligenceService = readFileSync(resolve(process.cwd(), '../../s
 const icpIntelligenceService = readFileSync(resolve(process.cwd(), '../../src/services/icp-intelligence/ICPIntelligenceService.ts'), 'utf8');
 const onboardingPage = readFileSync(resolve(process.cwd(), '../../src/pages/OnboardingPage.tsx'), 'utf8');
 const researchStart = readFileSync(resolve(process.cwd(), '../../supabase/functions/research-start/index.ts'), 'utf8');
+const researchWorker = readFileSync(resolve(process.cwd(), '../../supabase/functions/research-worker/index.ts'), 'utf8');
 const dashboardPage = readFileSync(resolve(process.cwd(), '../../src/pages/DashboardPage.tsx'), 'utf8');
 const conversationReconciliation = readFileSync(resolve(process.cwd(), '../../supabase/migrations/20260820120000_linkedin_conversation_reconciliation_idempotency.sql'), 'utf8');
 
@@ -181,6 +182,11 @@ test('business research dispatch is authenticated, asynchronous and idempotent',
   assert.match(researchStart, /business_analysis_id=eq\.[\s\S]*resumed: true/);
   assert.match(researchStart, /EdgeRuntime\.waitUntil\(workerRequest\)/);
   assert.doesNotMatch(researchStart, /await fetch\(`\$\{SUPABASE_URL\}\/functions\/v1\/research-worker/);
+});
+test('research worker owns authoritative business-analysis completion', () => {
+  assert.match(researchStart, /business_analysis_id: analysis_id/);
+  assert.match(researchWorker, /business_analysis_id[\s\S]*rest\/v1\/business_analysis[\s\S]*analysis_status: "completed"[\s\S]*completion_percentage: 100/);
+  assert.match(businessIntelligenceService, /workerCompleted[\s\S]*profileFromPersistedAnalysis/);
 });
 test('dashboard metrics use canonical customer and execution records', () => {
   assert.match(dashboardPage, /from\('customer_campaigns'\)[\s\S]*from\('linkedin_execution_jobs'\)[\s\S]*from\('linkedin_messages'\)/);

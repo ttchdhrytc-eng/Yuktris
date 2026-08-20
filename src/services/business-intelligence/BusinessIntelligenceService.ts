@@ -265,6 +265,10 @@ export class BusinessIntelligenceService {
       const requestId = await this.startResearchRequest(workspaceId, website, companyName, analysis.id);
       await this.updateAnalysis(analysis.id, { research_request_id: requestId });
       const request = await this.waitForResearch(requestId, analysis.id, onStatus);
+      const workerCompleted = await this.loadAnalysis(analysis.id);
+      if (workerCompleted?.analysis_status === 'completed' && workerCompleted.completion_percentage === 100) {
+        return { analysis: workerCompleted, intelligence: null, profile: profileFromPersistedAnalysis(workerCompleted) };
+      }
       const intelligence = await this.loadResearchIntelligence(request, workspaceId, website, companyName);
 
       const summary = buildSummary(intelligence);
