@@ -124,6 +124,13 @@ test('V1 launch suppresses duplicate connection jobs before creating outreach ar
   assert.ok(contactLookup < duplicateLookup && duplicateLookup < copyGeneration && copyGeneration < decisionInsert);
   assert.match(linkedinV1Pipeline, /contacts_skipped_existing_connection/);
 });
+test('V1 launch selects only healthy identity-bound accounts and persists grounding scores', () => {
+  assert.match(linkedinV1Pipeline, /\.in\("health_status", \["healthy", "degraded"\]\)/);
+  assert.match(linkedinV1Pipeline, /\.not\("profile_url", "is", null\)[\s\S]*\.not\("expected_profile_url", "is", null\)/);
+  assert.match(linkedinV1Pipeline, /candidate\.score[\s\S]*match\.score/);
+  assert.match(linkedinV1Pipeline, /confidence_score: prospect\.confidenceScore/);
+  assert.match(linkedinV1Pipeline, /campaign_score: Math\.round\(prospect\.confidenceScore \* 100\)/);
+});
 test('V1 discovery requires company and role evidence and reports bridge failures', () => {
   assert.match(linkedinV1Pipeline, /evidence\.includes\(companyName[\s\S]*&& evidence\.includes\(role/);
   assert.match(linkedinV1Pipeline, /companies to know\|company directory\|database\|market map/);

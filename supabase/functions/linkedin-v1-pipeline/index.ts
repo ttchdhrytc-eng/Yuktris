@@ -26,6 +26,7 @@ type Prospect = {
   contactTitle: string;
   linkedinUrl: string;
   evidence: string;
+  confidenceScore: number;
 };
 
 Deno.serve(async (req: Request) => {
@@ -53,6 +54,7 @@ Deno.serve(async (req: Request) => {
           contact_title: prospect.contactTitle,
           linkedin_url: prospect.linkedinUrl,
           evidence: prospect.evidence.slice(0, 600),
+          confidence_score: prospect.confidenceScore,
         })),
       });
     }
@@ -63,9 +65,12 @@ Deno.serve(async (req: Request) => {
       const maxProspects = clampNumber(body.max_prospects, 1, 10, 5);
 
       const { data: account, error: accountError } = await admin.from("linkedin_accounts")
-        .select("id,workspace_id,connection_state,connection_status,status,session_status")
+        .select("id,workspace_id,connection_state,connection_status,status,session_status,health_status,profile_url,expected_profile_url")
         .eq("workspace_id", workspaceId)
         .eq("connection_state", "connected")
+        .in("health_status", ["healthy", "degraded"])
+        .not("profile_url", "is", null)
+        .not("expected_profile_url", "is", null)
         .neq("status", "paused")
         .neq("status", "restricted")
         .order("created_at", { ascending: true })
@@ -107,7 +112,7 @@ Deno.serve(async (req: Request) => {
           contact_id: contact.id,
           decision: "linkedin_first",
           decision_reason: `Verified decision maker discovered for ${icp.name ?? "selected ICP"}. ${prospect.evidence.slice(0, 400)}`,
-          confidence_score: 0.82,
+          confidence_score: prospect.confidenceScore,
           status: "active",
         }).select("id").single();
         if (decisionError) throw new Error(`Outreach decision persistence failed: ${decisionError.message}`);
@@ -119,8 +124,8 @@ Deno.serve(async (req: Request) => {
           campaign_name: `${icp.name ?? "ICP"} - ${prospect.companyName} - LinkedIn`,
           campaign_type: "sequence",
           campaign_status: "processing",
-          campaign_score: 80,
-          success_probability: 20,
+          campaign_score: Math.round(prospect.confidenceScore * 100),
+          success_probability: Math.round(prospect.confidenceScore * 25),
         }).select("id").single();
         if (campaignError) throw new Error(`Outreach campaign persistence failed: ${campaignError.message}`);
 
@@ -277,6 +282,8 @@ async function discoverVerifiedProspects(icp: ICP, maxProspects: number): Promis
         contactTitle: parsed.title,
         linkedinUrl,
         evidence: `${match.title}. ${match.content ?? ""}`,
+        confidenceScore: Math.max(0.5, Math.min(0.99,
+          0.5 + (Number(candidate.score ?? 0) * 0.2) + (Number(match.score ?? 0) * 0.3))),
       });
       break;
     }
@@ -284,7 +291,7 @@ async function discoverVerifiedProspects(icp: ICP, maxProspects: number): Promis
   return prospects;
 }
 
-async function tavilySearch(apiKey: string, query: string, maxResults: number): Promise<Array<{ title: string; url: string; content: string }>> {
+async function tavilySearch(apiKey: string, query: string, maxResults: number): Promise<Array<{ title: string; url: string; content: string; score?: number }>> {
   const response = await fetch("https://api.tavily.com/search", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -340,7 +347,7 @@ async function findOrCreateCompany(admin: any, workspaceId: string, p: Prospect)
     name: p.companyName,
     website: p.companyWebsite,
     description: p.companyDescription.slice(0, 5000),
-    confidence_score: 0.8,
+    confidence_score: p.confidenceScore,
   }).select("*").single();
   if (error) throw new Error(`Company persistence failed: ${error.message}`);
   return data as Json;
@@ -359,7 +366,7 @@ async function findOrCreateContact(admin: any, workspaceId: string, companyId: u
     linkedin_url: p.linkedinUrl,
     job_title: p.contactTitle,
     status: "discovered",
-    confidence_score: 0.82,
+    confidence_score: p.confidenceScore,
   }).select("*").single();
   if (error) throw new Error(`Contact persistence failed: ${error.message}`);
   return data as Json;
