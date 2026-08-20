@@ -126,8 +126,20 @@ test('V1 launch suppresses duplicate connection jobs before creating outreach ar
 });
 test('V1 discovery requires company and role evidence and reports bridge failures', () => {
   assert.match(linkedinV1Pipeline, /evidence\.includes\(companyName[\s\S]*&& evidence\.includes\(role/);
+  assert.match(linkedinV1Pipeline, /companies to know\|company directory\|database\|market map/);
+  assert.match(linkedinV1Pipeline, /title\.split\(\/\[\|–—\]\/[\s\S]*includes\(normalizedHost\)/);
+  assert.match(linkedinV1Pipeline, /official company website -top -best -list -directory -database/);
   assert.match(linkedinV1Pipeline, /if \(!response\.ok\)[\s\S]*bridgeFailures\.push/);
   assert.match(linkedinV1Pipeline, /partially_launched[\s\S]*bridge_failures/);
+});
+test('V1 discovery preview is explicitly non-persistent and creates no execution jobs', () => {
+  const previewStart = linkedinV1Pipeline.indexOf('if (action === "preview_discovery")');
+  const launchStart = linkedinV1Pipeline.indexOf('if (action === "launch")');
+  const preview = linkedinV1Pipeline.slice(previewStart, launchStart);
+  assert.ok(previewStart > 0 && previewStart < launchStart);
+  assert.match(preview, /persisted: false/);
+  assert.match(preview, /execution_jobs_created: 0/);
+  assert.doesNotMatch(preview, /\.insert\(|\.update\(|\.from\("linkedin_execution_jobs"\)/);
 });
 test('conversation reconciliation derives its projection from authoritative messages', () => {
   assert.match(conversationReconciliation, /reconcile_linkedin_v1_pipeline_state_transitions/);

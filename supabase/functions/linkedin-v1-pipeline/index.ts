@@ -38,6 +38,25 @@ Deno.serve(async (req: Request) => {
     const action = typeof body.action === "string" ? body.action : "launch";
     const { admin } = await authorizeLinkedInWorkspace(req, workspaceId, { allowServiceRole: true });
 
+    if (action === "preview_discovery") {
+      const icp = (body.icp ?? {}) as ICP;
+      const maxProspects = clampNumber(body.max_prospects, 1, 5, 3);
+      const prospects = await discoverVerifiedProspects(icp, maxProspects);
+      return json({
+        status: "preview",
+        persisted: false,
+        execution_jobs_created: 0,
+        prospects: prospects.map((prospect) => ({
+          company_name: prospect.companyName,
+          company_website: prospect.companyWebsite,
+          contact_name: `${prospect.contactFirstName} ${prospect.contactLastName}`,
+          contact_title: prospect.contactTitle,
+          linkedin_url: prospect.linkedinUrl,
+          evidence: prospect.evidence.slice(0, 600),
+        })),
+      });
+    }
+
     if (action === "launch") {
       const icp = (body.icp ?? {}) as ICP;
       const genericCampaignId = optionalString(body.campaign_id);
@@ -218,7 +237,7 @@ async function discoverVerifiedProspects(icp: ICP, maxProspects: number): Promis
     icp.industry ? `${icp.industry} companies` : "B2B companies",
     icp.companySize ? `${icp.companySize} employees` : "",
     icp.description ?? "",
-    "official website",
+    "official company website -top -best -list -directory -database",
   ].filter(Boolean).join(" ");
   const companyResults = await tavilySearch(tavilyKey, companyQuery, Math.max(10, maxProspects * 3));
   const companyCandidates = companyResults
@@ -375,10 +394,21 @@ function rootWebsite(value: string): string {
   const u = new URL(value);
   return `${u.protocol}//${u.hostname}`;
 }
-function cleanCompanyName(title: string, host: string): string {
-  const candidate = title.split(/[|–—]/)[0].replace(/\s+-\s+.*$/, "").trim();
-  if (candidate.length >= 2 && candidate.length <= 100) return candidate;
-  return host.replace(/^www\./, "").split(".")[0].replace(/[-_]/g, " ").replace(/\b\w/g, (m) => m.toUpperCase());
+function cleanCompanyName(title: string, host: string): string | null {
+  const hostLabel = host.replace(/^www\./, "").split(".")[0];
+  const hostBrand = hostLabel.replace(/^(get|use|try|join|with)(?=[a-z0-9])/i, "");
+  const normalizedHost = hostBrand.toLowerCase().replace(/[^a-z0-9]/g, "");
+  if (normalizedHost.length < 3) return null;
+
+  const candidate = title.split(/[|–—]/)
+    .map((part) => part.replace(/\s+-\s+.*$/, "").trim())
+    .find((part) => {
+      if (part.length < 2 || part.length > 100) return false;
+      if (/\b(top|best|list of|companies to know|company directory|database|market map)\b/i.test(part) || /^\d+\s/.test(part)) return false;
+      return part.toLowerCase().replace(/[^a-z0-9]/g, "").includes(normalizedHost);
+    });
+  if (!candidate) return null;
+  return candidate;
 }
 function optionalString(value: unknown): string | undefined { return typeof value === "string" && value.trim() ? value.trim() : undefined; }
 function requireString(value: unknown, name: string): string { const s = optionalString(value); if (!s) throw new Error(`${name} is required`); return s; }
