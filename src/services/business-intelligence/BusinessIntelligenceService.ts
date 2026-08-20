@@ -70,7 +70,7 @@ export type ResearchBusinessProfile = {
 
 export type ResearchAnalysisResult = {
   analysis: BusinessAnalysis;
-  intelligence: CompanyIntelligenceRecord;
+  intelligence: CompanyIntelligenceRecord | null;
   profile: ResearchBusinessProfile;
 };
 
@@ -82,6 +82,23 @@ function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : {};
+}
+
+function profileFromPersistedAnalysis(analysis: FullAnalysis): ResearchBusinessProfile {
+  return {
+    name: analysis.company_name ?? '',
+    description: analysis.description ?? '',
+    industry: analysis.industry ?? '',
+    services: analysis.services ?? [],
+    usp: analysis.usp ?? '',
+    competitors: analysis.insights?.raw_json
+      ? competitorNames(asRecord(asRecord(analysis.insights.raw_json).competitive_landscape).direct_competitors)
+      : [],
+    targetCustomers: analysis.target_audience ?? '',
+    pricingModel: analysis.pricing_model ?? '',
+    technologies: [],
+    businessModel: analysis.business_model ?? '',
+  };
 }
 
 function firstString(value: unknown, keys: string[] = []): string {
@@ -230,7 +247,18 @@ export class BusinessIntelligenceService {
     companyName: string,
     onStatus?: (status: ResearchStatus) => void,
   ): Promise<ResearchAnalysisResult> {
-    const analysis = await this.startAnalysis(workspaceId, website, companyName);
+    const existing = await this.loadLatestAnalysisByWebsite(workspaceId, website);
+    if (existing?.analysis_status === 'completed' && existing.completion_percentage === 100) {
+      return { analysis: existing, intelligence: null, profile: profileFromPersistedAnalysis(existing) };
+    }
+    if (existing && ['queued', 'processing'].includes(existing.analysis_status)) {
+      const completed = await this.waitForPersistedAnalysis(existing.id);
+      return { analysis: completed, intelligence: null, profile: profileFromPersistedAnalysis(completed) };
+    }
+
+    const analysis = existing?.analysis_status === 'failed'
+      ? await this.refreshAnalysis(existing.id)
+      : await this.startAnalysis(workspaceId, website, companyName);
 
     try {
       await this.updateAnalysis(analysis.id, {
@@ -543,6 +571,25 @@ export class BusinessIntelligenceService {
     if (error) throw new Error(error.message);
     if (!analysis) return null;
     return this.loadAnalysis(analysis.id);
+  }
+
+  async loadLatestAnalysisByWebsite(workspaceId: string, website: string): Promise<FullAnalysis | null> {
+    const { data, error } = await supabase.from('business_analysis').select('id')
+      .eq('workspace_id', workspaceId).eq('website', website)
+      .order('created_at', { ascending: false }).limit(1).maybeSingle();
+    if (error) throw new Error(error.message);
+    return data ? this.loadAnalysis(data.id) : null;
+  }
+
+  private async waitForPersistedAnalysis(analysisId: string): Promise<FullAnalysis> {
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < RESEARCH_TIMEOUT_MS) {
+      const analysis = await this.loadAnalysis(analysisId);
+      if (analysis?.analysis_status === 'completed' && analysis.completion_percentage === 100) return analysis;
+      if (analysis?.analysis_status === 'failed') throw new Error('Business analysis failed.');
+      await sleep(POLL_INTERVAL_MS);
+    }
+    throw new Error('Business analysis is still processing. Please try again shortly.');
   }
 
   async refreshAnalysis(analysisId: string): Promise<BusinessAnalysis> {

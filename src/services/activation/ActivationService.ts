@@ -33,6 +33,7 @@ export interface ActivationProgress {
 }
 
 export interface BusinessProfile {
+  analysisId: string;
   name: string;
   website: string;
   description: string;
@@ -188,54 +189,14 @@ class ActivationService {
     const name = domain.split('.')[0];
     const capName = name.charAt(0).toUpperCase() + name.slice(1);
 
-    try {
-      const analysis = await biService.startAnalysis(workspaceId, website, capName);
-
-      this.updateStep('research', 'Website analyzed', true);
-
-      const summary = await biService.generateBusinessSummary('');
-      const insights = await biService.generateInsights('');
-
-      await biService.saveAnalysis(
-        analysis.id,
-        summary,
-        await biService.crawlWebsite(website),
-        insights,
-      );
-
-      this.updateStep('analysis', 'Business analysis complete', true);
-
-      return {
-        name: summary.company_name ?? capName,
-        website,
-        description: summary.description ?? '',
-        industry: summary.industry ?? '',
-        services: summary.services ?? [],
-        usp: summary.usp ?? '',
-        competitors: (insights.raw_json as any)?.competitive_landscape?.direct_competitors ?? [],
-        targetCustomers: summary.target_audience ?? '',
-        pricingModel: summary.pricing_model ?? '',
-        technologies: [],
-        businessModel: summary.business_model ?? '',
-      };
-    } catch {
-      this.updateStep('research', 'Website analyzed', true);
-      this.updateStep('analysis', 'Business analysis complete', true);
-
-      return {
-        name: capName,
-        website,
-        description: `${capName} is a B2B company providing professional services and solutions to help clients achieve their business goals.`,
-        industry: 'B2B Services',
-        services: ['Professional Services', 'Consulting', 'Implementation', 'Support'],
-        usp: 'Delivering measurable results through a proven, data-driven approach.',
-        competitors: [],
-        targetCustomers: 'Businesses seeking professional solutions and services.',
-        pricingModel: 'Tiered pricing based on service level and scope.',
-        technologies: [],
-        businessModel: 'B2B Services',
-      };
+    const result = await biService.runResearchAnalysis(workspaceId, website, capName);
+    if (result.analysis.analysis_status !== 'completed' || result.analysis.completion_percentage !== 100) {
+      throw new Error('Business analysis did not finish successfully.');
     }
+
+    this.updateStep('research', 'Website analyzed', true);
+    this.updateStep('analysis', 'Business analysis complete', true);
+    return { analysisId: result.analysis.id, website, ...result.profile };
   }
 
   // ----------------------------------------------------------
@@ -246,7 +207,7 @@ class ActivationService {
     this.updateStep('icp', 'Generating ICP recommendations...', false);
 
     try {
-      const { icps: generated } = await icpService.generateFullPipeline(workspaceId, businessProfile.name);
+      const { icps: generated } = await icpService.generateFullPipeline(workspaceId, businessProfile.name, businessProfile.analysisId);
 
       const icps: ICPRecommendation[] = generated.map((icp, index) => ({
         id: icp.id,
@@ -270,7 +231,8 @@ class ActivationService {
       return icps;
     } catch (error) {
       this.updateStep('icp', 'ICP generation needs attention', false);
-      throw new Error(error instanceof Error ? `ICP generation failed: ${error.message}` : 'ICP generation failed. Please try again.');
+      console.error('Onboarding ICP generation failed', error);
+      throw new Error('We could not finish building your ideal customer profile. Please try again.');
     }
   }
 

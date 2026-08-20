@@ -53,9 +53,13 @@ export class ICPIntelligenceService {
   private async loadResearchContext(
     workspaceId: string,
     companyName?: string | null,
+    businessAnalysisId?: string | null,
   ): Promise<{ businessSummary: Record<string, unknown>; marketSummary: Record<string, unknown>; businessAnalysisId: string | null; marketAnalysisId: string | null }> {
-    const businessAnalysis = await biService.loadLatestAnalysis(workspaceId, companyName);
-    if (!businessAnalysis || businessAnalysis.analysis_status !== 'completed') {
+    const businessAnalysis = businessAnalysisId
+      ? await biService.loadAnalysis(businessAnalysisId)
+      : await biService.loadLatestAnalysis(workspaceId, companyName);
+    if (!businessAnalysis || businessAnalysis.workspace_id !== workspaceId || businessAnalysis.analysis_status !== 'completed'
+      || businessAnalysis.completion_percentage !== 100) {
       throw new Error('Business analysis must complete before ICPs can be generated.');
     }
 
@@ -360,9 +364,19 @@ export class ICPIntelligenceService {
    * validate, and persist. Throws a retryable error on any failure —
    * never falls back to mock data.
    */
-  async generateFullPipeline(workspaceId: string, companyName?: string | null): Promise<ICPGenerationResult> {
-    const { businessSummary, marketSummary, businessAnalysisId, marketAnalysisId } =
-      await this.loadResearchContext(workspaceId, companyName);
+  async generateFullPipeline(workspaceId: string, companyName?: string | null, businessAnalysisId?: string | null): Promise<ICPGenerationResult> {
+    const { businessSummary, marketSummary, businessAnalysisId: persistedBusinessAnalysisId, marketAnalysisId } =
+      await this.loadResearchContext(workspaceId, companyName, businessAnalysisId);
+
+    const { data: existingRows, error: existingError } = await supabase.from('icps').select('id')
+      .eq('workspace_id', workspaceId).eq('business_analysis_id', persistedBusinessAnalysisId)
+      .eq('status', 'completed').order('created_at', { ascending: true });
+    if (existingError) throw new Error(existingError.message);
+    if (existingRows?.length) {
+      const existing = (await Promise.all(existingRows.map((row) => this.loadICP(row.id))))
+        .filter((icp): icp is FullICP => icp !== null);
+      if (existing.length) return { icps: existing, recommendations: buildRecommendations(existing) };
+    }
 
     const generatedICPs = await this.generateICPs({
       workspaceId,
@@ -373,7 +387,7 @@ export class ICPIntelligenceService {
 
     const icpIds: string[] = [];
     for (const generated of generatedICPs) {
-      const icpId = await this.persistGeneratedICP(workspaceId, businessAnalysisId, marketAnalysisId, generated, companyName);
+      const icpId = await this.persistGeneratedICP(workspaceId, persistedBusinessAnalysisId, marketAnalysisId, generated, companyName);
       icpIds.push(icpId);
     }
 

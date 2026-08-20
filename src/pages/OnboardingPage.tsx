@@ -67,6 +67,7 @@ export function OnboardingPage() {
   const [businessDesc, setBusinessDesc] = useState('');
   const [icpDesc, setIcpDesc] = useState('');
   const [loading, setLoading] = useState(false);
+  const [activationPhase, setActivationPhase] = useState<'analysis' | 'icp'>('analysis');
   const [researchStage, setResearchStage] = useState(0);
   const [businessProfile, setBusinessProfile] = useState<BusinessProfile | null>(null);
   const [icps, setIcps] = useState<ICPRecommendation[]>([]);
@@ -226,6 +227,7 @@ export function OnboardingPage() {
     }
 
     setLoading(true);
+    setActivationPhase('analysis');
 
     try {
       if (!creatingRef.current) {
@@ -238,6 +240,7 @@ export function OnboardingPage() {
         const profile = await activationService.runBusinessAnalysis(workspaceId, website.trim());
         setBusinessProfile(profile);
 
+        setActivationPhase('icp');
         const generatedIcps = await activationService.generateICPs(workspaceId, profile);
         setIcps(generatedIcps);
         const primaryIcp = generatedIcps[0];
@@ -627,7 +630,7 @@ export function OnboardingPage() {
                     <Input
                       value={website}
                       onChange={(e) => setWebsite(e.target.value)}
-                      onKeyDown={(e) => e.key === 'Enter' && canProceed() && goNext()}
+                      onKeyDown={(e) => e.key === 'Enter' && !loading && canProceed() && goNext()}
                       placeholder="acmeagency.com"
                       className="pl-10 h-12 text-base"
                       autoFocus
@@ -650,8 +653,9 @@ export function OnboardingPage() {
 
               <div className="flex justify-between pt-2">
                 <Button variant="ghost" onClick={goBack}><ArrowLeft className="h-4 w-4" /> Back</Button>
-                <Button variant="glow" size="lg" onClick={goNext} loading={loading} disabled={!canProceed()}>
-                  Continue <ArrowRight className="h-4 w-4" />
+                <Button variant="glow" size="lg" onClick={goNext} loading={loading} disabled={loading || !canProceed()}>
+                  {loading ? (activationPhase === 'analysis' ? 'Analyzing your business...' : 'Building your ideal customer profile...') : 'Continue'}
+                  {!loading && <ArrowRight className="h-4 w-4" />}
                 </Button>
               </div>
             </div>
