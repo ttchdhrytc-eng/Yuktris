@@ -336,7 +336,12 @@ export class Worker {
         body: JSON.stringify({ action: 'process_pending', workspace_id: workspaceId }),
       });
       if (!conversationResponse.ok) {
-        logger.warn('Conversation maintenance failed', { workspace_id: workspaceId, status: conversationResponse.status });
+        const responseBody = (await conversationResponse.text()).slice(0, 1000);
+        logger.warn('Conversation maintenance failed', {
+          workspace_id: workspaceId,
+          status: conversationResponse.status,
+          response_body: responseBody,
+        });
       }
     }
   }

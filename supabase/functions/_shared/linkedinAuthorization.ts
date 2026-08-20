@@ -21,7 +21,9 @@ export async function authorizeLinkedInWorkspace(
   const bearer = authorization.replace(/^Bearer\s+/i, "");
   const admin = createClient(url, serviceKey, { auth: { persistSession: false, autoRefreshToken: false } });
 
-  if (options.allowServiceRole && bearer && bearer === serviceKey) {
+  if (options.allowServiceRole && bearer && (
+    bearer === serviceKey || await isServiceRoleCredential(url, bearer)
+  )) {
     return { admin, userId: null, internalService: true };
   }
   if (!bearer) throw new Error("Unauthorized");
@@ -36,6 +38,21 @@ export async function authorizeLinkedInWorkspace(
     .select("workspace_id").eq("workspace_id", workspaceId).eq("user_id", data.user.id).maybeSingle();
   if (membershipError || !membership) throw new Error("Forbidden");
   return { admin, userId: data.user.id, internalService: false };
+}
+
+async function isServiceRoleCredential(url: string, credential: string): Promise<boolean> {
+  try {
+    const response = await fetch(`${url}/auth/v1/admin/users?page=1&per_page=1`, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${credential}`,
+        apikey: credential,
+      },
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
 }
 
 export function authorizationStatus(error: unknown): number {
