@@ -150,6 +150,7 @@ class ActivationService {
           name: capName,
           website: params.website,
           onboarding_completed: false,
+          onboarding_stage: 'business_input',
         })
         .eq('id', workspaceId);
     } else {
@@ -160,6 +161,7 @@ class ActivationService {
           website: params.website,
           onboarding_completed: false,
           owner_id: params.userId,
+          onboarding_stage: 'business_input',
         })
         .select()
         .single();
@@ -188,6 +190,7 @@ class ActivationService {
     const domain = website.replace(/^https?:\/\//, '').replace(/^www\./, '').split('/')[0];
     const name = domain.split('.')[0];
     const capName = name.charAt(0).toUpperCase() + name.slice(1);
+    await supabase.from('workspaces').update({ onboarding_stage: 'business_research' }).eq('id', workspaceId);
 
     const result = await biService.runResearchAnalysis(workspaceId, website, capName);
     if (result.analysis.analysis_status !== 'completed' || result.analysis.completion_percentage !== 100) {
@@ -196,6 +199,7 @@ class ActivationService {
 
     this.updateStep('research', 'Website analyzed', true);
     this.updateStep('analysis', 'Business analysis complete', true);
+    await supabase.from('workspaces').update({ onboarding_stage: 'business_ready' }).eq('id', workspaceId);
     return { analysisId: result.analysis.id, website, ...result.profile };
   }
 
@@ -205,6 +209,7 @@ class ActivationService {
 
   async generateICPs(workspaceId: string, businessProfile: BusinessProfile): Promise<ICPRecommendation[]> {
     this.updateStep('icp', 'Generating ICP recommendations...', false);
+    await supabase.from('workspaces').update({ onboarding_stage: 'icp_generating' }).eq('id', workspaceId);
 
     try {
       const { icps: generated } = await icpService.generateFullPipeline(workspaceId, businessProfile.name, businessProfile.analysisId);
@@ -228,6 +233,7 @@ class ActivationService {
       }));
 
       this.updateStep('icp', 'ICPs generated', true);
+      await supabase.from('workspaces').update({ onboarding_stage: 'icp_ready' }).eq('id', workspaceId);
       return icps;
     } catch (error) {
       this.updateStep('icp', 'ICP generation needs attention', false);
@@ -292,6 +298,7 @@ class ActivationService {
           campaign_id: campaignId,
           icp: params.icp,
           linkedin_account_id: params.linkedinAccountId,
+          require_gmail: params.channels.email,
           campaign: { name: campaign.name, source_campaign_id: campaignId },
         },
       });
@@ -304,12 +311,14 @@ class ActivationService {
       const result = pipeline as { status?: 'ready' | 'blocked_prerequisite'; message?: string } | null;
       this.updateStep('campaign', result?.status === 'ready' ? 'Campaign ready to launch' : 'Campaign saved; connections required', true);
       this.updateStep('complete', 'Activation complete', true);
+      await supabase.from('workspaces').update({ onboarding_stage: 'setup_ready' }).eq('id', params.workspaceId);
       return { campaignId, status: result?.status ?? 'blocked_prerequisite', message: result?.message ?? 'Campaign saved.' };
     } else {
       this.updateStep('campaign', 'Campaign created', true);
     }
 
     this.updateStep('complete', 'Activation complete', true);
+    await supabase.from('workspaces').update({ onboarding_stage: 'setup_ready' }).eq('id', params.workspaceId);
     return { campaignId, status: 'ready', message: 'Campaign saved and ready.' };
   }
 
@@ -320,7 +329,7 @@ class ActivationService {
   async completeActivation(workspaceId: string): Promise<void> {
     await supabase
       .from('workspaces')
-      .update({ onboarding_completed: true })
+      .update({ onboarding_completed: true, onboarding_stage: 'completed' })
       .eq('id', workspaceId);
   }
 }

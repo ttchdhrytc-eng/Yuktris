@@ -19,6 +19,8 @@ const activationService = readFileSync(resolve(process.cwd(), '../../src/service
 const businessIntelligenceService = readFileSync(resolve(process.cwd(), '../../src/services/business-intelligence/BusinessIntelligenceService.ts'), 'utf8');
 const icpIntelligenceService = readFileSync(resolve(process.cwd(), '../../src/services/icp-intelligence/ICPIntelligenceService.ts'), 'utf8');
 const onboardingPage = readFileSync(resolve(process.cwd(), '../../src/pages/OnboardingPage.tsx'), 'utf8');
+const researchStart = readFileSync(resolve(process.cwd(), '../../supabase/functions/research-start/index.ts'), 'utf8');
+const dashboardPage = readFileSync(resolve(process.cwd(), '../../src/pages/DashboardPage.tsx'), 'utf8');
 const conversationReconciliation = readFileSync(resolve(process.cwd(), '../../supabase/migrations/20260820120000_linkedin_conversation_reconciliation_idempotency.sql'), 'utf8');
 
 test('all current writes share one preflight before the switch', () => {
@@ -166,13 +168,24 @@ test('onboarding waits for the exact persisted business analysis before ICP gene
   assert.match(icpIntelligenceService, /biService\.loadAnalysis\(businessAnalysisId\)[\s\S]*businessAnalysis\.workspace_id !== workspaceId[\s\S]*completion_percentage !== 100/);
 });
 test('onboarding retries reuse analysis and persisted complete ICP records', () => {
-  assert.match(businessIntelligenceService, /loadLatestAnalysisByWebsite[\s\S]*waitForPersistedAnalysis/);
-  assert.match(businessIntelligenceService, /analysis_status === 'failed'[\s\S]*refreshAnalysis/);
+  assert.match(businessIntelligenceService, /loadLatestAnalysisByWebsite[\s\S]*startResearchRequest\(workspaceId, website, companyName, analysis\.id\)[\s\S]*research_request_id: requestId/);
+  assert.match(businessIntelligenceService, /\['queued', 'processing', 'failed'\]\.includes\(existing\.analysis_status\)[\s\S]*refreshAnalysis/);
   assert.match(icpIntelligenceService, /business_analysis_id[\s\S]*status', 'completed'[\s\S]*return \{ icps: existing/);
   assert.match(onboardingPage, /creatingRef\.current = true[\s\S]*disabled=\{loading \|\| !canProceed\(\)\}/);
 });
 test('persisted ICP loading retains targeting child records', () => {
   assert.match(icpIntelligenceService, /icp_company_profile[\s\S]*icp_decision_makers[\s\S]*icp_pain_points[\s\S]*icp_goals[\s\S]*sales_navigator_filters/);
+});
+test('business research dispatch is authenticated, asynchronous and idempotent', () => {
+  assert.match(researchStart, /auth\.getUser\(\)[\s\S]*workspace_members/);
+  assert.match(researchStart, /business_analysis_id=eq\.[\s\S]*resumed: true/);
+  assert.match(researchStart, /EdgeRuntime\.waitUntil\(workerRequest\)/);
+  assert.doesNotMatch(researchStart, /await fetch\(`\$\{SUPABASE_URL\}\/functions\/v1\/research-worker/);
+});
+test('dashboard metrics use canonical customer and execution records', () => {
+  assert.match(dashboardPage, /from\('customer_campaigns'\)[\s\S]*from\('linkedin_execution_jobs'\)[\s\S]*from\('linkedin_messages'\)/);
+  assert.match(dashboardPage, /Prospects Discovered/);
+  assert.doesNotMatch(dashboardPage, /Best Time to Send" value="Tue/);
 });
 test('conversation reconciliation derives its projection from authoritative messages', () => {
   assert.match(conversationReconciliation, /reconcile_linkedin_v1_pipeline_state_transitions/);

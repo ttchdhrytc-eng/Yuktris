@@ -77,7 +77,7 @@ Deno.serve(async (req: Request) => {
       const token = Array.isArray(tokenRelation) ? tokenRelation[0] : tokenRelation;
       const scopes = String(token?.scope ?? "").split(/\s+/);
       if (!googleAccounts?.length || !token?.refresh_token) missing.push("google_reauthorization");
-      if (!scopes.some((scope) => scope.includes("gmail."))) missing.push("gmail_authorization");
+      if (body.require_gmail === true && !scopes.some((scope) => scope.includes("gmail."))) missing.push("gmail_authorization");
       if (!scopes.includes("https://www.googleapis.com/auth/calendar")
         && !scopes.includes("https://www.googleapis.com/auth/calendar.events")) missing.push("calendar_authorization");
 
@@ -158,7 +158,7 @@ Deno.serve(async (req: Request) => {
           workspace_id: workspaceId, name: campaignInput.name.trim(), icp: icp,
           linkedin_account_id: account.id, strategy: campaignInput.strategy ?? null,
           daily_limit: clampNumber(campaignInput.daily_limit, 1, 20, 10), operating_days: campaignInput.operating_days ?? null,
-          operating_hours: campaignInput.operating_hours ?? null, status: "ready", status_reason: "Validated and preparing verified prospects.",
+          operating_hours: campaignInput.operating_hours ?? null, status: "initializing", status_reason: "Validating and discovering verified prospects.",
         }).select("id").single();
         if (customerCampaignError) throw new Error(`Campaign creation failed: ${customerCampaignError.message}`);
         customerCampaignId = customerCampaign.id;

@@ -31,7 +31,7 @@ export const ANALYSIS_STAGES: AnalysisStageInfo[] = [
 ];
 
 const POLL_INTERVAL_MS = 2_000;
-const RESEARCH_TIMEOUT_MS = 120_000;
+const RESEARCH_TIMEOUT_MS = 8 * 60_000;
 
 type ResearchStatus =
   | 'pending'
@@ -51,6 +51,7 @@ type ResearchRequestRow = {
   website: string | null;
   status: ResearchStatus;
   error_message?: string | null;
+  business_analysis_id?: string | null;
   result_summary?: Record<string, unknown> | null;
   created_at?: string;
 };
@@ -251,12 +252,7 @@ export class BusinessIntelligenceService {
     if (existing?.analysis_status === 'completed' && existing.completion_percentage === 100) {
       return { analysis: existing, intelligence: null, profile: profileFromPersistedAnalysis(existing) };
     }
-    if (existing && ['queued', 'processing'].includes(existing.analysis_status)) {
-      const completed = await this.waitForPersistedAnalysis(existing.id);
-      return { analysis: completed, intelligence: null, profile: profileFromPersistedAnalysis(completed) };
-    }
-
-    const analysis = existing?.analysis_status === 'failed'
+    const analysis = existing && ['queued', 'processing', 'failed'].includes(existing.analysis_status)
       ? await this.refreshAnalysis(existing.id)
       : await this.startAnalysis(workspaceId, website, companyName);
 
@@ -266,7 +262,8 @@ export class BusinessIntelligenceService {
         completion_percentage: 10,
       });
 
-      const requestId = await this.startResearchRequest(workspaceId, website, companyName);
+      const requestId = await this.startResearchRequest(workspaceId, website, companyName, analysis.id);
+      await this.updateAnalysis(analysis.id, { research_request_id: requestId });
       const request = await this.waitForResearch(requestId, analysis.id, onStatus);
       const intelligence = await this.loadResearchIntelligence(request, workspaceId, website, companyName);
 
@@ -303,30 +300,19 @@ export class BusinessIntelligenceService {
     }
   }
 
-  private async startResearchRequest(workspaceId: string, website: string, companyName: string): Promise<string> {
-    const apiUrl = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/research-start`;
-    const response = await fetch(apiUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`,
-      },
-      body: JSON.stringify({
+  private async startResearchRequest(workspaceId: string, website: string, companyName: string, analysisId: string): Promise<string> {
+    const { data, error } = await supabase.functions.invoke('research-start', {
+      body: {
         company_name: companyName,
         website,
         request_type: 'full_intelligence',
         workspace_id: workspaceId,
-      }),
+        analysis_id: analysisId,
+      },
     });
-
-    if (!response.ok) {
-      const error = await response.json().catch(() => ({ error: 'Research request failed' }));
-      throw new Error(error.error ?? `Research start failed (HTTP ${response.status})`);
-    }
-
-    const payload = await response.json();
-    if (!payload?.request_id) throw new Error('Research service did not return a request_id.');
-    return payload.request_id as string;
+    if (error) throw new Error(`Research could not start: ${error.message}`);
+    if (!data?.request_id) throw new Error('Research service did not return a request id.');
+    return data.request_id as string;
   }
 
   private async waitForResearch(
@@ -362,7 +348,7 @@ export class BusinessIntelligenceService {
       await sleep(POLL_INTERVAL_MS);
     }
 
-    throw new Error('Business research timed out after 120 seconds. Please retry.');
+    throw new Error('We could not finish analyzing this website. Please retry the analysis.');
   }
 
   private async syncAnalysisProgress(analysisId: string, status: ResearchStatus): Promise<void> {
@@ -581,16 +567,6 @@ export class BusinessIntelligenceService {
     return data ? this.loadAnalysis(data.id) : null;
   }
 
-  private async waitForPersistedAnalysis(analysisId: string): Promise<FullAnalysis> {
-    const startedAt = Date.now();
-    while (Date.now() - startedAt < RESEARCH_TIMEOUT_MS) {
-      const analysis = await this.loadAnalysis(analysisId);
-      if (analysis?.analysis_status === 'completed' && analysis.completion_percentage === 100) return analysis;
-      if (analysis?.analysis_status === 'failed') throw new Error('Business analysis failed.');
-      await sleep(POLL_INTERVAL_MS);
-    }
-    throw new Error('Business analysis is still processing. Please try again shortly.');
-  }
 
   async refreshAnalysis(analysisId: string): Promise<BusinessAnalysis> {
     const { data, error } = await supabase

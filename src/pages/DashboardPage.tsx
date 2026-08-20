@@ -17,6 +17,9 @@ import { supabase } from '@/lib/supabase';
 import { useWorkspace } from '@/contexts/WorkspaceContext';
 import { useAuth } from '@/contexts/AuthContext';
 import { timeAgo, formatNumber, cn } from '@/lib/utils';
+import { useGoogleConnection } from '@/hooks/useGoogleAuth';
+import { useLinkedInAccounts } from '@/hooks/useLinkedInBrowser';
+import { GOOGLE_SCOPES } from '@/types/google-auth';
 
 type DateRange = 'today' | 'week' | 'month' | 'all';
 
@@ -24,6 +27,8 @@ export function DashboardPage() {
   const navigate = useNavigate();
   const { workspace } = useWorkspace();
   const { user } = useAuth();
+  const googleConnection = useGoogleConnection();
+  const linkedinAccounts = useLinkedInAccounts();
   const [range, setRange] = useState<DateRange>('week');
 
   const { data, isLoading, isError } = useQuery({
@@ -35,17 +40,16 @@ export function DashboardPage() {
 
       const [
         campaigns, prospects, meetings, messages, upcomingMeetings,
-        repliedProspects, proposals, integrations, executionJobs, linkedinMessages,
+        repliedProspects, proposals, executionJobs, linkedinMessages,
         linkedinConversations, qualifiedContacts, meetingConfirmations, customerCampaigns,
       ] = await Promise.all([
-        supabase.from('campaigns').select('id, name, status, created_at').eq('workspace_id', wsId).order('created_at', { ascending: false }),
-        supabase.from('prospects').select('id, status', { count: 'exact', head: true }).eq('workspace_id', wsId),
+        supabase.from('customer_campaigns').select('id, name, status, created_at').eq('workspace_id', wsId).order('created_at', { ascending: false }),
+        supabase.from('contacts').select('id', { count: 'exact', head: true }).eq('workspace_id', wsId),
         supabase.from('meetings').select('id, status', { count: 'exact', head: true }).eq('workspace_id', wsId).eq('status', 'scheduled'),
-        supabase.from('messages').select('id, direction', { count: 'exact', head: true }).eq('workspace_id', wsId),
+        supabase.from('messages').select('id, direction').eq('workspace_id', wsId),
         supabase.from('meetings').select('id, title, scheduled_at, duration_minutes, prospect_id').eq('workspace_id', wsId).eq('status', 'scheduled').gte('scheduled_at', new Date().toISOString()).order('scheduled_at', { ascending: true }).limit(5),
         supabase.from('prospects').select('id, first_name, last_name, title, company_name, status, created_at').eq('workspace_id', wsId).eq('status', 'replied').order('created_at', { ascending: false }).limit(5),
         supabase.from('proposal_approvals').select('id, approval_status, approval_notes, created_at').eq('workspace_id', wsId).eq('approval_status', 'pending').order('created_at', { ascending: false }).limit(5),
-        supabase.from('integrations').select('id, provider, status').eq('workspace_id', wsId).in('provider', ['linkedin', 'gmail', 'google_calendar']),
         supabase.from('linkedin_execution_jobs').select('contact_id,action_type,status').eq('workspace_id', wsId),
         supabase.from('linkedin_messages').select('direction,classification').eq('workspace_id', wsId),
         supabase.from('linkedin_conversations').select('stage').eq('workspace_id', wsId),
@@ -57,7 +61,7 @@ export function DashboardPage() {
       const sent = messages.data?.filter(m => m.direction === 'sent').length ?? 0;
       const received = messages.data?.filter(m => m.direction === 'received').length ?? 0;
       const replyRate = sent > 0 ? Math.round((received / sent) * 100) : 0;
-      const activeCampaigns = campaigns.data?.filter(c => c.status === 'active') ?? [];
+      const activeCampaigns = campaigns.data?.filter(c => c.status === 'running') ?? [];
 
       return {
         campaigns: campaigns.data ?? [],
@@ -69,10 +73,10 @@ export function DashboardPage() {
         upcoming: upcomingMeetings.data ?? [],
         hotProspects: repliedProspects.data ?? [],
         pendingApprovals: proposals.data ?? [],
-        integrations: integrations.data ?? [],
         activeCampaignCount: activeCampaigns.length,
         metrics: {
           activeCampaigns: customerCampaigns.data?.filter(c => c.status === 'running').length ?? activeCampaigns.length,
+          prospectsDiscovered: prospects.count ?? 0,
           prospectsContacted: new Set((executionJobs.data ?? []).map(j => j.contact_id).filter(Boolean)).size,
           connectionsSent: executionJobs.data?.filter(j => j.action_type === 'connection_request' && j.status === 'completed').length ?? 0,
           connectionsAccepted: executionJobs.data?.filter(j => j.action_type === 'check_connection_acceptance' && j.status === 'completed').length ?? 0,
@@ -138,9 +142,11 @@ export function DashboardPage() {
     });
   }
 
-  const linkedinConnected = d.integrations.some(i => i.provider === 'linkedin' && i.status === 'active');
-  const gmailConnected = d.integrations.some(i => i.provider === 'gmail' && i.status === 'active');
-  const calendarConnected = d.integrations.some(i => i.provider === 'google_calendar' && i.status === 'active');
+  const linkedinConnected = (linkedinAccounts.data ?? []).some(a => a.connection_state === 'connected' && ['healthy', 'degraded'].includes(a.health_status));
+  const googleScopes = new Set(googleConnection.data?.token?.scope?.split(' ').filter(Boolean) ?? []);
+  const googleReady = googleConnection.data?.account?.status === 'connected' && !googleConnection.data?.needsReconnect;
+  const gmailConnected = googleReady && googleScopes.has(GOOGLE_SCOPES.GMAIL_SEND);
+  const calendarConnected = googleReady && (googleScopes.has(GOOGLE_SCOPES.CALENDAR) || googleScopes.has(GOOGLE_SCOPES.CALENDAR_EVENTS));
 
   if (!linkedinConnected) {
     tasks.push({ icon: Linkedin, title: 'Reconnect LinkedIn', desc: 'Your LinkedIn account needs to be reconnected to continue outreach', tone: 'error', action: 'Reconnect', onClick: () => navigate('/app/integrations') });
@@ -176,6 +182,7 @@ export function DashboardPage() {
       {/* ─── KPI Summary ─── */}
       <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-5 gap-4">
         <SummaryCard label="Active Campaigns" value={formatNumber(d.metrics.activeCampaigns)} icon={Rocket} tone="brand" />
+        <SummaryCard label="Prospects Discovered" value={formatNumber(d.metrics.prospectsDiscovered)} icon={Target} tone="gold" />
         <SummaryCard label="Prospects Contacted" value={formatNumber(d.metrics.prospectsContacted)} icon={Users} tone="gold" />
         <SummaryCard label="Connections Sent" value={formatNumber(d.metrics.connectionsSent)} icon={Linkedin} tone="brand" />
         <SummaryCard label="Connections Accepted" value={formatNumber(d.metrics.connectionsAccepted)} icon={CheckCircle2} tone="success" />
@@ -270,7 +277,7 @@ export function DashboardPage() {
         <SectionHeader title="Revenue Insights" icon={BarChart3} action={() => navigate('/app/analytics')} />
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
           <InsightCard icon={Award} label="Best Performing Campaign" value={d.campaigns[0]?.name ?? '—'} sub={d.campaigns.length > 0 ? `${d.replyRate}% reply rate` : 'Launch a campaign to see insights'} />
-          <InsightCard icon={Clock3} label="Best Time to Send" value="Tue–Thu, 9–11 AM" sub="Based on your industry" />
+          <InsightCard icon={Clock3} label="Best Time to Send" value="Not enough data" sub="Calculated after confirmed outreach events" />
           <InsightCard icon={TrendingUp} label="Conversion Trend" value={d.receivedCount > 0 ? 'Improving' : '—'} sub={d.receivedCount > 0 ? `${d.receivedCount} replies this period` : 'No data yet'} />
         </div>
       </section>
@@ -441,14 +448,14 @@ function CampaignCard({ name, status, onClick }: {
         <div className="flex items-center gap-2.5">
           <div className={cn(
             'flex h-9 w-9 items-center justify-center rounded-xl border',
-            status === 'active' ? 'bg-success-500/10 text-success-500 border-success-500/20' :
+            status === 'running' ? 'bg-success-500/10 text-success-500 border-success-500/20' :
             status === 'draft' ? 'bg-maroon-800/40 text-ink-500 border-gold-500/10' : 'bg-warning-500/10 text-warning-500 border-warning-500/20'
           )}>
             <Rocket className="h-4 w-4" />
           </div>
           <p className="text-sm font-medium text-ink-100 truncate">{name}</p>
         </div>
-        <Badge tone={status === 'active' ? 'success' : status === 'draft' ? 'neutral' : 'warning'} dot>
+        <Badge tone={status === 'running' ? 'success' : status === 'draft' ? 'neutral' : 'warning'} dot>
           {status}
         </Badge>
       </div>

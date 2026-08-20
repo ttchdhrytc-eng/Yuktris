@@ -42,6 +42,7 @@ export type BusinessAnalysis = {
   completion_percentage: number;
   analysis_status: AnalysisStatus;
   error_message: string | null;
+  research_request_id: string | null;
   created_at: string;
   updated_at: string;
 };
