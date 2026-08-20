@@ -100,13 +100,13 @@ function Lazy({ children }: { children: React.ReactNode }) {
 
 function ProtectedApp({ children }: { children: React.ReactNode }) {
   return (
-    <ProtectedRoute>
-      <AppLayout>
-        <ErrorBoundary>
+    <ErrorBoundary>
+      <ProtectedRoute>
+        <AppLayout>
           <Lazy>{children}</Lazy>
-        </ErrorBoundary>
-      </AppLayout>
-    </ProtectedRoute>
+        </AppLayout>
+      </ProtectedRoute>
+    </ErrorBoundary>
   );
 }
 

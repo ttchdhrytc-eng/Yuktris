@@ -8,6 +8,7 @@ type WorkspaceContextValue = {
   workspaces: AuthWorkspace[];
   members: WorkspaceMember[];
   loading: boolean;
+  error: string | null;
   selectedCompany: string | null;
   setSelectedCompany: (company: string | null) => void;
   refresh: () => Promise<void>;
@@ -34,6 +35,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const [workspace, setWorkspaceState] = useState<AuthWorkspace | null>(null);
   const [members, setMembers] = useState<WorkspaceMember[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [selectedCompany, setSelectedCompany] = useState<string | null>(() => {
     return localStorage.getItem('revenueai_selected_company');
   });
@@ -47,6 +49,8 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   }, [selectedCompany]);
 
   const refresh = async () => {
+    setLoading(true);
+    setError(null);
     if (!user) {
       setWorkspaces([]);
       setWorkspaceState(null);
@@ -55,23 +59,26 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       return;
     }
 
-    const list = await authService.getWorkspaces(user.id);
-    setWorkspaces(list);
-
-    const stored = localStorage.getItem('revenueai_workspace_id');
-    const found = stored ? list.find((w) => w.id === stored) : null;
-    const current = found ?? list[0] ?? null;
-    setWorkspaceState(current);
-
-    if (current) {
-      localStorage.setItem('revenueai_workspace_id', current.id);
-      const m = await authService.getWorkspaceMembers(current.id);
-      setMembers(m);
-    } else {
+    try {
+      const list = await authService.getWorkspaces(user.id);
+      setWorkspaces(list);
+      const stored = localStorage.getItem('revenueai_workspace_id');
+      const found = stored ? list.find((w) => w.id === stored) : null;
+      const current = found ?? list[0] ?? null;
+      setWorkspaceState(current);
+      if (current) {
+        localStorage.setItem('revenueai_workspace_id', current.id);
+        setMembers(await authService.getWorkspaceMembers(current.id));
+      } else {
+        setMembers([]);
+      }
+    } catch (cause) {
+      setWorkspaceState(null);
       setMembers([]);
+      setError(cause instanceof Error ? cause.message : 'Could not restore your workspace.');
+    } finally {
+      setLoading(false);
     }
-
-    setLoading(false);
   };
 
   useEffect(() => {
@@ -138,6 +145,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         workspaces,
         members,
         loading,
+        error,
         selectedCompany,
         setSelectedCompany,
         refresh,

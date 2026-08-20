@@ -26,6 +26,10 @@ const campaignsPage = readFileSync(resolve(process.cwd(), '../../src/pages/Campa
 const campaignMetrics = readFileSync(resolve(process.cwd(), '../../src/services/campaign-metrics.ts'), 'utf8');
 const releaseClosure = readFileSync(resolve(process.cwd(), '../../supabase/migrations/20260820233000_campaign_release_closure.sql'), 'utf8');
 const sidebar = readFileSync(resolve(process.cwd(), '../../src/components/layout/Sidebar.tsx'), 'utf8');
+const app = readFileSync(resolve(process.cwd(), '../../src/App.tsx'), 'utf8');
+const errorBoundary = readFileSync(resolve(process.cwd(), '../../src/components/ErrorBoundary.tsx'), 'utf8');
+const protectedRoute = readFileSync(resolve(process.cwd(), '../../src/components/ProtectedRoute.tsx'), 'utf8');
+const workspaceContext = readFileSync(resolve(process.cwd(), '../../src/contexts/WorkspaceContext.tsx'), 'utf8');
 const conversationReconciliation = readFileSync(resolve(process.cwd(), '../../supabase/migrations/20260820120000_linkedin_conversation_reconciliation_idempotency.sql'), 'utf8');
 
 test('all current writes share one preflight before the switch', () => {
@@ -240,6 +244,21 @@ test('customer campaign cards use canonical lifecycle labels and persisted V1 me
 test('normal customer navigation excludes internal architecture routes', () => {
   for (const label of ['Dashboard', 'Campaigns', 'ICP / Audience', 'Inbox', 'Meetings', 'Connections', 'Settings']) assert.match(sidebar, new RegExp(`label: '${label.replace('/', '\\/')}'`));
   for (const internal of ['Revenue Strategy', 'Prospect Discovery', 'Outreach Intelligence', 'Integration Health', 'Execution Queue']) assert.doesNotMatch(sidebar, new RegExp(internal));
+});
+test('authenticated app layout imports every rendered icon and cannot fail on Sidebar Zap', () => {
+  assert.match(sidebar, /Plug, Settings, Sparkles, ChevronDown, Rocket,[\s\S]*Zap,[\s\S]*from 'lucide-react'/);
+  assert.match(sidebar, /<Zap className=/);
+});
+test('top-level customer error boundary covers route guard, layout and lazy dashboard', () => {
+  assert.match(app, /<ErrorBoundary>[\s\S]*<ProtectedRoute>[\s\S]*<AppLayout>[\s\S]*<Lazy>\{children\}<\/Lazy>/);
+  for (const action of ['Retry', 'Return to Dashboard', 'Sign out']) assert.match(errorBoundary, new RegExp(action));
+  assert.match(errorBoundary, /Something went wrong loading Yuktris/);
+  assert.doesNotMatch(errorBoundary, /\{this\.state\.error\?\.message/);
+});
+test('auth and workspace bootstrap use explicit loading, ready and recoverable error states', () => {
+  assert.match(protectedRoute, /loading \|\| wsLoading[\s\S]*authError \|\| workspaceError[\s\S]*Retry/);
+  assert.match(workspaceContext, /try \{[\s\S]*getWorkspaces[\s\S]*catch \(cause\)[\s\S]*finally \{[\s\S]*setLoading\(false\)/);
+  assert.doesNotMatch(protectedRoute, /return null/);
 });
 test('conversation reconciliation derives its projection from authoritative messages', () => {
   assert.match(conversationReconciliation, /reconcile_linkedin_v1_pipeline_state_transitions/);

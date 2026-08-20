@@ -13,8 +13,8 @@ type ProtectedRouteProps = {
 };
 
 export function ProtectedRoute({ children, requiredPermission }: ProtectedRouteProps) {
-  const { user, loading } = useAuth();
-  const { workspace, loading: wsLoading } = useWorkspace();
+  const { user, loading, error: authError } = useAuth();
+  const { workspace, loading: wsLoading, error: workspaceError, refresh } = useWorkspace();
   const { can } = usePermissions();
   const location = useLocation();
 
@@ -22,6 +22,17 @@ export function ProtectedRoute({ children, requiredPermission }: ProtectedRouteP
     return (
       <div className="flex h-screen items-center justify-center bg-maroon-950">
         <Spinner className="h-8 w-8" />
+      </div>
+    );
+  }
+
+  if (authError || workspaceError) {
+    return (
+      <div className="flex h-screen flex-col items-center justify-center bg-maroon-950 gap-4 p-6">
+        <AlertCircle className="h-8 w-8 text-error-500" />
+        <h2 className="text-lg font-semibold text-ink-100">We could not load your Yuktris workspace.</h2>
+        <p className="max-w-md text-center text-sm text-ink-400">Check your connection and retry. Your saved onboarding progress is safe.</p>
+        <button onClick={() => void refresh()} className="rounded-xl bg-gold-400 px-4 py-2 text-sm font-semibold text-maroon-950">Retry</button>
       </div>
     );
   }

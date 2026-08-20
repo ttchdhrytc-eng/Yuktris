@@ -10,6 +10,7 @@ type AuthContextValue = {
   session: Session | null;
   profile: Profile | null;
   loading: boolean;
+  error: string | null;
   signOut: () => Promise<void>;
   refreshUser: () => Promise<void>;
   hasPermission: (permission: Permission) => boolean;
@@ -22,6 +23,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [session, setSession] = useState<Session | null>(null);
   const [user, setUser] = useState<AuthUser | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   const loadUser = useCallback(async (currentSession: Session | null) => {
     if (!currentSession) {
@@ -29,8 +31,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       return;
     }
 
-    const authUser = await authService.getCurrentUser();
-    setUser(authUser);
+    try {
+      const authUser = await authService.getCurrentUser();
+      setUser(authUser);
+      setError(null);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Could not restore your account.');
+      throw cause;
+    }
   }, []);
 
   useEffect(() => {
@@ -39,9 +47,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     supabase.auth.getSession().then(({ data }) => {
       if (!mounted) return;
       setSession(data.session);
-      loadUser(data.session).finally(() => {
+      loadUser(data.session).catch(() => undefined).finally(() => {
         if (mounted) setLoading(false);
       });
+    }).catch((cause) => {
+      if (!mounted) return;
+      setError(cause instanceof Error ? cause.message : 'Could not restore your session.');
+      setLoading(false);
     });
 
     const { data: listener } = supabase.auth.onAuthStateChange((_event, newSession) => {
@@ -49,7 +61,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
       if (newSession) {
         (async () => {
-          await loadUser(newSession);
+          await loadUser(newSession).catch(() => undefined);
         })();
       } else {
         setUser(null);
@@ -69,6 +81,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   const refreshUser = async () => {
+    setError(null);
     await loadUser(session);
   };
 
@@ -86,6 +99,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         session,
         profile,
         loading,
+        error,
         signOut,
         refreshUser,
         hasPermission: checkPermission,
