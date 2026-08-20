@@ -240,6 +240,15 @@ export function OnboardingPage() {
 
         const generatedIcps = await activationService.generateICPs(workspaceId, profile);
         setIcps(generatedIcps);
+        const primaryIcp = generatedIcps[0];
+        if (primaryIcp) {
+          setBusinessProfile({
+            ...profile,
+            decisionMakers: primaryIcp.jobTitles.join(', '),
+            painPoints: primaryIcp.painPoints.join(', '),
+            goals: primaryIcp.goals.join(', '),
+          });
+        }
 
         await refresh();
         setStep('icp');
@@ -265,18 +274,19 @@ export function OnboardingPage() {
       // Apply review edits to the business profile before launching
       const finalProfile = applyEdits(businessProfile, editing);
 
-      await activationService.launchCampaign({
+      const result = await activationService.initializeCampaign({
         workspaceId,
         icp,
         goal,
         channels,
         businessProfile: finalProfile ?? undefined,
+        linkedinAccountId,
       });
 
       await activationService.completeActivation(workspaceId);
       await refresh();
 
-      toast.success("Your AI sales team is now working.");
+      toast.success(result.status === 'ready' ? 'Campaign saved and ready to launch.' : result.message);
       setTimeout(() => navigate('/app'), 2000);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Failed to launch.');
@@ -806,9 +816,9 @@ export function OnboardingPage() {
                 <div className="flex h-20 w-20 items-center justify-center rounded-3xl bg-gradient-to-r from-gold-400 to-gold-300 shadow-lg mx-auto animate-float">
                   <Rocket className="h-10 w-10 text-ink-50" />
                 </div>
-                <h2 className="text-3xl font-bold text-ink-50 tracking-tight mt-6">Ready to launch</h2>
+                <h2 className="text-3xl font-bold text-ink-50 tracking-tight mt-6">Review your setup</h2>
                 <p className="text-sm text-ink-500 mt-2 max-w-md mx-auto leading-relaxed">
-                  Your AI sales team is ready to start finding prospects and booking meetings. Here's what they'll do:
+                  Save this configuration now. Outreach starts only after you explicitly launch from Campaigns and all connections are ready.
                 </p>
               </div>
 
@@ -854,7 +864,7 @@ export function OnboardingPage() {
                 <Button variant="ghost" onClick={goBack}><ArrowLeft className="h-4 w-4" /> Back</Button>
                 <Button variant="glow" size="xl" onClick={handleLaunch} loading={loading}>
                   <Rocket className="h-5 w-5" />
-                  Launch My AI Sales Team
+                  Save &amp; Finish Setup
                 </Button>
               </div>
 
@@ -866,8 +876,8 @@ export function OnboardingPage() {
                       <PartyPopper className="h-12 w-12 text-ink-50" />
                     </div>
                     <div>
-                      <h2 className="text-3xl font-bold text-ink-50">Your AI sales team is live!</h2>
-                      <p className="text-sm text-ink-500 mt-2">They're already starting to find prospects for you.</p>
+                      <h2 className="text-3xl font-bold text-ink-50">Saving your campaign setup</h2>
+                      <p className="text-sm text-ink-500 mt-2">No outreach will be sent during onboarding.</p>
                     </div>
                     <div className="max-w-md mx-auto space-y-2">
                       {progress.map((p, i) => (

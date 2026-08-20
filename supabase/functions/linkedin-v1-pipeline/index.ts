@@ -59,6 +59,63 @@ Deno.serve(async (req: Request) => {
       });
     }
 
+    if (action === "initialize") {
+      const icp = (body.icp ?? {}) as ICP;
+      const selectedAccountId = optionalString(body.linkedin_account_id);
+      const campaignInput = (body.campaign ?? {}) as Json;
+      const sourceCampaignId = optionalString(campaignInput.source_campaign_id);
+      const missing: string[] = [];
+
+      if (!icp.name?.trim() || !icp.industry?.trim() || !icp.companySize?.trim()
+        || !icp.jobTitles?.length || !icp.painPoints?.length) missing.push("meaningful_icp");
+
+      const { data: googleAccounts, error: googleError } = await admin.from("google_accounts")
+        .select("id,oauth_tokens!inner(scope,refresh_token)").eq("workspace_id", workspaceId)
+        .eq("status", "connected").eq("is_primary", true).limit(1);
+      if (googleError) throw new Error(`Google connection validation failed: ${googleError.message}`);
+      const tokenRelation = (googleAccounts?.[0] as Json | undefined)?.oauth_tokens as Array<Json> | Json | undefined;
+      const token = Array.isArray(tokenRelation) ? tokenRelation[0] : tokenRelation;
+      const scopes = String(token?.scope ?? "").split(/\s+/);
+      if (!googleAccounts?.length || !token?.refresh_token) missing.push("google_reauthorization");
+      if (!scopes.some((scope) => scope.includes("gmail."))) missing.push("gmail_authorization");
+      if (!scopes.includes("https://www.googleapis.com/auth/calendar")
+        && !scopes.includes("https://www.googleapis.com/auth/calendar.events")) missing.push("calendar_authorization");
+
+      let linkedinQuery = admin.from("linkedin_accounts")
+        .select("id,connection_state,status,health_status,profile_url,expected_profile_url")
+        .eq("workspace_id", workspaceId);
+      if (selectedAccountId) linkedinQuery = linkedinQuery.eq("id", selectedAccountId);
+      const { data: linkedin, error: linkedinError } = await linkedinQuery.limit(1).maybeSingle();
+      if (linkedinError) throw new Error(`LinkedIn account validation failed: ${linkedinError.message}`);
+      if (!selectedAccountId) missing.push("linkedin_account_selection");
+      if (!linkedin || linkedin.connection_state !== "connected") missing.push("linkedin_connection");
+      if (linkedin && !["healthy", "degraded"].includes(linkedin.health_status)) missing.push("linkedin_session_health");
+      if (linkedin && (!linkedin.profile_url || !linkedin.expected_profile_url
+        || normalizeLinkedInProfile(linkedin.profile_url) !== normalizeLinkedInProfile(linkedin.expected_profile_url))) {
+        missing.push("linkedin_identity_validation");
+      }
+
+      const status = missing.length ? "blocked_prerequisite" : "ready";
+      const message = missing.length
+        ? `Campaign saved. Complete these connections before launch: ${missing.map(requirementLabel).join(", ")}.`
+        : "Campaign saved and prerequisites validated. Launch it explicitly from Campaigns when ready.";
+      const row = {
+        workspace_id: workspaceId,
+        name: typeof campaignInput.name === "string" && campaignInput.name.trim() ? campaignInput.name.trim() : `${icp.name ?? "Campaign"} outreach`,
+        icp,
+        linkedin_account_id: linkedin?.id ?? null,
+        source_campaign_id: sourceCampaignId ?? null,
+        status,
+        status_reason: message,
+      };
+      const query = sourceCampaignId
+        ? admin.from("customer_campaigns").upsert(row, { onConflict: "workspace_id,source_campaign_id" })
+        : admin.from("customer_campaigns").insert(row);
+      const { data: campaign, error: campaignError } = await query.select("id").single();
+      if (campaignError) throw new Error(`Campaign initialization failed: ${campaignError.message}`);
+      return json({ ok: true, status, campaign_id: campaign.id, missing_requirements: [...new Set(missing)], message });
+    }
+
     if (action === "launch") {
       const icp = (body.icp ?? {}) as ICP;
       const genericCampaignId = optionalString(body.campaign_id);
@@ -455,6 +512,18 @@ function cleanCompanyName(title: string, host: string): string | null {
   return candidate;
 }
 function optionalString(value: unknown): string | undefined { return typeof value === "string" && value.trim() ? value.trim() : undefined; }
+function requirementLabel(code: string): string {
+  return ({
+    meaningful_icp: "review the ideal customer profile",
+    google_reauthorization: "reconnect Google",
+    gmail_authorization: "authorize Gmail",
+    calendar_authorization: "authorize Google Calendar",
+    linkedin_account_selection: "select a LinkedIn account",
+    linkedin_connection: "connect LinkedIn",
+    linkedin_session_health: "restore the LinkedIn session",
+    linkedin_identity_validation: "confirm the LinkedIn profile identity",
+  } as Record<string, string>)[code] ?? code;
+}
 function requireString(value: unknown, name: string): string { const s = optionalString(value); if (!s) throw new Error(`${name} is required`); return s; }
 function clampNumber(value: unknown, min: number, max: number, fallback: number): number { const n = typeof value === "number" ? value : Number(value); return Number.isFinite(n) ? Math.max(min, Math.min(max, Math.floor(n))) : fallback; }
 function json(data: Json, status = 200): Response { return new Response(JSON.stringify(data), { status, headers: { ...corsHeaders, "Content-Type": "application/json" } }); }

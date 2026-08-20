@@ -44,6 +44,9 @@ export interface BusinessProfile {
   pricingModel: string;
   technologies: string[];
   businessModel: string;
+  decisionMakers?: string;
+  painPoints?: string;
+  goals?: string;
 }
 
 export interface ICPRecommendation {
@@ -54,6 +57,7 @@ export interface ICPRecommendation {
   companySize: string;
   jobTitles: string[];
   painPoints: string[];
+  goals: string[];
   estimatedTam: string;
   estimatedReplyRate: string;
   estimatedMeetingRate: string;
@@ -242,32 +246,17 @@ class ActivationService {
     this.updateStep('icp', 'Generating ICP recommendations...', false);
 
     try {
-      const generated = await icpService.generateICPs({
-        workspaceId,
-        businessSummary: {
-          company_name: businessProfile.name,
-          website: businessProfile.website,
-          description: businessProfile.description,
-          industry: businessProfile.industry,
-          services: businessProfile.services,
-          usp: businessProfile.usp,
-          competitors: businessProfile.competitors,
-          target_audience: businessProfile.targetCustomers,
-          pricing_model: businessProfile.pricingModel,
-          technology_stack: businessProfile.technologies,
-          business_model: businessProfile.businessModel,
-        },
-        companyName: businessProfile.name,
-      });
+      const { icps: generated } = await icpService.generateFullPipeline(workspaceId, businessProfile.name);
 
       const icps: ICPRecommendation[] = generated.map((icp, index) => ({
-        id: `icp_${index}`,
+        id: icp.id,
         name: icp.name,
         description: icp.description,
         industry: icp.company_profile.industry,
         companySize: icp.company_profile.company_size,
         jobTitles: icp.decision_makers.map((dm) => dm.job_title),
         painPoints: icp.pain_points.map((p) => p.pain_point),
+        goals: icp.goals.map((g) => g.goal),
         estimatedTam: icp.estimated_deal_size ?? '$10K+ ARR per deal',
         estimatedReplyRate: `${icp.conversion_rate}%`,
         estimatedMeetingRate: `${Math.round(icp.conversion_rate * 0.3)}%`,
@@ -279,9 +268,9 @@ class ActivationService {
 
       this.updateStep('icp', 'ICPs generated', true);
       return icps;
-    } catch {
-      this.updateStep('icp', 'ICPs generated', true);
-      return generateFallbackICPs(businessProfile);
+    } catch (error) {
+      this.updateStep('icp', 'ICP generation needs attention', false);
+      throw new Error(error instanceof Error ? `ICP generation failed: ${error.message}` : 'ICP generation failed. Please try again.');
     }
   }
 
@@ -289,13 +278,14 @@ class ActivationService {
   // Step 4: Create campaign + seed AI activity
   // ----------------------------------------------------------
 
-  async launchCampaign(params: {
+  async initializeCampaign(params: {
     workspaceId: string;
     icp: ICPRecommendation;
     goal: string;
     channels: { linkedin: boolean; email: boolean };
     businessProfile?: BusinessProfile;
-  }): Promise<string> {
+    linkedinAccountId?: string | null;
+  }): Promise<{ campaignId: string; status: 'ready' | 'blocked_prerequisite'; message: string }> {
     this.updateStep('campaign', 'Creating your campaign...', false);
 
     const channelStr = [
@@ -311,7 +301,7 @@ class ActivationService {
         workspace_id: params.workspaceId,
         name: `${params.icp.name} — ${goalLabel}`,
         description: `Targeting ${params.icp.name}. Channels: ${channelStr}. Goal: ${goalLabel}.`,
-        status: 'active',
+        status: 'draft',
         start_date: new Date().toISOString().split('T')[0],
       })
       .select()
@@ -335,26 +325,30 @@ class ActivationService {
       this.updateStep('campaign', 'Starting LinkedIn prospect discovery...', false);
       const { data: pipeline, error: pipelineError } = await supabase.functions.invoke('linkedin-v1-pipeline', {
         body: {
-          action: 'launch',
+          action: 'initialize',
           workspace_id: params.workspaceId,
           campaign_id: campaignId,
           icp: params.icp,
-          max_prospects: 5,
+          linkedin_account_id: params.linkedinAccountId,
+          campaign: { name: campaign.name, source_campaign_id: campaignId },
         },
       });
       if (pipelineError) {
-        throw new Error(`LinkedIn pipeline launch failed: ${pipelineError.message}`);
+        throw new Error(`Campaign setup failed: ${pipelineError.message}`);
       }
       if ((pipeline as { error?: string } | null)?.error) {
-        throw new Error(`LinkedIn pipeline launch failed: ${(pipeline as { error: string }).error}`);
+        throw new Error(`Campaign setup failed: ${(pipeline as { error: string }).error}`);
       }
-      this.updateStep('campaign', 'LinkedIn prospecting and outreach queued', true);
+      const result = pipeline as { status?: 'ready' | 'blocked_prerequisite'; message?: string } | null;
+      this.updateStep('campaign', result?.status === 'ready' ? 'Campaign ready to launch' : 'Campaign saved; connections required', true);
+      this.updateStep('complete', 'Activation complete', true);
+      return { campaignId, status: result?.status ?? 'blocked_prerequisite', message: result?.message ?? 'Campaign saved.' };
     } else {
       this.updateStep('campaign', 'Campaign created', true);
     }
 
     this.updateStep('complete', 'Activation complete', true);
-    return campaignId;
+    return { campaignId, status: 'ready', message: 'Campaign saved and ready.' };
   }
 
   // ----------------------------------------------------------
@@ -367,59 +361,6 @@ class ActivationService {
       .update({ onboarding_completed: true })
       .eq('id', workspaceId);
   }
-}
-
-function generateFallbackICPs(profile: BusinessProfile): ICPRecommendation[] {
-  return [
-    {
-      id: 'icp_1',
-      name: 'Enterprise Companies',
-      description: 'Large enterprises with 500+ employees that need scalable solutions and have dedicated budgets.',
-      industry: profile.industry || 'Enterprise',
-      companySize: '500+ employees',
-      jobTitles: ['CEO', 'CTO', 'VP Operations'],
-      painPoints: ['Scalability challenges', 'Process inefficiencies', 'Need for automation'],
-      estimatedTam: '~15,000 companies',
-      estimatedReplyRate: '8-12%',
-      estimatedMeetingRate: '2-3%',
-      competition: 'High',
-      difficulty: 'Hard',
-      confidence: 85,
-      recommended: true,
-    },
-    {
-      id: 'icp_2',
-      name: 'Mid-Market Companies',
-      description: 'Growing companies with 50-500 employees looking for cost-effective solutions.',
-      industry: profile.industry || 'Mid-Market',
-      companySize: '50-500 employees',
-      jobTitles: ['Founder', 'CEO', 'COO', 'VP Sales'],
-      painPoints: ['Limited resources', 'Need for efficiency', 'Scaling challenges'],
-      estimatedTam: '~8,000 companies',
-      estimatedReplyRate: '10-15%',
-      estimatedMeetingRate: '3-4%',
-      competition: 'Medium',
-      difficulty: 'Medium',
-      confidence: 88,
-      recommended: false,
-    },
-    {
-      id: 'icp_3',
-      name: 'Small Businesses',
-      description: 'Small businesses with 10-50 employees seeking affordable, easy-to-implement solutions.',
-      industry: profile.industry || 'SMB',
-      companySize: '10-50 employees',
-      jobTitles: ['Owner', 'Founder', 'CEO'],
-      painPoints: ['Budget constraints', 'Time limitations', 'Need for simple solutions'],
-      estimatedTam: '~5,000 companies',
-      estimatedReplyRate: '12-18%',
-      estimatedMeetingRate: '4-5%',
-      competition: 'Low',
-      difficulty: 'Easy',
-      confidence: 82,
-      recommended: false,
-    },
-  ];
 }
 
 export const activationService = new ActivationService();
