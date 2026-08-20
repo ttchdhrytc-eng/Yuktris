@@ -98,6 +98,29 @@ Deno.serve(async (req: Request) => {
       return json({ ok: true, status: "reconciled", campaigns_reconciled: reconciled });
     }
 
+    if (action === "reconcile_campaign_state") {
+      const { data: campaigns, error: campaignsError } = await admin.from("customer_campaigns")
+        .select("id").eq("workspace_id", workspaceId).eq("status", "running");
+      if (campaignsError) throw pipelineError("campaign_lookup_failed", `Campaign validation failed: ${campaignsError.message}`, 500);
+      let reconciled = 0;
+      for (const campaign of campaigns ?? []) {
+        const { data: jobs, error: jobsError } = await admin.from("linkedin_execution_jobs")
+          .select("id,status").eq("workspace_id", workspaceId)
+          .contains("action_payload", { source_campaign_id: campaign.id });
+        if (jobsError) throw pipelineError("campaign_job_lookup_failed", `Campaign execution validation failed: ${jobsError.message}`, 500);
+        if (!jobs?.length || jobs.some((job) => ["queued", "retry", "running", "pending"].includes(job.status))) continue;
+        if (jobs.every((job) => job.status === "failed")) {
+          const { error: updateError } = await admin.from("customer_campaigns").update({ status: "failed",
+            status_reason: "No LinkedIn action was completed. Review the prospect status before retrying.",
+            failure_code: "execution_failed", blocker: "Campaign prospect requires attention", updated_at: new Date().toISOString(),
+          }).eq("workspace_id", workspaceId).eq("id", campaign.id);
+          if (updateError) throw pipelineError("campaign_reconciliation_failed", `Campaign reconciliation failed: ${updateError.message}`, 500);
+          reconciled += 1;
+        }
+      }
+      return json({ ok: true, status: "reconciled", campaigns_reconciled: reconciled });
+    }
+
     if (action === "preview_discovery") {
       const icp = (body.icp ?? {}) as ICP;
       const maxProspects = clampNumber(body.max_prospects, 1, 5, 3);

@@ -33,6 +33,10 @@ const workspaceContext = readFileSync(resolve(process.cwd(), '../../src/contexts
 const conversationReconciliation = readFileSync(resolve(process.cwd(), '../../supabase/migrations/20260820120000_linkedin_conversation_reconciliation_idempotency.sql'), 'utf8');
 const settingsPage = readFileSync(resolve(process.cwd(), '../../src/pages/SettingsPage.tsx'), 'utf8');
 const linkedinHooks = readFileSync(resolve(process.cwd(), '../../src/hooks/useLinkedInBrowser.ts'), 'utf8');
+const campaignProspects = readFileSync(resolve(process.cwd(), '../../src/services/campaign-prospects.ts'), 'utf8');
+const prospectsPage = readFileSync(resolve(process.cwd(), '../../src/pages/ProspectsPage.tsx'), 'utf8');
+const settingsPageV1 = readFileSync(resolve(process.cwd(), '../../src/pages/SettingsPage.tsx'), 'utf8');
+const conversationInboxPage = readFileSync(resolve(process.cwd(), '../../src/pages/ConversationInboxPage.tsx'), 'utf8');
 
 test('all current writes share one preflight before the switch', () => {
   for (const action of ['connection_request','send_message','follow_up_message','like_post','follow_company']) assert.ok(LINKEDIN_WRITE_ACTIONS.has(action));
@@ -246,7 +250,26 @@ test('Google-only blocked campaigns reconcile to ready without auto-launching', 
   assert.match(reconcile, /connection_state !== "connected"[\s\S]*"healthy", "degraded"/);
   assert.match(reconcile, /status: "ready"/);
   assert.doesNotMatch(reconcile, /status: "running"/);
-  assert.match(campaignsPage, /action: 'reconcile_prerequisites'/);
+  assert.match(campaignsPage, /'reconcile_prerequisites', 'reconcile_campaign_state'/);
+});
+test('campaign prospects are customer-visible from campaign details and global Prospects', () => {
+  for (const field of ['name', 'title', 'company', 'linkedinUrl', 'status', 'lastAction', 'nextAction', 'createdAt']) assert.match(campaignProspects, new RegExp(field));
+  assert.match(campaignsPage, /View prospects[\s\S]*View LinkedIn profile[\s\S]*Last action:[\s\S]*Next action:/);
+  assert.match(prospectsPage, /Campaign prospects[\s\S]*Outreach status[\s\S]*LinkedIn profile/);
+  assert.match(campaignProspects, /isTestFixture/);
+});
+test('terminal failed campaign jobs reconcile running lifecycle to failed without scheduling work', () => {
+  const reconcile = linkedinV1Pipeline.slice(linkedinV1Pipeline.indexOf('if (action === "reconcile_campaign_state")'), linkedinV1Pipeline.indexOf('if (action === "preview_discovery")'));
+  assert.match(reconcile, /jobs\.every\(\(job\) => job\.status === "failed"\)/);
+  assert.match(reconcile, /status: "failed"[\s\S]*execution_failed/);
+  assert.doesNotMatch(reconcile, /linkedin-job-runner|browser_execution_queue|\.insert\(/);
+});
+test('Inbox has an explicit customer empty state', () => {
+  assert.match(conversationInboxPage, /No conversations yet\./);
+});
+test('Upgrade CTAs no longer fail silently or imply checkout completion', () => {
+  assert.match(settingsPageV1, /Plan upgrades are not available yet\. No payment will be taken\./);
+  assert.match(sidebar, /window\.location\.assign\('\/app\/settings'\)/);
 });
 test('campaign launch failure, backend exception and timeout cannot remain initializing', () => {
   assert.match(linkedinV1Pipeline, /lifecycleCampaignId[\s\S]*status: "failed"[\s\S]*initialization_failed/);

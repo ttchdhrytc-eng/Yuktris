@@ -2103,7 +2103,7 @@ function BillingTab() {
             <Badge tone="neutral">Active</Badge>
           </div>
           <div className="mt-4 pt-4 border-t border-gold-500/8">
-            <Button variant="primary">Upgrade Plan</Button>
+            <Button variant="primary" onClick={() => toast.info('Plan upgrades are not available yet. No payment will be taken.')}>Upgrade Plan</Button>
           </div>
         </CardContent>
       </Card>

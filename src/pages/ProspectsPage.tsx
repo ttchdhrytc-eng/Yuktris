@@ -13,6 +13,7 @@ import { supabase } from '@/lib/supabase';
 import { useWorkspace } from '@/contexts/WorkspaceContext';
 import { formatDate } from '@/lib/utils';
 import type { Prospect, ProspectStatus, Company } from '@/types';
+import { fetchCampaignProspects } from '@/services/campaign-prospects';
 
 export function ProspectsPage() {
   const { workspace } = useWorkspace();
@@ -48,6 +49,10 @@ export function ProspectsPage() {
       const { data } = await q.order('created_at', { ascending: false });
       return (data ?? []) as Prospect[];
     },
+  });
+  const { data: campaignProspects, isLoading: campaignProspectsLoading } = useQuery({
+    queryKey: ['campaign-prospects', workspace?.id], enabled: !!workspace?.id,
+    queryFn: () => fetchCampaignProspects(workspace!.id),
   });
 
   const createMutation = useMutation({
@@ -134,6 +139,11 @@ export function ProspectsPage() {
         </Select>
       </div>
 
+      {(campaignProspectsLoading || (campaignProspects?.length ?? 0) > 0) && <Card className="mb-4">
+        <div className="border-b border-gold-500/10 px-4 py-3"><h2 className="text-sm font-semibold text-ink-100">Campaign prospects</h2><p className="text-xs text-ink-500">Prospects genuinely discovered for your campaigns.</p></div>
+        {campaignProspectsLoading ? <div className="flex justify-center py-8"><Spinner className="h-5 w-5" /></div> : <div className="overflow-x-auto"><table className="w-full"><thead><tr className="border-b border-gold-500/10 text-left"><th className="px-4 py-3 text-xs text-ink-500">Name</th><th className="px-4 py-3 text-xs text-ink-500">Company</th><th className="px-4 py-3 text-xs text-ink-500">Outreach status</th><th className="px-4 py-3 text-xs text-ink-500">Last / next action</th><th className="px-4 py-3 text-xs text-ink-500">Discovered</th></tr></thead><tbody>{campaignProspects?.map(p => <tr key={p.jobId} className="border-b border-gold-500/8 last:border-0"><td className="px-4 py-3"><p className="text-sm text-ink-100">{p.name}</p><p className="text-xs text-ink-500">{p.title ?? 'Title unavailable'}</p>{p.linkedinUrl && <a href={p.linkedinUrl} target="_blank" rel="noopener noreferrer" className="text-xs text-brand-400 hover:underline">LinkedIn profile</a>}</td><td className="px-4 py-3 text-sm text-ink-300">{p.company ?? 'Company unavailable'}</td><td className="px-4 py-3 text-sm text-ink-300">{p.status}</td><td className="px-4 py-3 text-xs text-ink-500"><p>{p.lastAction ?? 'No action yet'}</p><p>Next: {p.nextAction ?? 'None scheduled'}</p></td><td className="px-4 py-3 text-xs text-ink-500">{formatDate(p.createdAt)}</td></tr>)}</tbody></table></div>}
+      </Card>}
+
       {isLoading ? (
         <div className="flex justify-center py-20"><Spinner className="h-6 w-6" /></div>
       ) : prospects && prospects.length > 0 ? (
@@ -202,14 +212,14 @@ export function ProspectsPage() {
             </table>
           </div>
         </Card>
-      ) : (
+      ) : (campaignProspects?.length ?? 0) === 0 ? (
         <EmptyState
           icon={<Users className="h-5 w-5" />}
           title="No prospects yet"
           description="Add prospects individually or import them to start your outreach campaigns."
           action={<Button onClick={() => setModalOpen(true)}><Plus className="h-4 w-4" />Add Prospect</Button>}
         />
-      )}
+      ) : null}
 
       <Modal
         open={modalOpen}

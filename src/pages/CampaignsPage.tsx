@@ -16,6 +16,7 @@ import { supabase } from '@/lib/supabase';
 import { GOOGLE_SCOPES } from '@/types/google-auth';
 import type { FullICP } from '@/types/icp-intelligence';
 import { buildCampaignMetrics, CAMPAIGN_STATUS_LABELS } from '@/services/campaign-metrics';
+import { fetchCampaignProspects } from '@/services/campaign-prospects';
 
 const STEPS = ['Campaign', 'ICP', 'LinkedIn account', 'Outreach', 'Limits & Schedule', 'Review & Launch'];
 
@@ -34,6 +35,7 @@ export function CampaignsPage() {
   const [days, setDays] = useState('Monday–Friday');
   const [hours, setHours] = useState('09:00–17:00');
   const [launching, setLaunching] = useState(false);
+  const [expandedCampaign, setExpandedCampaign] = useState<string | null>(null);
   const initializationKey = useRef(crypto.randomUUID());
 
   const connectedAccounts = (accounts.data ?? []).filter(a => a.connection_state === 'connected' && ['healthy', 'degraded'].includes(a.health_status) && a.profile_url);
@@ -47,9 +49,8 @@ export function CampaignsPage() {
   const existing = useQuery({
     queryKey: ['customer-campaigns', workspace?.id], enabled: !!workspace,
     queryFn: async () => {
-      await supabase.functions.invoke('linkedin-v1-pipeline', { body: {
-        action: 'reconcile_prerequisites', workspace_id: workspace!.id,
-      }});
+      await Promise.all(['reconcile_prerequisites', 'reconcile_campaign_state'].map((action) =>
+        supabase.functions.invoke('linkedin-v1-pipeline', { body: { action, workspace_id: workspace!.id } })));
       const { data, error } = await supabase.from('customer_campaigns').select('*').eq('workspace_id', workspace!.id).order('created_at', { ascending: false });
       if (error && error.code !== '42P01') throw error;
       const ids = (data ?? []).map(c => c.id);
@@ -66,6 +67,10 @@ export function CampaignsPage() {
         messages: messages.error ? undefined : messages.data ?? [], confirmations: confirmations.error ? undefined : confirmations.data ?? [],
       }) };
     },
+  });
+  const campaignProspects = useQuery({
+    queryKey: ['campaign-prospects', workspace?.id], enabled: !!workspace,
+    queryFn: () => fetchCampaignProspects(workspace!.id),
   });
 
   const payload = useMemo(() => selectedIcp ? mapIcp(selectedIcp) : null, [selectedIcp]);
@@ -104,7 +109,7 @@ export function CampaignsPage() {
       {step === 5 && <div className="space-y-4"><div className="grid gap-3 md:grid-cols-2"><Review label="Campaign" value={name} /><Review label="ICP" value={selectedIcp?.name ?? ''} /><Review label="LinkedIn account" value={selectedAccount?.profile_name ?? selectedAccount?.account_name ?? ''} /><Review label="Estimated target pool" value={`Up to ${Math.min(dailyLimit, 5)} verified prospects in the initial run`} /><Review label="Message strategy" value={strategy} /><Review label="Limits" value={`${dailyLimit}/day · ${days} · ${hours}`} /></div><div className="flex items-center gap-2"><Badge tone={calendarConnected ? 'success' : 'neutral'} dot>{calendarConnected ? 'Calendar connected' : 'Calendar optional'}</Badge></div>{!calendarConnected && <p className="text-sm text-ink-500">LinkedIn outreach can launch now. Connect Calendar before enabling automatic meeting booking.</p>}</div>}
       <div className="mt-8 flex justify-between"><Button variant="secondary" disabled={step === 0} onClick={() => setStep(s => s - 1)}><ChevronLeft className="h-4 w-4" />Back</Button>{step < 5 ? <Button disabled={!canContinue} onClick={() => setStep(s => s + 1)}>Continue<ChevronRight className="h-4 w-4" /></Button> : <Button loading={launching} onClick={launch}><Rocket className="h-4 w-4" />Launch Campaign</Button>}</div>
     </Card>
-    {(existing.data?.campaigns.length ?? 0) > 0 && <section><h2 className="mb-3 text-base font-semibold text-ink-100">Your campaigns</h2><div className="space-y-3">{existing.data!.campaigns.map((c: Record<string, unknown>) => { const m = existing.data!.metrics[String(c.id)] ?? {}; return <Card key={String(c.id)} className="p-4"><div className="flex items-start justify-between"><div><p className="text-sm font-medium text-ink-100">{String(c.name)}</p><p className="mt-1 text-xs text-ink-500">{String(c.status_reason ?? 'Campaign status is available below.')}</p></div><Badge tone={c.status === 'running' ? 'success' : ['action_required','blocked_prerequisite','failed'].includes(String(c.status)) ? 'warning' : 'neutral'} dot>{CAMPAIGN_STATUS_LABELS[String(c.status)] ?? String(c.status)}</Badge></div><div className="mt-4 grid grid-cols-2 gap-2 md:grid-cols-4">{([['Prospects',m.prospects],['Connections Sent',m.connectionsSent],['Connections Accepted',m.connectionsAccepted],['Messages Sent',m.messagesSent],['Replies',m.replies],['Positive Replies',m.positiveReplies],['Qualified Leads',m.qualifiedLeads],['Meetings Booked',m.meetingsBooked]] as const).map(([label,value]) => <div key={label} className="rounded-lg border border-gold-500/8 bg-maroon-900/50 px-2.5 py-2"><p className="text-xs text-ink-500">{label}</p><p className="mt-0.5 text-sm font-semibold text-ink-300">{value === undefined ? 'Not available' : value}</p></div>)}</div></Card>; })}</div></section>}
+    {(existing.data?.campaigns.length ?? 0) > 0 && <section><h2 className="mb-3 text-base font-semibold text-ink-100">Your campaigns</h2><div className="space-y-3">{existing.data!.campaigns.map((c: Record<string, unknown>) => { const id = String(c.id); const m = existing.data!.metrics[id] ?? {}; const rows = (campaignProspects.data ?? []).filter(p => p.campaignId === id); return <Card key={id} className="p-4"><div className="flex items-start justify-between gap-3"><div><p className="text-sm font-medium text-ink-100">{String(c.name)}</p><p className="mt-1 text-xs text-ink-500">{String(c.status_reason ?? 'Campaign status is available below.')}</p></div><div className="flex items-center gap-2"><Button variant="ghost" size="sm" onClick={() => setExpandedCampaign(expandedCampaign === id ? null : id)}>{expandedCampaign === id ? 'Hide prospects' : 'View prospects'}</Button><Badge tone={c.status === 'running' ? 'success' : ['action_required','blocked_prerequisite','failed'].includes(String(c.status)) ? 'warning' : 'neutral'} dot>{CAMPAIGN_STATUS_LABELS[String(c.status)] ?? String(c.status)}</Badge></div></div><div className="mt-4 grid grid-cols-2 gap-2 md:grid-cols-4">{([['Prospects',m.prospects],['Connections Sent',m.connectionsSent],['Connections Accepted',m.connectionsAccepted],['Messages Sent',m.messagesSent],['Replies',m.replies],['Positive Replies',m.positiveReplies],['Qualified Leads',m.qualifiedLeads],['Meetings Booked',m.meetingsBooked]] as const).map(([label,value]) => <button type="button" key={label} onClick={label === 'Prospects' ? () => setExpandedCampaign(id) : undefined} className="rounded-lg border border-gold-500/8 bg-maroon-900/50 px-2.5 py-2 text-left"><p className="text-xs text-ink-500">{label}</p><p className="mt-0.5 text-sm font-semibold text-ink-300">{value ?? 0}</p></button>)}</div>{expandedCampaign === id && <div className="mt-4 space-y-2 border-t border-gold-500/10 pt-4">{rows.length ? rows.map(p => <div key={p.jobId} className="rounded-lg bg-maroon-900/50 p-3"><div className="flex flex-wrap items-start justify-between gap-2"><div><p className="text-sm font-medium text-ink-100">{p.name}</p><p className="text-xs text-ink-500">{[p.title,p.company].filter(Boolean).join(' · ') || 'Campaign prospect'}</p></div><Badge tone={p.status.startsWith('Needs attention') ? 'warning' : p.status === 'Connection sent' ? 'success' : 'neutral'}>{p.status}</Badge></div>{p.linkedinUrl && <a className="mt-2 block text-xs text-brand-400 hover:underline" href={p.linkedinUrl} target="_blank" rel="noopener noreferrer">View LinkedIn profile</a>}<div className="mt-2 grid gap-1 text-xs text-ink-500 md:grid-cols-2"><p>Source: {p.source}</p><p>Discovered: {new Date(p.createdAt).toLocaleString()}</p><p>Last action: {p.lastAction ?? 'No action yet'}</p><p>Next action: {p.nextAction ?? 'None scheduled'}</p></div></div>) : <p className="text-sm text-ink-500">No genuine campaign prospects.</p>}</div>}</Card>; })}</div></section>}
   </div>;
 }
 
