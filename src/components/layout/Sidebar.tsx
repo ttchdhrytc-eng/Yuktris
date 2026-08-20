@@ -1,8 +1,7 @@
 import { NavLink } from 'react-router-dom';
 import {
   LayoutDashboard, Users, MessageSquare, Calendar,
-  BarChart3, Plug, CreditCard, DollarSign, Settings, Sparkles, ChevronDown,
-  ListOrdered, Monitor, UserCircle, Activity, Zap, Target, Search, Brain, Rocket,
+  Plug, Settings, Sparkles, ChevronDown, Rocket,
 } from 'lucide-react';
 import { useState } from 'react';
 import { cn } from '@/lib/utils';
@@ -24,36 +23,18 @@ const sections: { label: string; items: NavItem[] }[] = [
     ],
   },
   {
-    label: 'Revenue AI',
+    label: '',
     items: [
-      { to: '/app/revenue-strategy', label: 'Revenue Strategy', icon: Target },
-      { to: '/app/prospect-discovery', label: 'Prospect Discovery', icon: Search },
-      { to: '/app/outreach-intelligence', label: 'Outreach Intelligence', icon: Sparkles },
-      { to: '/app/linkedin-automation', label: 'LinkedIn Agent', icon: UserCircle },
-      { to: '/app/meeting-intelligence', label: 'Meeting Intelligence', icon: Brain },
+      { to: '/app/campaigns', label: 'Campaigns', icon: Rocket },
+      { to: '/app/audience', label: 'ICP / Audience', icon: Users },
+      { to: '/app/inbox', label: 'Inbox', icon: MessageSquare },
       { to: '/app/meetings', label: 'Meetings', icon: Calendar },
-      { to: '/app/autopilot', label: 'Autopilot', icon: Rocket },
-    ],
-  },
-  {
-    label: 'Data',
-    items: [
-      { to: '/app/prospects', label: 'Prospects', icon: Users },
-      { to: '/app/notifications', label: 'Notifications', icon: Activity },
+      { to: '/app/connections', label: 'Connections', icon: Plug },
     ],
   },
   {
     label: 'Account',
     items: [
-      { to: '/app/analytics', label: 'Reports', icon: BarChart3 },
-      { to: '/app/integrations', label: 'Integrations', icon: Plug },
-      { to: '/app/execution-queue', label: 'Execution Queue', icon: ListOrdered },
-      { to: '/app/browser', label: 'Browser Automation', icon: Monitor },
-      { to: '/app/linkedin-accounts', label: 'LinkedIn Accounts', icon: UserCircle },
-      { to: '/app/meeting-scheduler', label: 'Calendar Scheduler', icon: Calendar },
-      { to: '/app/integration-health', label: 'Integration Health', icon: Activity },
-      { to: '/app/payments', label: 'Payments', icon: CreditCard },
-      { to: '/app/billing', label: 'Billing', icon: DollarSign },
       { to: '/app/settings', label: 'Settings', icon: Settings },
     ],
   },

@@ -62,9 +62,22 @@ Deno.serve(async (req: Request) => {
     if (action === "launch") {
       const icp = (body.icp ?? {}) as ICP;
       const genericCampaignId = optionalString(body.campaign_id);
+      const selectedAccountId = optionalString(body.linkedin_account_id);
       const maxProspects = clampNumber(body.max_prospects, 1, 10, 5);
 
-      const { data: account, error: accountError } = await admin.from("linkedin_accounts")
+      if (body.require_calendar !== false) {
+        const { data: googleAccounts, error: calendarError } = await admin.from("google_accounts")
+          .select("id,oauth_tokens!inner(scope,refresh_token)").eq("workspace_id", workspaceId)
+          .eq("status", "connected").eq("is_primary", true).limit(1);
+        if (calendarError) throw new Error(`Calendar connection validation failed: ${calendarError.message}`);
+        const token = (googleAccounts?.[0] as Json | undefined)?.oauth_tokens as Array<Json> | Json | undefined;
+        const tokenRow = Array.isArray(token) ? token[0] : token;
+        const granted = String(tokenRow?.scope ?? "").split(" ");
+        const hasCalendar = granted.includes("https://www.googleapis.com/auth/calendar") || granted.includes("https://www.googleapis.com/auth/calendar.events");
+        if (!googleAccounts?.length || !tokenRow?.refresh_token || !hasCalendar) throw new Error("Google Calendar connection required");
+      }
+
+      let accountQuery = admin.from("linkedin_accounts")
         .select("id,workspace_id,connection_state,connection_status,status,session_status,health_status,profile_url,expected_profile_url")
         .eq("workspace_id", workspaceId)
         .eq("connection_state", "connected")
@@ -73,11 +86,26 @@ Deno.serve(async (req: Request) => {
         .not("expected_profile_url", "is", null)
         .neq("status", "paused")
         .neq("status", "restricted")
-        .order("created_at", { ascending: true })
+        .order("created_at", { ascending: true });
+      if (selectedAccountId) accountQuery = accountQuery.eq("id", selectedAccountId);
+      const { data: account, error: accountError } = await accountQuery
         .limit(1)
         .maybeSingle();
       if (accountError) throw new Error(`LinkedIn account lookup failed: ${accountError.message}`);
       if (!account) throw new Error("No connected LinkedIn account is available for this workspace");
+
+      let customerCampaignId: string | null = null;
+      const campaignInput = (body.campaign ?? {}) as Json;
+      if (typeof campaignInput.name === "string" && campaignInput.name.trim()) {
+        const { data: customerCampaign, error: customerCampaignError } = await admin.from("customer_campaigns").insert({
+          workspace_id: workspaceId, name: campaignInput.name.trim(), icp: icp,
+          linkedin_account_id: account.id, strategy: campaignInput.strategy ?? null,
+          daily_limit: clampNumber(campaignInput.daily_limit, 1, 20, 10), operating_days: campaignInput.operating_days ?? null,
+          operating_hours: campaignInput.operating_hours ?? null, status: "ready", status_reason: "Validated and preparing verified prospects.",
+        }).select("id").single();
+        if (customerCampaignError) throw new Error(`Campaign creation failed: ${customerCampaignError.message}`);
+        customerCampaignId = customerCampaign.id;
+      }
 
       const prospects = await discoverVerifiedProspects(icp, maxProspects);
       if (prospects.length === 0) {
@@ -172,7 +200,7 @@ Deno.serve(async (req: Request) => {
           action_payload: {
             note: copy.connectionNote,
             sequence_state_id: state.id,
-            source_campaign_id: genericCampaignId ?? null,
+            source_campaign_id: customerCampaignId ?? genericCampaignId ?? null,
             profile_url: prospect.linkedinUrl,
           },
         }).select("id").single();
@@ -180,6 +208,15 @@ Deno.serve(async (req: Request) => {
 
         createdJobs.push(job.id);
         createdContacts.push(contact.id);
+      }
+
+      if (customerCampaignId) {
+        await admin.from("customer_campaigns").update({
+          status: bridgeFailures.length ? "action_required" : createdJobs.length ? "running" : "action_required",
+          status_reason: bridgeFailures.length ? "Some outreach could not be queued. Review the campaign before resuming."
+            : createdJobs.length ? "Outreach is running in the background." : "No new eligible prospects were available for outreach.",
+          launched_at: new Date().toISOString(),
+        }).eq("id", customerCampaignId);
       }
 
       // Bridge the initial jobs immediately. The Railway worker handles the resulting browser queue.

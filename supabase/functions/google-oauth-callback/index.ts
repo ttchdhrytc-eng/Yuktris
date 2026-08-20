@@ -34,9 +34,9 @@ Deno.serve(async (req: Request) => {
 
   try {
     const body = await req.json();
-    const { code, codeVerifier, redirectUri, workspaceId, userId, scopes } = body;
+    const { code, codeVerifier, redirectUri, workspaceId, scopes } = body;
 
-    if (!code || !codeVerifier || !redirectUri || !workspaceId || !userId) {
+    if (!code || !codeVerifier || !redirectUri || !workspaceId) {
       return new Response(
         JSON.stringify({ success: false, error: "Missing required parameters." }),
         { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
@@ -48,6 +48,29 @@ Deno.serve(async (req: Request) => {
     const supabaseKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
     const { createClient } = await import("jsr:@supabase/supabase-js@2");
     const supabase = createClient(supabaseUrl, supabaseKey);
+
+    // Never trust workspace/user identity supplied by the browser. Bind the
+    // OAuth result to the authenticated caller and verify workspace access.
+    const authorization = req.headers.get("Authorization") ?? "";
+    const bearer = authorization.startsWith("Bearer ") ? authorization.slice(7) : "";
+    const { data: userData, error: userError } = await supabase.auth.getUser(bearer);
+    if (userError || !userData.user) {
+      return new Response(JSON.stringify({ success: false, error: "Authentication required." }),
+        { status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+    }
+    const userId = userData.user.id;
+    const { data: membership } = await supabase.from("workspace_members").select("workspace_id")
+      .eq("workspace_id", workspaceId).eq("user_id", userId).maybeSingle();
+    if (!membership) {
+      return new Response(JSON.stringify({ success: false, error: "Workspace access denied." }),
+        { status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+    }
+
+    const allowedRedirects = (Deno.env.get("GOOGLE_REDIRECT_URIS") ?? "").split(",").map((v) => v.trim()).filter(Boolean);
+    if (allowedRedirects.length > 0 && !allowedRedirects.includes(redirectUri)) {
+      return new Response(JSON.stringify({ success: false, error: "OAuth redirect URI is not allowed." }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+    }
 
     const creds = await getGoogleCredentials(supabase);
 
@@ -111,7 +134,7 @@ Deno.serve(async (req: Request) => {
     if (existingAccount) {
       // Reconnect existing account
       accountId = existingAccount.id;
-      await supabase
+      const { error: accountUpdateError } = await supabase
         .from("google_accounts")
         .update({
           status: "connected",
@@ -121,6 +144,7 @@ Deno.serve(async (req: Request) => {
           last_synced_at: new Date().toISOString(),
         })
         .eq("id", accountId);
+      if (accountUpdateError) throw new Error("Failed to update Google account record.");
 
       // Preserve existing refresh_token if Google doesn't return a new one
       const { data: existingToken } = await supabase
@@ -131,7 +155,7 @@ Deno.serve(async (req: Request) => {
 
       const newRefreshToken = tokenData.refresh_token ?? existingToken?.refresh_token ?? null;
 
-      await supabase
+      const { error: tokenUpdateError } = await supabase
         .from("oauth_tokens")
         .update({
           access_token: tokenData.access_token,
@@ -141,6 +165,7 @@ Deno.serve(async (req: Request) => {
           token_type: tokenData.token_type ?? "Bearer",
         })
         .eq("google_account_id", accountId);
+      if (tokenUpdateError) throw new Error("Failed to store Google authorization.");
     } else {
       // Check if this is the first account (make it primary)
       const { data: existingAccounts } = await supabase
@@ -178,7 +203,7 @@ Deno.serve(async (req: Request) => {
       accountId = newAccount.id;
 
       // Insert token
-      await supabase.from("oauth_tokens").insert({
+      const { error: tokenInsertError } = await supabase.from("oauth_tokens").insert({
         google_account_id: accountId,
         provider: "google",
         access_token: tokenData.access_token,
@@ -187,6 +212,7 @@ Deno.serve(async (req: Request) => {
         scope: tokenData.scope ?? scopes,
         token_type: tokenData.token_type ?? "Bearer",
       });
+      if (tokenInsertError) throw new Error("Failed to store Google authorization.");
     }
 
     // Update integration_status for google

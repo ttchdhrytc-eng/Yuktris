@@ -28,6 +28,8 @@ const OnboardingPage = lazy(() => import('@/pages/OnboardingPage').then(m => ({ 
 
 // Lazy: core app pages
 const DashboardPage = lazy(() => import('@/pages/DashboardPage').then(m => ({ default: m.DashboardPage })));
+const CampaignsPage = lazy(() => import('@/pages/CampaignsPage').then(m => ({ default: m.CampaignsPage })));
+const ConnectionsPage = lazy(() => import('@/pages/ConnectionsPage').then(m => ({ default: m.ConnectionsPage })));
 const ProspectsPage = lazy(() => import('@/pages/ProspectsPage').then(m => ({ default: m.ProspectsPage })));
 const MeetingsPage = lazy(() => import('@/pages/MeetingsPage').then(m => ({ default: m.MeetingsPage })));
 const AnalyticsPage = lazy(() => import('@/pages/AnalyticsPage').then(m => ({ default: m.AnalyticsPage })));
@@ -146,7 +148,8 @@ export default function App() {
 
               {/* Protected app routes — new navigation */}
               <Route path="/app" element={<ProtectedApp><DashboardPage /></ProtectedApp>} />
-              <Route path="/app/campaigns" element={<Navigate to="/app/linkedin-automation" replace />} />
+              <Route path="/app/campaigns" element={<ProtectedApp><CampaignsPage /></ProtectedApp>} />
+              <Route path="/app/audience" element={<Navigate to="/app/prospects" replace />} />
               <Route path="/app/prospects" element={<ProtectedApp><ProspectsPage /></ProtectedApp>} />
               <Route path="/app/inbox" element={<Navigate to="/app/conversations" replace />} />
               <Route path="/app/meetings" element={<ProtectedApp><MeetingsPage /></ProtectedApp>} />
@@ -155,6 +158,7 @@ export default function App() {
               <Route path="/app/settings" element={<ProtectedApp><SettingsPage /></ProtectedApp>} />
               <Route path="/app/billing" element={<ProtectedApp><BillingPage /></ProtectedApp>} />
               <Route path="/app/integrations" element={<ProtectedApp><IntegrationsPage /></ProtectedApp>} />
+              <Route path="/app/connections" element={<ProtectedApp><ConnectionsPage /></ProtectedApp>} />
               <Route path="/app/automations" element={<ProtectedApp><AutomationsPage /></ProtectedApp>} />
               <Route path="/app/notifications" element={<ProtectedApp><NotificationsPage /></ProtectedApp>} />
               <Route path="/app/revenue-strategy" element={<ProtectedApp><RevenueStrategyPage /></ProtectedApp>} />

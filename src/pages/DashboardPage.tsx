@@ -35,7 +35,8 @@ export function DashboardPage() {
 
       const [
         campaigns, prospects, meetings, messages, upcomingMeetings,
-        repliedProspects, proposals, integrations,
+        repliedProspects, proposals, integrations, executionJobs, linkedinMessages,
+        linkedinConversations, qualifiedContacts, meetingConfirmations, customerCampaigns,
       ] = await Promise.all([
         supabase.from('campaigns').select('id, name, status, created_at').eq('workspace_id', wsId).order('created_at', { ascending: false }),
         supabase.from('prospects').select('id, status', { count: 'exact', head: true }).eq('workspace_id', wsId),
@@ -45,6 +46,12 @@ export function DashboardPage() {
         supabase.from('prospects').select('id, first_name, last_name, title, company_name, status, created_at').eq('workspace_id', wsId).eq('status', 'replied').order('created_at', { ascending: false }).limit(5),
         supabase.from('proposal_approvals').select('id, approval_status, approval_notes, created_at').eq('workspace_id', wsId).eq('approval_status', 'pending').order('created_at', { ascending: false }).limit(5),
         supabase.from('integrations').select('id, provider, status').eq('workspace_id', wsId).in('provider', ['linkedin', 'gmail', 'google_calendar']),
+        supabase.from('linkedin_execution_jobs').select('contact_id,action_type,status').eq('workspace_id', wsId),
+        supabase.from('linkedin_messages').select('direction,classification').eq('workspace_id', wsId),
+        supabase.from('linkedin_conversations').select('stage').eq('workspace_id', wsId),
+        supabase.from('contacts').select('id', { count: 'exact', head: true }).eq('workspace_id', wsId).eq('status', 'qualified'),
+        supabase.from('linkedin_meeting_confirmations').select('id', { count: 'exact', head: true }).eq('workspace_id', wsId),
+        supabase.from('customer_campaigns').select('id,status').eq('workspace_id', wsId),
       ]);
 
       const sent = messages.data?.filter(m => m.direction === 'sent').length ?? 0;
@@ -64,6 +71,17 @@ export function DashboardPage() {
         pendingApprovals: proposals.data ?? [],
         integrations: integrations.data ?? [],
         activeCampaignCount: activeCampaigns.length,
+        metrics: {
+          activeCampaigns: customerCampaigns.data?.filter(c => c.status === 'running').length ?? activeCampaigns.length,
+          prospectsContacted: new Set((executionJobs.data ?? []).map(j => j.contact_id).filter(Boolean)).size,
+          connectionsSent: executionJobs.data?.filter(j => j.action_type === 'connection_request' && j.status === 'completed').length ?? 0,
+          connectionsAccepted: executionJobs.data?.filter(j => j.action_type === 'check_connection_acceptance' && j.status === 'completed').length ?? 0,
+          messagesSent: linkedinMessages.data?.filter(m => m.direction === 'outbound').length ?? 0,
+          replies: linkedinMessages.data?.filter(m => m.direction === 'inbound').length ?? 0,
+          positiveReplies: linkedinMessages.data?.filter(m => ['positive', 'meeting_interest'].includes(m.classification ?? '')).length ?? 0,
+          qualifiedLeads: qualifiedContacts.count ?? linkedinConversations.data?.filter(c => c.stage === 'qualified').length ?? 0,
+          meetingsBooked: meetingConfirmations.count ?? 0,
+        },
       };
     },
   });
@@ -156,11 +174,16 @@ export function DashboardPage() {
       </div>
 
       {/* ─── KPI Summary ─── */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <SummaryCard label="Meetings Booked" value={formatNumber(d.meetingCount)} icon={Calendar} tone="success" sub={`${d.upcoming.length} upcoming`} />
-        <SummaryCard label="Replies Received" value={formatNumber(d.receivedCount)} icon={MessageSquare} tone="brand" sub={`${d.hotProspects.length} need attention`} />
-        <SummaryCard label="Connection Rate" value={`${d.replyRate}%`} icon={TrendingUp} tone="gold" sub={`${formatNumber(d.sentCount)} messages sent`} />
-        <SummaryCard label="Pipeline Value" value={`$${formatNumber(d.prospectCount * 4200)}`} icon={DollarSign} tone="warning" sub={`${formatNumber(d.prospectCount)} prospects`} />
+      <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-5 gap-4">
+        <SummaryCard label="Active Campaigns" value={formatNumber(d.metrics.activeCampaigns)} icon={Rocket} tone="brand" />
+        <SummaryCard label="Prospects Contacted" value={formatNumber(d.metrics.prospectsContacted)} icon={Users} tone="gold" />
+        <SummaryCard label="Connections Sent" value={formatNumber(d.metrics.connectionsSent)} icon={Linkedin} tone="brand" />
+        <SummaryCard label="Connections Accepted" value={formatNumber(d.metrics.connectionsAccepted)} icon={CheckCircle2} tone="success" />
+        <SummaryCard label="Messages Sent" value={formatNumber(d.metrics.messagesSent)} icon={Send} tone="gold" />
+        <SummaryCard label="Replies" value={formatNumber(d.metrics.replies)} icon={MessageSquare} tone="brand" />
+        <SummaryCard label="Positive Replies" value={formatNumber(d.metrics.positiveReplies)} icon={TrendingUp} tone="success" />
+        <SummaryCard label="Qualified Leads" value={formatNumber(d.metrics.qualifiedLeads)} icon={Award} tone="warning" />
+        <SummaryCard label="Meetings Booked" value={formatNumber(d.metrics.meetingsBooked)} icon={Calendar} tone="success" />
       </div>
 
       {/* ─── Campaigns ─── */}
