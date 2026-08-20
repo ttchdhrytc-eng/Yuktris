@@ -14,6 +14,7 @@ const digestFix = readFileSync(resolve(process.cwd(), '../../supabase/migrations
 const acceptanceOverride = readFileSync(resolve(process.cwd(), '../../supabase/migrations/20260815110000_linkedin_one_time_acceptance_override.sql'), 'utf8');
 const writeAcceptancePurpose = readFileSync(resolve(process.cwd(), '../../supabase/migrations/20260816090000_controlled_write_acceptance_purpose.sql'), 'utf8');
 const conversationEngine = readFileSync(resolve(process.cwd(), '../../supabase/functions/linkedin-conversation-engine/index.ts'), 'utf8');
+const linkedinV1Pipeline = readFileSync(resolve(process.cwd(), '../../supabase/functions/linkedin-v1-pipeline/index.ts'), 'utf8');
 
 test('all current writes share one preflight before the switch', () => {
   for (const action of ['connection_request','send_message','follow_up_message','like_post','follow_company']) assert.ok(LINKEDIN_WRITE_ACTIONS.has(action));
@@ -113,6 +114,19 @@ test('conversation maintenance logs only structured Edge Function errors', () =>
   assert.match(worker, /readSafeFunctionError\(conversationResponse\)/);
   assert.doesNotMatch(worker, /response_body: responseBody/);
   assert.match(worker, /Non-JSON Edge Function error response/);
+});
+test('V1 launch suppresses duplicate connection jobs before creating outreach artifacts', () => {
+  const contactLookup = linkedinV1Pipeline.indexOf('const contact = await findOrCreateContact');
+  const duplicateLookup = linkedinV1Pipeline.indexOf('Existing connection job lookup failed', contactLookup);
+  const copyGeneration = linkedinV1Pipeline.indexOf('const copy = await generateLinkedInCopy', contactLookup);
+  const decisionInsert = linkedinV1Pipeline.indexOf('.from("outreach_decisions").insert', contactLookup);
+  assert.ok(contactLookup < duplicateLookup && duplicateLookup < copyGeneration && copyGeneration < decisionInsert);
+  assert.match(linkedinV1Pipeline, /contacts_skipped_existing_connection/);
+});
+test('V1 discovery requires company and role evidence and reports bridge failures', () => {
+  assert.match(linkedinV1Pipeline, /evidence\.includes\(companyName[\s\S]*&& evidence\.includes\(role/);
+  assert.match(linkedinV1Pipeline, /if \(!response\.ok\)[\s\S]*bridgeFailures\.push/);
+  assert.match(linkedinV1Pipeline, /partially_launched[\s\S]*bridge_failures/);
 });
 
 const fixtures: Array<[string,string,string]> = [

@@ -62,10 +62,24 @@ Deno.serve(async (req: Request) => {
 
       const createdJobs: string[] = [];
       const createdContacts: string[] = [];
+      const skippedExistingContacts: string[] = [];
 
       for (const prospect of prospects) {
         const company = await findOrCreateCompany(admin, workspaceId, prospect);
         const contact = await findOrCreateContact(admin, workspaceId, company.id, prospect);
+        const { data: existingConnectionJob, error: existingJobError } = await admin.from("linkedin_execution_jobs")
+          .select("id")
+          .eq("workspace_id", workspaceId)
+          .eq("contact_id", contact.id)
+          .eq("action_type", "connection_request")
+          .order("created_at", { ascending: true })
+          .limit(1)
+          .maybeSingle();
+        if (existingJobError) throw new Error(`Existing connection job lookup failed: ${existingJobError.message}`);
+        if (existingConnectionJob) {
+          skippedExistingContacts.push(String(contact.id));
+          continue;
+        }
         const copy = await generateLinkedInCopy(icp, prospect);
 
         const { data: decision, error: decisionError } = await admin.from("outreach_decisions").insert({
@@ -147,21 +161,36 @@ Deno.serve(async (req: Request) => {
       // Bridge the initial jobs immediately. The Railway worker handles the resulting browser queue.
       const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
       const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
+      const bridgeFailures: Array<{ job_id: string; status: number; error: string }> = [];
       for (const jobId of createdJobs) {
-        await fetch(`${supabaseUrl}/functions/v1/linkedin-job-runner`, {
+        const response = await fetch(`${supabaseUrl}/functions/v1/linkedin-job-runner`, {
           method: "POST",
           headers: { "Content-Type": "application/json", Authorization: `Bearer ${serviceKey}`, apikey: serviceKey },
           body: JSON.stringify({ workspace_id: workspaceId, job_id: jobId }),
         });
+        if (!response.ok) {
+          const text = await response.text();
+          let error = "Job runner rejected the execution job";
+          try {
+            const payload = JSON.parse(text) as Json;
+            if (typeof payload.error === "string") error = payload.error.slice(0, 500);
+          } catch {
+            // Keep the bounded generic error; never reflect arbitrary upstream response bodies.
+          }
+          bridgeFailures.push({ job_id: jobId, status: response.status, error });
+        }
       }
 
       return json({
-        status: "launched",
+        status: bridgeFailures.length ? "partially_launched" : "launched",
         prospects_discovered: prospects.length,
         contacts_created_or_updated: createdContacts.length,
+        contacts_skipped_existing_connection: skippedExistingContacts.length,
         connection_jobs_created: createdJobs.length,
+        connection_jobs_bridged: createdJobs.length - bridgeFailures.length,
+        bridge_failures: bridgeFailures,
         job_ids: createdJobs,
-      });
+      }, bridgeFailures.length ? 502 : 200);
     }
 
     if (action === "tick") {
@@ -212,7 +241,7 @@ async function discoverVerifiedProspects(icp: ICP, maxProspects: number): Promis
         const normalized = normalizeLinkedInProfile(r.url);
         if (!normalized || seenLinkedIn.has(normalized)) return false;
         const evidence = `${r.title} ${r.content}`.toLowerCase();
-        return evidence.includes(companyName.toLowerCase().split(" ")[0]) || evidence.includes(role.toLowerCase().split(" ")[0]);
+        return evidence.includes(companyName.toLowerCase().split(" ")[0]) && evidence.includes(role.toLowerCase().split(" ")[0]);
       });
       if (!match) continue;
       const linkedinUrl = normalizeLinkedInProfile(match.url);
