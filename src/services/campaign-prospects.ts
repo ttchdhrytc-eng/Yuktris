@@ -1,6 +1,7 @@
 import { supabase } from '@/lib/supabase';
 import { isTestFixture } from '@/services/campaign-metrics';
 import { resolveCampaignProspectIdentitySafely } from '@/services/campaign-prospect-identity';
+import { deduplicateCampaignProspects } from '@/services/campaign-prospect-dedup';
 
 type Row = Record<string, unknown>;
 
@@ -74,8 +75,13 @@ export async function fetchCampaignProspects(workspaceId: string, campaignIds?: 
     mapping,
     job: correlated.filter((job) => String(job.contact_id) === String(mapping.contact_id) && sourceCampaignId(job as Row) === String(mapping.customer_campaign_id)).sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))[0] as Row | undefined,
   }));
-  for (const job of correlated) if (!rows.some((row) => row.job?.id === job.id)) rows.push({ mapping: { id: job.id, customer_campaign_id: sourceCampaignId(job as Row), contact_id: job.contact_id, source: 'campaign_discovery', discovered_at: job.created_at }, job: job as Row });
-  return Promise.all(rows.map(async ({ mapping, job }) => {
+  for (const job of correlated) {
+    const campaignId = sourceCampaignId(job as Row);
+    if (!rows.some((row) => String(row.mapping.contact_id) === String(job.contact_id) && String(row.mapping.customer_campaign_id) === campaignId)) {
+      rows.push({ mapping: { id: job.id, customer_campaign_id: campaignId, contact_id: job.contact_id, source: 'campaign_discovery', discovered_at: job.created_at }, job: job as Row });
+    }
+  }
+  const resolved = await Promise.all(rows.map(async ({ mapping, job }) => {
     const actualContactId = String(job?.contact_id ?? mapping.contact_id);
     const identityResult = resolveCampaignProspectIdentitySafely(actualContactId, contactMap, companyMap);
     if (!identityResult.ok) console.error('[campaign-prospect-identity-missing]', { workspace_id: workspaceId, contact_id: actualContactId });
@@ -109,6 +115,7 @@ export async function fetchCampaignProspects(workspaceId: string, campaignIds?: 
       identityDiagnostic: identityResult.diagnostic,
     };
   }));
+  return deduplicateCampaignProspects(resolved);
 }
 
 function sourceCampaignId(row: Row): string | null {

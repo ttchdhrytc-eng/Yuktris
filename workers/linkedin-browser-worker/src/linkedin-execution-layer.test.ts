@@ -31,6 +31,7 @@ const dashboardPage = readFileSync(resolve(process.cwd(), '../../src/pages/Dashb
 const campaignsPage = readFileSync(resolve(process.cwd(), '../../src/pages/CampaignsPage.tsx'), 'utf8');
 const campaignSchedule = readFileSync(resolve(process.cwd(), '../../src/services/campaign-schedule.ts'), 'utf8');
 const campaignMetrics = readFileSync(resolve(process.cwd(), '../../src/services/campaign-metrics.ts'), 'utf8');
+const campaignProspectDedup = readFileSync(resolve(process.cwd(), '../../src/services/campaign-prospect-dedup.ts'), 'utf8');
 const releaseClosure = readFileSync(resolve(process.cwd(), '../../supabase/migrations/20260820233000_campaign_release_closure.sql'), 'utf8');
 const sidebar = readFileSync(resolve(process.cwd(), '../../src/components/layout/Sidebar.tsx'), 'utf8');
 const app = readFileSync(resolve(process.cwd(), '../../src/App.tsx'), 'utf8');
@@ -313,6 +314,18 @@ test('campaign UI supports browser timezone default, seven days, presets and lif
   assert.match(campaignSchedule, /Asia\/Calcutta.*Asia\/Kolkata/);
   assert.match(campaignsPage, /ScheduleEditorBoundary/);
 });
+test('campaign polling preserves rendered data and canonical LinkedIn identities render once', () => {
+  assert.match(campaignsPage, /placeholderData: \(previous\) => previous/);
+  assert.match(campaignsPage, /initialBootstrapLoading/);
+  const campaignQuery = campaignsPage.slice(campaignsPage.indexOf("queryKey: ['customer-campaigns'"), campaignsPage.indexOf("queryKey: ['campaign-prospects'"));
+  assert.doesNotMatch(campaignQuery, /reconcile_prerequisites|reconcile_campaign_state/);
+  assert.match(campaignProspects, /deduplicateCampaignProspects\(resolved\)/);
+  assert.match(campaignProspectDedup, /linkedin:.*pathname\.toLowerCase/);
+});
+test('post-preflight LinkedIn write failures never retry automatically', () => {
+  assert.match(worker, /unsafe to retry automatically[\s\S]*!LINKEDIN_WRITE_ACTIONS\.has\(item\.action_type\)/);
+  assert.match(customerSchedule, /semantic_key=v_semantic[\s\S]*duplicate_action/);
+});
 test('controlled acceptance permits only safe human-initiated pre-write retries', () => {
   assert.match(effectiveSchedule, /human_initiated_by/);
   assert.match(effectiveSchedule, /status IN \('queued','scheduled','running','pending','retry','retrying'\)/);
@@ -350,7 +363,7 @@ test('Google-only blocked campaigns reconcile to ready without auto-launching', 
   assert.match(reconcile, /connection_state !== "connected"[\s\S]*"healthy", "degraded"/);
   assert.match(reconcile, /status: "ready"/);
   assert.doesNotMatch(reconcile, /status: "running"/);
-  assert.match(campaignsPage, /'reconcile_prerequisites', 'reconcile_campaign_state'/);
+  assert.match(linkedinV1Pipeline, /reconcile_campaign_state/);
 });
 test('campaign prospects are customer-visible from campaign details and global Prospects', () => {
   for (const field of ['name', 'title', 'company', 'linkedinUrl', 'status', 'lastAction', 'nextAction', 'createdAt']) assert.match(campaignProspects, new RegExp(field));

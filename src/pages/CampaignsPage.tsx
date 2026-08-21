@@ -64,13 +64,6 @@ export function CampaignsPage() {
     queryKey: ['customer-campaigns', workspace?.id],
     enabled: !!workspace,
     queryFn: async () => {
-      await Promise.all(
-        ['reconcile_prerequisites', 'reconcile_campaign_state'].map((action) =>
-          supabase.functions.invoke('linkedin-v1-pipeline', {
-            body: { action, workspace_id: workspace!.id },
-          }),
-        ),
-      );
       const { data, error } = await supabase.from('customer_campaigns').select('*').eq('workspace_id', workspace!.id).order('created_at', { ascending: false });
       if (error && error.code !== '42P01') throw error;
       const ids = (data ?? []).map((c) => c.id);
@@ -89,11 +82,13 @@ export function CampaignsPage() {
         }),
       };
     },
+    placeholderData: (previous) => previous,
   });
   const campaignProspects = useQuery({
     queryKey: ['campaign-prospects', workspace?.id],
     enabled: !!workspace,
     queryFn: () => fetchCampaignProspects(workspace!.id),
+    placeholderData: (previous) => previous,
   });
   const workspaceProspects = useQuery({
     queryKey: ['selectable-prospects', workspace?.id], enabled: !!workspace,
@@ -102,6 +97,7 @@ export function CampaignsPage() {
       if (error) throw error;
       return data ?? [];
     },
+    placeholderData: (previous) => previous,
   });
 
   const payload = useMemo(() => (selectedIcp ? mapIcp(selectedIcp) : null), [selectedIcp]);
@@ -221,7 +217,8 @@ export function CampaignsPage() {
     }
   }
 
-  if (icps.isLoading || accounts.isLoading || google.isLoading)
+  const initialBootstrapLoading = (icps.isLoading && !icps.data) || (accounts.isLoading && !accounts.data) || (google.isLoading && !google.data);
+  if (initialBootstrapLoading)
     return (
       <div className="flex justify-center py-24">
         <Spinner />

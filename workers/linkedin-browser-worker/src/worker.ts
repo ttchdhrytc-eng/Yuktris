@@ -2176,7 +2176,9 @@ export class Worker {
           action: item.action_type,
         });
       } else {
-        await this.queue.fail(item.id, result.error || 'Automation action failed', Date.now() - startTime, true);
+        // Once write preflight has allowed an action, any browser-side failure is
+        // potentially post-interaction and therefore unsafe to retry automatically.
+        await this.queue.fail(item.id, result.error || 'Automation action failed', Date.now() - startTime, !LINKEDIN_WRITE_ACTIONS.has(item.action_type));
         logger.warn('linkedin_job_failed', {
           queue_item_id: item.id,
           workspace_id: item.workspace_id,
@@ -2214,7 +2216,7 @@ export class Worker {
         action: item.action_type,
         reason: msg,
       });
-      await this.queue.fail(item.id, msg, Date.now() - startTime, true);
+      await this.queue.fail(item.id, msg, Date.now() - startTime, !LINKEDIN_WRITE_ACTIONS.has(item.action_type));
     }
   }
 
