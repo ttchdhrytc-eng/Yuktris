@@ -80,7 +80,7 @@ export async function fetchCampaignProspects(workspaceId: string, campaignIds?: 
       source: mapping.source === 'existing_workspace_prospect' ? 'Existing workspace prospect' : 'Campaign discovery',
       status,
       lastAction: latest ? `${String(latest.action_type).replaceAll('_', ' ')}: ${latest.error_message ? String(latest.error_message) : String(latest.action_result ?? 'processed')}` : null,
-      nextAction: ['queued', 'scheduled', 'retry', 'pending'].includes(String(job.status)) ? (nextActionAt ? `Connection request scheduled for ${formatInTimezone(nextActionAt, outreachTimezone)}` : outreachTimezone ? 'Connection request awaiting the safety window' : 'Requires attention — configure outreach timezone') : null,
+      nextAction: job && ['queued', 'scheduled', 'retry', 'pending'].includes(String(job.status)) ? (nextActionAt ? `Connection request scheduled for ${formatInTimezone(nextActionAt, outreachTimezone)}` : outreachTimezone ? 'Connection request awaiting the safety window' : 'Requires attention — configure outreach timezone') : null,
       nextActionAt,
       outreachTimezone,
       createdAt: String(mapping.discovered_at ?? job?.created_at),

@@ -298,6 +298,7 @@ test('campaign prospects are customer-visible from campaign details and global P
   assert.match(campaignsPage, /View prospects[\s\S]*View LinkedIn profile[\s\S]*Last action:[\s\S]*Next action:/);
   assert.match(prospectsPage, /Campaign prospects[\s\S]*Outreach status[\s\S]*LinkedIn profile/);
   assert.match(campaignProspects, /isTestFixture/);
+  assert.match(campaignProspects, /nextAction: job &&/);
 });
 test('terminal failed campaign jobs reconcile running lifecycle to failed without scheduling work', () => {
   const reconcile = linkedinV1Pipeline.slice(linkedinV1Pipeline.indexOf('if (action === "reconcile_campaign_state")'), linkedinV1Pipeline.indexOf('if (action === "preview_discovery")'));
