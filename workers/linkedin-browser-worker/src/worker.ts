@@ -1359,7 +1359,23 @@ export class Worker {
       });
       if (scheduleError) throw new Error(`Campaign schedule validation failed: ${this.sanitizeError(scheduleError)}`);
       if (!scheduleGate?.allowed) {
-        if (scheduleGate?.code === 'outside_sending_window' && scheduleGate?.scheduled_at) {
+        if (scheduleGate?.code === 'campaign_paused') {
+          await this.client
+            .from('browser_execution_queue')
+            .update({
+              status: 'waiting',
+              scheduled_at: null,
+              next_retry_at: null,
+              started_at: null,
+              worker_id: null,
+              attempt_id: null,
+              lease_expires_at: null,
+              error: 'Campaign paused',
+            })
+            .eq('id', item.id)
+            .eq('attempt_id', item.attempt_id);
+          logger.info('linkedin_write_deferred_campaign_paused', { queue_item_id: item.id });
+        } else if (scheduleGate?.code === 'outside_sending_window' && scheduleGate?.scheduled_at) {
           await this.client
             .from('browser_execution_queue')
             .update({

@@ -210,6 +210,45 @@ Deno.serve(async (req: Request) => {
       return json({ eligible, normalized_linkedin_url: target });
     }
 
+    if (action === "schedule_preview") {
+      const operatingDays = requireString(body.operating_days, "operating_days");
+      const startTime = requireString(body.start_time, "start_time");
+      const endTime = requireString(body.end_time, "end_time");
+      const timezone = requireString(body.outreach_timezone, "outreach_timezone");
+      const { data: validation, error: validationError } = await admin.rpc("campaign_schedule_validation", {
+        p_operating_days: operatingDays, p_start_time: startTime, p_end_time: endTime, p_timezone: timezone,
+      });
+      if (validationError || !validation?.valid) throw pipelineError(String(validation?.code ?? "invalid_campaign_schedule"), "Choose at least one sending day, valid hours, and an IANA timezone", 409);
+      const { data: scheduledAt, error: scheduleError } = await admin.rpc("next_campaign_schedule_at", {
+        p_operating_days: operatingDays, p_start_time: startTime, p_end_time: endTime, p_timezone: timezone,
+        p_not_before: optionalString(body.not_before) ?? new Date().toISOString(),
+      });
+      if (scheduleError || !scheduledAt) throw pipelineError("invalid_campaign_schedule", "No valid outreach window was found", 409);
+      return json({ valid: true, scheduled_at: scheduledAt, write_performed: false });
+    }
+
+    if (action === "update_schedule") {
+      const campaignId = requireString(body.campaign_id, "campaign_id");
+      const { data: result, error } = await admin.rpc("update_customer_campaign_schedule", {
+        p_workspace_id: workspaceId, p_campaign_id: campaignId,
+        p_operating_days: requireString(body.operating_days, "operating_days"),
+        p_start_time: requireString(body.start_time, "start_time"),
+        p_end_time: requireString(body.end_time, "end_time"),
+        p_timezone: requireString(body.outreach_timezone, "outreach_timezone"),
+      });
+      if (error || !result?.valid) throw pipelineError(String(result?.code ?? "schedule_update_failed"), "Campaign schedule could not be updated", 409);
+      return json({ ...result, write_performed: false });
+    }
+
+    if (action === "pause_campaign" || action === "resume_campaign") {
+      const campaignId = requireString(body.campaign_id, "campaign_id");
+      const { data: result, error } = await admin.rpc("set_customer_campaign_paused", {
+        p_workspace_id: workspaceId, p_campaign_id: campaignId, p_paused: action === "pause_campaign",
+      });
+      if (error || !result?.ok) throw pipelineError(String(result?.code ?? "campaign_state_change_failed"), "Campaign state could not be changed", 409);
+      return json({ ...result, write_performed: false });
+    }
+
     if (action === "associate_existing_prospect") {
       const campaignId = requireString(body.campaign_id, "campaign_id");
       const prospectId = requireString(body.prospect_id, "prospect_id");
@@ -257,7 +296,7 @@ Deno.serve(async (req: Request) => {
       if (eligibilityError) throw pipelineError("acceptance_eligibility_failed", "Controlled acceptance eligibility could not be verified", 500);
       if (!eligibility?.eligible) throw pipelineError(String(eligibility?.code ?? "controlled_acceptance_ineligible"), "This workspace is not eligible for another controlled acceptance attempt", 409);
       const { data: windowValidation, error: windowError } = await admin.rpc("campaign_account_window_validation", { p_campaign_id: campaignId, p_not_before: new Date().toISOString() });
-      if (windowError || !windowValidation?.valid) throw pipelineError("no_effective_sending_window", "Campaign hours do not overlap the selected LinkedIn account safety hours", 409);
+      if (windowError || !windowValidation?.valid) throw pipelineError("invalid_campaign_schedule", "Choose at least one sending day, valid hours, and an IANA timezone", 409);
       const scheduledAt = windowValidation.scheduled_at;
       const { data: job, error: jobError } = await admin
         .from("linkedin_execution_jobs")
@@ -344,7 +383,7 @@ Deno.serve(async (req: Request) => {
         customerCampaignId = customerCampaign.id;
         lifecycleCampaignId = customerCampaignId;
         const { data: windowValidation, error: windowError } = await admin.rpc("campaign_account_window_validation", { p_campaign_id: customerCampaignId, p_not_before: new Date().toISOString() });
-        if (windowError || !windowValidation?.valid) throw pipelineError("no_effective_sending_window", "Campaign hours do not overlap the selected LinkedIn account safety hours", 409);
+        if (windowError || !windowValidation?.valid) throw pipelineError("invalid_campaign_schedule", "Choose at least one sending day, valid hours, and an IANA timezone", 409);
       }
 
       const prospects = await discoverVerifiedProspects(icp, maxProspects);
@@ -356,6 +395,7 @@ Deno.serve(async (req: Request) => {
       const createdContacts: string[] = [];
       const skippedExistingContacts: string[] = [];
       let completedExistingJobs = 0;
+      let nextScheduledAt: string | null = null;
 
       for (const prospect of prospects) {
         const company = await findOrCreateCompany(admin, workspaceId, prospect);
@@ -442,6 +482,7 @@ Deno.serve(async (req: Request) => {
           p_not_before: new Date().toISOString(),
         });
         if (scheduleError || !scheduledAt) throw pipelineError("invalid_campaign_schedule", "Configure valid operating days, hours, and an IANA outreach timezone", 409);
+        if (!nextScheduledAt || new Date(scheduledAt).getTime() < new Date(nextScheduledAt).getTime()) nextScheduledAt = scheduledAt;
         const { data: job, error: jobError } = await admin
           .from("linkedin_execution_jobs")
           .insert({
@@ -479,7 +520,8 @@ Deno.serve(async (req: Request) => {
       if (customerCampaignId) {
         const hasRunnableOutreach = createdJobs.length > 0 || completedExistingJobs > 0;
         const finalStatus = bridgeFailures.length || !hasRunnableOutreach ? "failed" : "running";
-        const finalReason = bridgeFailures.length ? "Some outreach jobs could not be queued. Retry after reviewing the campaign." : hasRunnableOutreach ? "Outreach is running in the background." : "No new eligible prospects were available for outreach.";
+        const waitingForWindow = Boolean(nextScheduledAt && new Date(nextScheduledAt).getTime() > Date.now() + 5000);
+        const finalReason = bridgeFailures.length ? "Some outreach jobs could not be queued. Retry after reviewing the campaign." : hasRunnableOutreach ? (waitingForWindow ? `Waiting for next sending window — ${nextScheduledAt}` : "Outreach is running in the background.") : "No new eligible prospects were available for outreach.";
         const { error: lifecycleError } = await admin
           .from("customer_campaigns")
           .update({

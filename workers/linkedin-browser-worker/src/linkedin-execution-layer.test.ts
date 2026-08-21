@@ -17,6 +17,7 @@ const authoritativeSchedule = readFileSync(resolve(process.cwd(), '../../supabas
 const effectiveSchedule = readFileSync(resolve(process.cwd(), '../../supabase/migrations/20260821213000_linkedin_effective_sending_window.sql'), 'utf8');
 const effectiveScheduleTests = readFileSync(resolve(process.cwd(), '../../supabase/tests/linkedin_effective_sending_window.sql'), 'utf8');
 const failedAcceptanceEvidence = readFileSync(resolve(process.cwd(), '../../supabase/migrations/20260821213500_preserve_failed_acceptance_terminal_evidence.sql'), 'utf8');
+const customerSchedule = readFileSync(resolve(process.cwd(), '../../supabase/migrations/20260821220000_customer_controlled_campaign_schedule.sql'), 'utf8');
 const terminalCampaignReconciliation = readFileSync(resolve(process.cwd(), '../../supabase/migrations/20260821190000_terminal_campaign_execution_reconciliation.sql'), 'utf8');
 const conversationEngine = readFileSync(resolve(process.cwd(), '../../supabase/functions/linkedin-conversation-engine/index.ts'), 'utf8');
 const linkedinV1Pipeline = readFileSync(resolve(process.cwd(), '../../supabase/functions/linkedin-v1-pipeline/index.ts'), 'utf8');
@@ -283,18 +284,29 @@ test('dashboard and campaign cards aggregate the same canonical zero-safe metric
   assert.match(dashboardPage, /prospectsContacted: new Set\(\(successfulWrites\.data/);
   assert.match(campaignMetrics, /prospects: 0[\s\S]*meetingsBooked: 0/);
 });
-test('effective scheduling intersects campaign and account IANA windows and covers DST', () => {
-  assert.match(effectiveSchedule, /next_campaign_account_outreach_at/);
-  assert.match(effectiveSchedule, /pg_catalog\.pg_timezone_names/);
-  assert.match(effectiveSchedule, /campaign_day=ANY\(campaign_days\)[\s\S]*account_day=ANY\(a\.working_days\)/);
-  assert.match(effectiveSchedule, /campaign_local::time>=campaign_start[\s\S]*account_local::time>=a\.working_hours_start::time/);
-  for (const value of ['Asia/Kolkata', 'Europe/London', 'Pacific/Auckland', 'America/New_York', 'DST boundary', 'zero overlap']) assert.match(effectiveScheduleTests, new RegExp(value));
+test('customer campaign is the sole authoritative IANA sending schedule', () => {
+  assert.match(customerSchedule, /next_campaign_outreach_at/);
+  assert.match(customerSchedule, /pg_catalog\.pg_timezone_names/);
+  assert.match(customerSchedule, /monday','tuesday','wednesday','thursday','friday','saturday','sunday/);
+  const scheduler = customerSchedule.slice(customerSchedule.indexOf('CREATE OR REPLACE FUNCTION public.next_campaign_outreach_at'), customerSchedule.indexOf('CREATE OR REPLACE FUNCTION public.next_campaign_account_outreach_at'));
+  assert.doesNotMatch(scheduler, /working_days|working_hours_start|working_hours_end|a\.timezone/);
+  for (const value of ['Monday-only', 'Saturday execution', 'Sunday execution', 'Friday-night', 'Saturday-to-Monday', 'DST transition', 'Asia/Kolkata', 'America/New_York']) assert.match(effectiveScheduleTests, new RegExp(value));
 });
-test('worker preflight and final write preflight independently enforce both windows', () => {
-  assert.match(effectiveSchedule, /campaign_outreach_preflight[\s\S]*outside_campaign_window[\s\S]*outside_working_hours/);
+test('worker preflight rechecks campaign schedule and account preflight retains non-scheduling safety', () => {
+  assert.match(customerSchedule, /campaign_outreach_preflight[\s\S]*outside_sending_window/);
   assert.match(worker, /campaign_outreach_preflight[\s\S]*preflightLinkedInWrite\(this\.client, item\)/);
-  assert.match(effectiveSchedule, /preflight_linkedin_write_without_acceptance_override/);
-  assert.doesNotMatch(effectiveSchedule, /preflight_result='allowed',execution_started_at=now\(\),acceptance_override_id/);
+  const currentSafety = customerSchedule.slice(customerSchedule.indexOf('CREATE OR REPLACE FUNCTION public.preflight_linkedin_write_without_acceptance_override'));
+  assert.doesNotMatch(currentSafety, /outside_working_hours|working_days|working_hours_start|working_hours_end/);
+  for (const preserved of ['daily_limit_reached', 'cooldown_active', 'verification_required', 'duplicate_action', 'unsafe_target', 'rate_limited']) assert.match(currentSafety, new RegExp(preserved));
+});
+test('schedule editing, pause and resume recalculate only nonterminal future work', () => {
+  assert.match(customerSchedule, /update_customer_campaign_schedule[\s\S]*status IN \('queued','scheduled','retry','retrying','paused'\)/);
+  assert.match(customerSchedule, /set_customer_campaign_paused[\s\S]*status='paused'[\s\S]*status='running'/);
+  assert.match(customerSchedule, /browser_execution_queue[\s\S]*status IN \('pending','waiting','retry'\)/);
+  assert.match(worker, /campaign_paused[\s\S]*status: 'waiting'/);
+});
+test('campaign UI supports browser timezone default, seven days, presets and lifecycle explanations', () => {
+  for (const value of ['resolvedOptions().timeZone', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun', 'Weekdays', 'Every day', 'Start time', 'End time', 'Schedule / Edit', 'Waiting for sending window', 'Pause', 'Resume']) assert.match(campaignsPage, new RegExp(value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
 });
 test('controlled acceptance permits only safe human-initiated pre-write retries', () => {
   assert.match(effectiveSchedule, /human_initiated_by/);
