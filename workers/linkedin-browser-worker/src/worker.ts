@@ -1674,12 +1674,16 @@ export class Worker {
             };
             const label = (element: Element) => [element.getAttribute('aria-label'), element.getAttribute('title'), element.textContent]
               .filter(Boolean).join(' ').replace(/\s+/g, ' ').trim().toLowerCase();
-            const heading = document.querySelector('main h1, h1.text-heading-xlarge, main [data-view-name*="profile"] h1');
+            const headingCandidates = Array.from(document.querySelectorAll('main h1, main h2, main [role="heading"], .scaffold-layout__main h1, .scaffold-layout__main h2, .scaffold-layout__main [role="heading"]'));
+            const heading = headingCandidates.find(element => {
+              const node = element as HTMLElement; const rect = node.getBoundingClientRect(); const style = getComputedStyle(node);
+              return rect.width > 0 && rect.height > 0 && rect.top >= 0 && rect.top < Math.max(700, innerHeight) && style.display !== 'none' && style.visibility !== 'hidden';
+            }) ?? null;
             const header = heading?.closest('section, [data-view-name*="profile-top"], .pv-top-card') ?? heading?.parentElement?.parentElement ?? document.querySelector('main');
             const headerText = header?.textContent?.replace(/\s+/g, ' ') ?? '';
             const degree = /(?:^|\s)1st(?:\s|$)/i.test(headerText) ? '1st' : /(?:^|\s)2nd(?:\s|$)/i.test(headerText) ? '2nd' : /(?:^|\s)3rd(?:\s|$)/i.test(headerText) ? '3rd' : null;
             const headingRect = heading?.getBoundingClientRect();
-            const actionElements = Array.from(document.querySelectorAll('main button, main a[role="button"], main [role="button"]')).filter(element => {
+            const actionElements = Array.from(document.querySelectorAll('main button, main a[role="button"], main [role="button"], .scaffold-layout__main button, .scaffold-layout__main [role="button"]')).filter(element => {
               if (!visible(element)) return false;
               if (!headingRect) return false;
               const rect = element.getBoundingClientRect();

@@ -59,3 +59,8 @@ test('probe runs only after expected sender authentication and contains no Conne
   assert.match(probeCode, /data-yuktris-relationship-more[\s\S]*keyboard\.press\('Escape'\)/);
   assert.doesNotMatch(probeCode, /connectBtn\.click|has-text\("Connect"\).*click/);
 });
+
+test('stabilized extractor supports current h2 and accessible heading variants', () => {
+  assert.match(worker, /main h1, main h2, main \[role="heading"\]/);
+  assert.match(worker, /data-yuktris-relationship-more/);
+});
