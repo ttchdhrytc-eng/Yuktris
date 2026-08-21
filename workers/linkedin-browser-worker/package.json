@@ -29,6 +29,7 @@
     "test:cloud-agent-startup": "npm run build && node --test dist/cloud-agent-startup.test.js",
     "test:execution-layer": "npm run build && node --test dist/linkedin-execution-layer.test.js",
     "test:connect-dialog-confirmation": "npm run build && node --test dist/connect-dialog-confirmation.test.js",
+    "test:relationship-probe": "npm run build && node --test dist/relationship-probe.test.js",
     "install-browser": "echo 'No local browser needed — using Browserbase'"
   },
   "dependencies": {

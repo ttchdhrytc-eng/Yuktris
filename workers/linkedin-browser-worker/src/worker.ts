@@ -11,6 +11,7 @@ import { normalizeLinkedInAction, validateSalesNavigatorPayload } from './linked
 import { CloudAgentStartupError, cloudAgentStartupTimeoutMs, withinStartupDeadline } from './startup-deadline.js';
 import { finalizeLinkedInWrite, LINKEDIN_WRITE_ACTIONS, normalizeLinkedInTarget, preflightLinkedInWrite } from './linkedin-execution-safety.js';
 import { classifyConnectionProfileState, classifyPostClickOutcome, isNoNoteConfirmCandidate, NO_NOTE_CONFIRM_LABELS } from './connection-dialog.js';
+import { classifyRelationshipProbe, type RelationshipProbeEvidence } from './relationship-probe.js';
 
 const INTERACTIVE_AUTH_TIMEOUT_MS = interactiveAuthTimeoutMs();
 const TEST_CONNECTION_TIMEOUT = parseInt(process.env.TEST_CONNECTION_TIMEOUT_MS || '120000', 10);
@@ -1631,11 +1632,14 @@ export class Worker {
           if (!url) throw new Error('profile_url required');
           const target = normalizeLinkedInTarget(url);
           if (!target) throw new Error('A valid LinkedIn personal profile URL is required');
-          await page.goto(url, {
+          await page.goto(target, {
             waitUntil: 'domcontentloaded',
             timeout: 30000,
           });
-          await page.waitForTimeout(1200 + Math.random() * 1000);
+          await page.waitForFunction(() => {
+            const heading = document.querySelector('main h1, h1.text-heading-xlarge, main [data-view-name*="profile"] h1');
+            return !!heading?.textContent?.trim() && !document.querySelector('main .artdeco-loader, main [class*="skeleton"]');
+          }, undefined, { timeout: 12000 }).catch(() => {});
           const presented = normalizeLinkedInTarget(await page.evaluate(() => document.querySelector<HTMLLinkElement>('link[rel="canonical"]')?.href || location.href));
           if (presented !== target) {
             result = {
@@ -1644,23 +1648,96 @@ export class Worker {
             };
             break;
           }
-          const hasPending = !!(await page.$('button span:has-text("Pending")'));
-          const hasConnect = !!(await page.$('button span:has-text("Connect")'));
-          const hasMessage = !!(await page.$('button span:has-text("Message")'));
-          const degreeText = await page
-            .locator('main')
-            .innerText()
-            .catch(() => '');
-          const firstDegree = /(?:^|\s)1st(?:\s|$)/i.test(degreeText);
-          const accepted = (hasMessage || firstDegree) && !hasPending && !hasConnect;
+
+          const readPrimaryEvidence = async (): Promise<RelationshipProbeEvidence> => page.evaluate(() => {
+            const visible = (element: Element) => {
+              const node = element as HTMLElement;
+              const rect = node.getBoundingClientRect();
+              const style = getComputedStyle(node);
+              return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+            };
+            const label = (element: Element) => [element.getAttribute('aria-label'), element.getAttribute('title'), element.textContent]
+              .filter(Boolean).join(' ').replace(/\s+/g, ' ').trim().toLowerCase();
+            const heading = document.querySelector('main h1, h1.text-heading-xlarge, main [data-view-name*="profile"] h1');
+            const header = heading?.closest('section, [data-view-name*="profile-top"], .pv-top-card') ?? heading?.parentElement?.parentElement ?? document.querySelector('main');
+            const headerText = header?.textContent?.replace(/\s+/g, ' ') ?? '';
+            const degree = /(?:^|\s)1st(?:\s|$)/i.test(headerText) ? '1st' : /(?:^|\s)2nd(?:\s|$)/i.test(headerText) ? '2nd' : /(?:^|\s)3rd(?:\s|$)/i.test(headerText) ? '3rd' : null;
+            const headingRect = heading?.getBoundingClientRect();
+            const actionElements = Array.from(document.querySelectorAll('main button, main a[role="button"], main [role="button"]')).filter(element => {
+              if (!visible(element)) return false;
+              if (!headingRect) return false;
+              const rect = element.getBoundingClientRect();
+              return rect.top >= headingRect.top - 120 && rect.top <= headingRect.bottom + 700;
+            });
+            document.querySelectorAll('[data-yuktris-relationship-more]').forEach(element => element.removeAttribute('data-yuktris-relationship-more'));
+            actionElements.find(element => /(?:^|\b)more(?:\b|$)|additional\s+actions/i.test(label(element)))?.setAttribute('data-yuktris-relationship-more', 'true');
+            const labels = actionElements.map(label);
+            const has = (pattern: RegExp) => labels.some(value => pattern.test(value));
+            return {
+              degree,
+              primary: {
+                message: has(/(?:^|\b)message(?:\b|$)/i), connect: has(/(?:^|\b)connect(?:\b|$)/i),
+                pending: has(/(?:^|\b)pending(?:\b|$)|invitation\s+sent/i), follow: has(/(?:^|\b)follow(?:\b|$)/i),
+                connected: has(/remove\s+connection|connection\s+since|1st\s+degree/i),
+                more: has(/(?:^|\b)more(?:\b|$)|additional\s+actions/i),
+              },
+              moreMenu: { inspected: false, connect: false, pending: false, connected: false },
+              hydrated: !!heading?.textContent?.trim() && labels.length > 0,
+            } as RelationshipProbeEvidence;
+          });
+
+          let evidence: RelationshipProbeEvidence | null = null;
+          for (let hydrationAttempt = 0; hydrationAttempt < 4; hydrationAttempt++) {
+            evidence = await readPrimaryEvidence();
+            if (evidence.hydrated) break;
+            await page.waitForTimeout(1000 + hydrationAttempt * 500);
+          }
+          if (!evidence) throw new Error('Relationship probe produced no evidence');
+
+          if (!evidence.primary.connect && evidence.primary.more) {
+            const moreButton = page.locator('[data-yuktris-relationship-more="true"]').first();
+            if (await moreButton.isVisible().catch(() => false)) {
+              await moreButton.click();
+              await page.getByRole('menu').first().waitFor({ state: 'visible', timeout: 3000 }).catch(() => {});
+              const menuLabels = await page.locator('[role="menu"] [role="menuitem"], [role="menu"] button, .artdeco-dropdown__content [role="button"], .artdeco-dropdown__content li')
+                .evaluateAll((elements) => elements.filter(element => {
+                  const node = element as HTMLElement; const rect = node.getBoundingClientRect(); const style = getComputedStyle(node);
+                  return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
+                }).map(element => [element.getAttribute('aria-label'), element.textContent].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim().toLowerCase()));
+              evidence.moreMenu = {
+                inspected: true,
+                connect: menuLabels.some(label => /(?:^|\b)connect(?:\b|$)/i.test(label)),
+                pending: menuLabels.some(label => /pending|invitation\s+sent|withdraw\s+invitation/i.test(label)),
+                connected: menuLabels.some(label => /remove\s+connection|connection\s+since/i.test(label)),
+              };
+              await page.keyboard.press('Escape');
+            }
+          }
+
+          const relationshipClassification = classifyRelationshipProbe(evidence);
+          logger.info('linkedin_relationship_probe_classified', {
+            queue_item_id: item.id, target_path: new URL(target).pathname,
+            classification: relationshipClassification, degree: evidence.degree,
+            primary_controls: Object.entries(evidence.primary).filter(([, found]) => found).map(([name]) => name),
+            more_menu_inspected: evidence.moreMenu.inspected,
+            more_menu_controls: Object.entries(evidence.moreMenu).filter(([name, found]) => name !== 'inspected' && found).map(([name]) => name),
+          });
           result = {
             success: true,
             data: {
-              accepted,
-              pending: hasPending,
-              connect_available: hasConnect,
-              message_available: hasMessage,
-              first_degree: firstDegree,
+              result_code: 'success', relationship_classification: relationshipClassification,
+              accepted: relationshipClassification === 'already_connected',
+              pending: relationshipClassification === 'invitation_pending',
+              connect_available: relationshipClassification === 'eligible_for_connection_request',
+              message_available: evidence.primary.message,
+              follow_available: evidence.primary.follow,
+              first_degree: evidence.degree === '1st', degree: evidence.degree,
+              diagnostic_evidence: {
+                hydrated: evidence.hydrated,
+                primary_controls: Object.entries(evidence.primary).filter(([, found]) => found).map(([name]) => name),
+                more_menu_inspected: evidence.moreMenu.inspected,
+                more_menu_controls: Object.entries(evidence.moreMenu).filter(([name, found]) => name !== 'inspected' && found).map(([name]) => name),
+              },
             },
           };
           break;
