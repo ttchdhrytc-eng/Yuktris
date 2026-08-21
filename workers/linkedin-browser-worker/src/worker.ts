@@ -1718,12 +1718,17 @@ export class Worker {
             const moreButton = page.locator('[data-yuktris-relationship-more="true"]').first();
             if (await moreButton.isVisible().catch(() => false)) {
               await moreButton.click();
-              await page.getByRole('menu').first().waitFor({ state: 'visible', timeout: 3000 }).catch(() => {});
-              const menuLabels = await page.locator('[role="menu"] [role="menuitem"], [role="menu"] button, .artdeco-dropdown__content [role="button"], .artdeco-dropdown__content li')
-                .evaluateAll((elements) => elements.filter(element => {
-                  const node = element as HTMLElement; const rect = node.getBoundingClientRect(); const style = getComputedStyle(node);
-                  return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
-                }).map(element => [element.getAttribute('aria-label'), element.textContent].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim().toLowerCase()));
+              let menuLabels: string[] = [];
+              for (let menuAttempt = 0; menuAttempt < 4 && menuLabels.length === 0; menuAttempt++) {
+                await page.waitForTimeout(350 + menuAttempt * 200);
+                menuLabels = await page.locator('[role="menuitem"], [role="option"], [role="menu"] button, [role="menu"] [role="button"], .artdeco-dropdown__item, .artdeco-dropdown__content li, [data-control-name]')
+                  .evaluateAll((elements) => elements.filter(element => {
+                    const node = element as HTMLElement; const rect = node.getBoundingClientRect(); const style = getComputedStyle(node);
+                    return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
+                  }).map(element => [element.getAttribute('aria-label'), element.getAttribute('title'), element.getAttribute('data-control-name'), element.textContent]
+                    .filter(Boolean).join(' ').replace(/\s+/g, ' ').trim().toLowerCase())
+                    .filter(label => /connect|pending|invitation|remove\s+connection|follow|unfollow|report|block/i.test(label)));
+              }
               evidence.moreMenu = {
                 inspected: true,
                 connect: menuLabels.some(label => /(?:^|\b)connect(?:\b|$)/i.test(label)),

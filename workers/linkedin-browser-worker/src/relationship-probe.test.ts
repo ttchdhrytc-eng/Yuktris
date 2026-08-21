@@ -64,3 +64,9 @@ test('stabilized extractor supports current h2 and accessible heading variants',
   assert.match(worker, /main h1, main h2, main \[role="heading"\]/);
   assert.match(worker, /data-yuktris-relationship-more/);
 });
+
+test('More menu uses bounded semantic hydration and never selects Connect', () => {
+  const probe = worker.slice(worker.lastIndexOf("case 'check_connection_acceptance':"), worker.lastIndexOf("case 'connection_request':"));
+  assert.match(probe, /menuAttempt < 4[\s\S]*role="menuitem"[\s\S]*data-control-name/);
+  assert.doesNotMatch(probe, /menuLabels[\s\S]*\.click\(/);
+});
