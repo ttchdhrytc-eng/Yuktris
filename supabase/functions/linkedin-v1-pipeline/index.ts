@@ -39,7 +39,7 @@ Deno.serve(async (req: Request) => {
     const body = (await req.json()) as Json;
     const workspaceId = requireString(body.workspace_id, "workspace_id");
     const action = typeof body.action === "string" ? body.action : "launch";
-    const { admin } = await authorizeLinkedInWorkspace(req, workspaceId, {
+    const { admin, userId, internalService } = await authorizeLinkedInWorkspace(req, workspaceId, {
       allowServiceRole: true,
     });
     lifecycleAdmin = admin;
@@ -240,6 +240,7 @@ Deno.serve(async (req: Request) => {
     }
 
     if (action === "prepare_controlled_acceptance") {
+      if (internalService || !userId) throw pipelineError("controlled_acceptance_human_initiation_required", "A signed-in workspace member must explicitly initiate this attempt", 403);
       const campaignId = requireString(body.campaign_id, "campaign_id");
       const contactId = requireString(body.contact_id, "contact_id");
       const { data: campaign, error: campaignError } = await admin.from("customer_campaigns").select("id,linkedin_account_id,outreach_timezone,operating_days,operating_hours").eq("id", campaignId).eq("workspace_id", workspaceId).maybeSingle();
@@ -252,17 +253,12 @@ Deno.serve(async (req: Request) => {
       const target = normalizeLinkedInProfile(contact.linkedin_url);
       const { data: allowed } = await admin.from("linkedin_safe_write_targets").select("id").eq("workspace_id", workspaceId).eq("linkedin_account_id", campaign.linkedin_account_id).eq("project_ref", "vdiqfiuqckaxdjkadinu").eq("target_identifier", target).eq("enabled", true).contains("allowed_action_types", ["connection_request"]).maybeSingle();
       if (!allowed) throw pipelineError("unsafe_target", "The selected prospect is not authorized for the staging acceptance write", 409);
-      const { data: existingAcceptance } = await admin.from("linkedin_execution_jobs").select("id,status").eq("workspace_id", workspaceId).contains("action_payload", { acceptance_test_mode: true }).limit(1).maybeSingle();
-      if (existingAcceptance)
-        return json({
-          status: "prepared",
-          job_id: existingAcceptance.id,
-          job_status: existingAcceptance.status,
-          exactly_one_write_cap: true,
-          write_performed: false,
-        });
-      const { data: scheduledAt } = await admin.rpc("next_campaign_outreach_at", { p_campaign_id: campaignId, p_not_before: new Date().toISOString() });
-      if (!scheduledAt) throw pipelineError("invalid_campaign_schedule", "Configure valid campaign operating days and hours", 409);
+      const { data: eligibility, error: eligibilityError } = await admin.rpc("controlled_acceptance_eligibility", { p_workspace_id: workspaceId });
+      if (eligibilityError) throw pipelineError("acceptance_eligibility_failed", "Controlled acceptance eligibility could not be verified", 500);
+      if (!eligibility?.eligible) throw pipelineError(String(eligibility?.code ?? "controlled_acceptance_ineligible"), "This workspace is not eligible for another controlled acceptance attempt", 409);
+      const { data: windowValidation, error: windowError } = await admin.rpc("campaign_account_window_validation", { p_campaign_id: campaignId, p_not_before: new Date().toISOString() });
+      if (windowError || !windowValidation?.valid) throw pipelineError("no_effective_sending_window", "Campaign hours do not overlap the selected LinkedIn account safety hours", 409);
+      const scheduledAt = windowValidation.scheduled_at;
       const { data: job, error: jobError } = await admin
         .from("linkedin_execution_jobs")
         .insert({
@@ -279,6 +275,8 @@ Deno.serve(async (req: Request) => {
             source_campaign_id: campaignId,
             profile_url: target,
             acceptance_test_mode: true,
+            human_initiated: true,
+            human_initiated_by: userId,
           },
         })
         .select("id,status,scheduled_at")
@@ -345,6 +343,8 @@ Deno.serve(async (req: Request) => {
         if (customerCampaignError) throw new Error(`Campaign creation failed: ${customerCampaignError.message}`);
         customerCampaignId = customerCampaign.id;
         lifecycleCampaignId = customerCampaignId;
+        const { data: windowValidation, error: windowError } = await admin.rpc("campaign_account_window_validation", { p_campaign_id: customerCampaignId, p_not_before: new Date().toISOString() });
+        if (windowError || !windowValidation?.valid) throw pipelineError("no_effective_sending_window", "Campaign hours do not overlap the selected LinkedIn account safety hours", 409);
       }
 
       const prospects = await discoverVerifiedProspects(icp, maxProspects);

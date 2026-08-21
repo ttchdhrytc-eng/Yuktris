@@ -14,6 +14,9 @@ const digestFix = readFileSync(resolve(process.cwd(), '../../supabase/migrations
 const acceptanceOverride = readFileSync(resolve(process.cwd(), '../../supabase/migrations/20260815110000_linkedin_one_time_acceptance_override.sql'), 'utf8');
 const writeAcceptancePurpose = readFileSync(resolve(process.cwd(), '../../supabase/migrations/20260816090000_controlled_write_acceptance_purpose.sql'), 'utf8');
 const authoritativeSchedule = readFileSync(resolve(process.cwd(), '../../supabase/migrations/20260821090000_authoritative_campaign_outreach_schedule.sql'), 'utf8');
+const effectiveSchedule = readFileSync(resolve(process.cwd(), '../../supabase/migrations/20260821213000_linkedin_effective_sending_window.sql'), 'utf8');
+const effectiveScheduleTests = readFileSync(resolve(process.cwd(), '../../supabase/tests/linkedin_effective_sending_window.sql'), 'utf8');
+const failedAcceptanceEvidence = readFileSync(resolve(process.cwd(), '../../supabase/migrations/20260821213500_preserve_failed_acceptance_terminal_evidence.sql'), 'utf8');
 const terminalCampaignReconciliation = readFileSync(resolve(process.cwd(), '../../supabase/migrations/20260821190000_terminal_campaign_execution_reconciliation.sql'), 'utf8');
 const conversationEngine = readFileSync(resolve(process.cwd(), '../../supabase/functions/linkedin-conversation-engine/index.ts'), 'utf8');
 const linkedinV1Pipeline = readFileSync(resolve(process.cwd(), '../../supabase/functions/linkedin-v1-pipeline/index.ts'), 'utf8');
@@ -279,6 +282,38 @@ test('dashboard and campaign cards aggregate the same canonical zero-safe metric
   assert.match(dashboardPage, /linkedin_write_audit[\s\S]*execution_result[\s\S]*success/);
   assert.match(dashboardPage, /prospectsContacted: new Set\(\(successfulWrites\.data/);
   assert.match(campaignMetrics, /prospects: 0[\s\S]*meetingsBooked: 0/);
+});
+test('effective scheduling intersects campaign and account IANA windows and covers DST', () => {
+  assert.match(effectiveSchedule, /next_campaign_account_outreach_at/);
+  assert.match(effectiveSchedule, /pg_catalog\.pg_timezone_names/);
+  assert.match(effectiveSchedule, /campaign_day=ANY\(campaign_days\)[\s\S]*account_day=ANY\(a\.working_days\)/);
+  assert.match(effectiveSchedule, /campaign_local::time>=campaign_start[\s\S]*account_local::time>=a\.working_hours_start::time/);
+  for (const value of ['Asia/Kolkata', 'Europe/London', 'Pacific/Auckland', 'America/New_York', 'DST boundary', 'zero overlap']) assert.match(effectiveScheduleTests, new RegExp(value));
+});
+test('worker preflight and final write preflight independently enforce both windows', () => {
+  assert.match(effectiveSchedule, /campaign_outreach_preflight[\s\S]*outside_campaign_window[\s\S]*outside_working_hours/);
+  assert.match(worker, /campaign_outreach_preflight[\s\S]*preflightLinkedInWrite\(this\.client, item\)/);
+  assert.match(effectiveSchedule, /preflight_linkedin_write_without_acceptance_override/);
+  assert.doesNotMatch(effectiveSchedule, /preflight_result='allowed',execution_started_at=now\(\),acceptance_override_id/);
+});
+test('controlled acceptance permits only safe human-initiated pre-write retries', () => {
+  assert.match(effectiveSchedule, /human_initiated_by/);
+  assert.match(effectiveSchedule, /status IN \('queued','scheduled','running','pending','retry','retrying'\)/);
+  assert.match(effectiveSchedule, /execution_result='success'/);
+  assert.match(effectiveSchedule, /previous_controlled_acceptance_reached_write_phase/);
+  assert.match(effectiveSchedule, /DROP INDEX IF EXISTS public\.uq_one_controlled_acceptance_job/);
+  assert.match(linkedinV1Pipeline, /controlled_acceptance_eligibility/);
+  assert.match(linkedinV1Pipeline, /unsafe_target/);
+  const acceptance = linkedinV1Pipeline.slice(linkedinV1Pipeline.indexOf('if (action === "prepare_controlled_acceptance")'), linkedinV1Pipeline.indexOf('if (action === "launch")'));
+  assert.doesNotMatch(acceptance, /linkedin_sequences|linkedin_sequence_state|follow_up/);
+});
+test('failed acceptance evidence stays terminal and unscheduled', () => {
+  assert.match(failedAcceptanceEvidence, /51ccbcf6-1361-4da7-9f09-f080d11b8495[\s\S]*status='failed'/);
+  assert.match(failedAcceptanceEvidence, /a2f2bf5d-ed02-47d4-ad45-9b1850f7853c[\s\S]*status='failed'/);
+  assert.match(failedAcceptanceEvidence, /scheduled_at=NULL/);
+  assert.match(failedAcceptanceEvidence, /next_retry_at=NULL/);
+  assert.match(failedAcceptanceEvidence, /max_retries=least\(max_retries,retry_count\)/);
+  assert.doesNotMatch(failedAcceptanceEvidence, /DELETE|status='pending'|status='queued'/);
 });
 
 test('controlled acceptance confirmation is inline and preparation failures are contained', () => {
