@@ -14,6 +14,7 @@ const digestFix = readFileSync(resolve(process.cwd(), '../../supabase/migrations
 const acceptanceOverride = readFileSync(resolve(process.cwd(), '../../supabase/migrations/20260815110000_linkedin_one_time_acceptance_override.sql'), 'utf8');
 const writeAcceptancePurpose = readFileSync(resolve(process.cwd(), '../../supabase/migrations/20260816090000_controlled_write_acceptance_purpose.sql'), 'utf8');
 const authoritativeSchedule = readFileSync(resolve(process.cwd(), '../../supabase/migrations/20260821090000_authoritative_campaign_outreach_schedule.sql'), 'utf8');
+const terminalCampaignReconciliation = readFileSync(resolve(process.cwd(), '../../supabase/migrations/20260821190000_terminal_campaign_execution_reconciliation.sql'), 'utf8');
 const conversationEngine = readFileSync(resolve(process.cwd(), '../../supabase/functions/linkedin-conversation-engine/index.ts'), 'utf8');
 const linkedinV1Pipeline = readFileSync(resolve(process.cwd(), '../../supabase/functions/linkedin-v1-pipeline/index.ts'), 'utf8');
 const activationService = readFileSync(resolve(process.cwd(), '../../src/services/activation/ActivationService.ts'), 'utf8');
@@ -300,9 +301,13 @@ test('campaign prospects are customer-visible from campaign details and global P
 });
 test('terminal failed campaign jobs reconcile running lifecycle to failed without scheduling work', () => {
   const reconcile = linkedinV1Pipeline.slice(linkedinV1Pipeline.indexOf('if (action === "reconcile_campaign_state")'), linkedinV1Pipeline.indexOf('if (action === "preview_discovery")'));
-  assert.match(reconcile, /jobs\.every\(\(job\) => job\.status === "failed"\)/);
-  assert.match(reconcile, /status: "failed"[\s\S]*execution_failed/);
+  assert.match(reconcile, /reconcile_customer_campaign_execution_state/);
   assert.doesNotMatch(reconcile, /linkedin-job-runner|browser_execution_queue|\.insert\(/);
+  assert.match(terminalCampaignReconciliation, /status IN \('queued','scheduled','retry','retrying','running','pending'\)/);
+  assert.match(terminalCampaignReconciliation, /step_status='stopped'[\s\S]*stopped_reason='parent_execution_failed'[\s\S]*next_action_at=NULL/);
+  assert.match(terminalCampaignReconciliation, /scheduled_at=NULL[\s\S]*max_retries=least\(max_retries,retry_count\)/);
+  assert.match(terminalCampaignReconciliation, /failure_code='all_initial_actions_failed'/);
+  assert.match(terminalCampaignReconciliation, /AFTER UPDATE OF status/);
 });
 test('Inbox has an explicit customer empty state', () => {
   assert.match(conversationInboxPage, /No conversations yet\./);
