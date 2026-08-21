@@ -1,6 +1,6 @@
 import { useMemo, useRef, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { AlertTriangle, CheckCircle2, ChevronLeft, ChevronRight, Rocket } from 'lucide-react';
+import { AlertTriangle, ChevronLeft, ChevronRight, Rocket } from 'lucide-react';
 import { toast } from 'sonner';
 import { Badge } from '@/components/ui/Badge';
 import { Button } from '@/components/ui/Button';
@@ -272,6 +272,7 @@ export function CampaignsPage() {
       {(existing.data?.campaigns.length ?? 0) > 0 && (
         <section>
           <h2 className="mb-3 text-base font-semibold text-ink-100">Your campaigns</h2>
+          {campaignProspects.isError && <Reason text="Campaign prospect identities could not be loaded. Retry this page; no outreach was started." />}
           <div className="space-y-3">
             {existing.data!.campaigns.map((c: Record<string, unknown>) => {
               const id = String(c.id);

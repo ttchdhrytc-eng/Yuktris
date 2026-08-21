@@ -1,5 +1,6 @@
 import { supabase } from '@/lib/supabase';
 import { isTestFixture } from '@/services/campaign-metrics';
+import { resolveCampaignProspectIdentity } from '@/services/campaign-prospect-identity';
 
 type Row = Record<string, unknown>;
 
@@ -38,7 +39,7 @@ export async function fetchCampaignProspects(workspaceId: string, campaignIds?: 
   const contactIds = [...new Set([...correlated.map((job) => String(job.contact_id ?? '')), ...selectedMappings.map((row) => String(row.contact_id ?? ''))].filter(Boolean))];
   if (!contactIds.length) return [];
   const campaignIdList = [...new Set([...correlated.map((job) => sourceCampaignId(job as Row)!), ...selectedMappings.map((row) => String(row.customer_campaign_id))].filter(Boolean))];
-  const [{ data: contacts }, { data: history }, { data: campaigns }] = await Promise.all([
+  const [contactResult, historyResult, campaignResult] = await Promise.all([
     supabase.from('contacts').select('id,full_name,first_name,last_name,job_title,company_id,linkedin_url,status,created_at,updated_at').eq('workspace_id', workspaceId).in('id', contactIds),
     supabase
       .from('linkedin_action_history')
@@ -50,10 +51,28 @@ export async function fetchCampaignProspects(workspaceId: string, campaignIds?: 
       ),
     supabase.from('customer_campaigns').select('id,outreach_timezone').eq('workspace_id', workspaceId).in('id', campaignIdList),
   ]);
+  const identityQueryError = contactResult.error ?? historyResult.error ?? campaignResult.error;
+  if (identityQueryError) {
+    console.error('[campaign-prospect-query-failed]', { code: identityQueryError.code, contact_count: contactIds.length });
+    throw new Error('Campaign prospect identities could not be loaded');
+  }
+  const contacts = contactResult.data;
+  const history = historyResult.data;
+  const campaigns = campaignResult.data;
   const companyIds = [...new Set((contacts ?? []).map((contact) => String(contact.company_id ?? '')).filter(Boolean))];
-  const { data: companies } = companyIds.length ? await supabase.from('companies').select('id,name').eq('workspace_id', workspaceId).in('id', companyIds) : { data: [] as Row[] };
+  const companyResult = companyIds.length ? await supabase.from('companies').select('id,name').eq('workspace_id', workspaceId).in('id', companyIds) : { data: [] as Row[], error: null };
+  if (companyResult.error) {
+    console.error('[campaign-prospect-query-failed]', { code: companyResult.error.code, company_count: companyIds.length });
+    throw new Error('Campaign prospect identities could not be loaded');
+  }
+  const companies = companyResult.data;
   const contactMap = new Map((contacts ?? []).map((row) => [String(row.id), row]));
   const companyMap = new Map((companies ?? []).map((row) => [String(row.id), String(row.name)]));
+  const missingContactIds = contactIds.filter((id) => !contactMap.has(id));
+  if (missingContactIds.length) {
+    console.error('[campaign-prospect-identity-missing]', { workspace_id: workspaceId, missing_contact_ids: missingContactIds });
+    throw new Error('Campaign prospect identities could not be loaded');
+  }
   const timezoneMap = new Map((campaigns ?? []).map((row) => [String(row.id), row.outreach_timezone ? String(row.outreach_timezone) : null]));
   const rows = selectedMappings.map((mapping) => ({
     mapping,
@@ -61,7 +80,8 @@ export async function fetchCampaignProspects(workspaceId: string, campaignIds?: 
   }));
   for (const job of correlated) if (!rows.some((row) => row.job?.id === job.id)) rows.push({ mapping: { id: job.id, customer_campaign_id: sourceCampaignId(job as Row), contact_id: job.contact_id, source: 'campaign_discovery', discovered_at: job.created_at }, job: job as Row });
   return Promise.all(rows.map(async ({ mapping, job }) => {
-    const actualContact = contactMap.get(String(job?.contact_id ?? mapping.contact_id)) as Row | undefined;
+    const actualContactId = String(job?.contact_id ?? mapping.contact_id);
+    const identity = resolveCampaignProspectIdentity(actualContactId, contactMap, companyMap);
     const latest = job ? (history ?? []).filter((row) => row.execution_job_id === job.id).sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))[0] : null;
     const payload = job?.action_payload && typeof job.action_payload === 'object' ? (job.action_payload as Row) : {};
     const campaignId = String(mapping.customer_campaign_id);
@@ -73,10 +93,10 @@ export async function fetchCampaignProspects(workspaceId: string, campaignIds?: 
       campaignId,
       jobId: String(job?.id ?? mapping.id),
       contactId: String(mapping.contact_id),
-      name: String(actualContact?.full_name ?? `${actualContact?.first_name ?? ''} ${actualContact?.last_name ?? ''}`).trim() || 'Unknown prospect',
-      title: actualContact?.job_title ? String(actualContact.job_title) : null,
-      company: actualContact?.company_id ? (companyMap.get(String(actualContact.company_id)) ?? null) : null,
-      linkedinUrl: String(actualContact?.linkedin_url ?? payload.profile_url ?? '') || null,
+      name: identity.name,
+      title: identity.title,
+      company: identity.company,
+      linkedinUrl: identity.linkedinUrl ?? (String(payload.profile_url ?? '') || null),
       source: mapping.source === 'existing_workspace_prospect' ? 'Existing workspace prospect' : 'Campaign discovery',
       status,
       lastAction: latest ? `${String(latest.action_type).replaceAll('_', ' ')}: ${latest.error_message ? String(latest.error_message) : String(latest.action_result ?? 'processed')}` : null,
