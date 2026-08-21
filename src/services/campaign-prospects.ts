@@ -19,21 +19,27 @@ export type CampaignProspect = {
   outreachTimezone: string | null;
   createdAt: string;
   updatedAt: string;
+  acceptanceEligible: boolean;
 };
 
 export async function fetchCampaignProspects(workspaceId: string, campaignIds?: string[]): Promise<CampaignProspect[]> {
-  const { data: jobs, error } = await supabase.from('linkedin_execution_jobs').select('*').eq('workspace_id', workspaceId);
+  const [{ data: jobs, error }, { data: mappings, error: mappingError }] = await Promise.all([
+    supabase.from('linkedin_execution_jobs').select('*').eq('workspace_id', workspaceId),
+    supabase.from('customer_campaign_contacts').select('*').eq('workspace_id', workspaceId),
+  ]);
   if (error) throw error;
+  if (mappingError) throw mappingError;
   const correlated = (jobs ?? []).filter((job) => {
     if (isTestFixture(job as Row)) return false;
     const id = sourceCampaignId(job as Row);
     return id && (!campaignIds?.length || campaignIds.includes(id));
   });
-  const contactIds = [...new Set(correlated.map((job) => String(job.contact_id ?? '')).filter(Boolean))];
+  const selectedMappings = (mappings ?? []).filter((row) => !campaignIds?.length || campaignIds.includes(String(row.customer_campaign_id)));
+  const contactIds = [...new Set([...correlated.map((job) => String(job.contact_id ?? '')), ...selectedMappings.map((row) => String(row.contact_id ?? ''))].filter(Boolean))];
   if (!contactIds.length) return [];
-  const campaignIdList = [...new Set(correlated.map((job) => sourceCampaignId(job as Row)!).filter(Boolean))];
+  const campaignIdList = [...new Set([...correlated.map((job) => sourceCampaignId(job as Row)!), ...selectedMappings.map((row) => String(row.customer_campaign_id))].filter(Boolean))];
   const [{ data: contacts }, { data: history }, { data: campaigns }] = await Promise.all([
-    supabase.from('contacts').select('id,full_name,first_name,last_name,title,company_id,linkedin_url,status,created_at,updated_at').eq('workspace_id', workspaceId).in('id', contactIds),
+    supabase.from('contacts').select('id,full_name,first_name,last_name,job_title,company_id,linkedin_url,status,created_at,updated_at').eq('workspace_id', workspaceId).in('id', contactIds),
     supabase
       .from('linkedin_action_history')
       .select('execution_job_id,action_type,action_result,error_message,created_at')
@@ -49,32 +55,39 @@ export async function fetchCampaignProspects(workspaceId: string, campaignIds?: 
   const contactMap = new Map((contacts ?? []).map((row) => [String(row.id), row]));
   const companyMap = new Map((companies ?? []).map((row) => [String(row.id), String(row.name)]));
   const timezoneMap = new Map((campaigns ?? []).map((row) => [String(row.id), row.outreach_timezone ? String(row.outreach_timezone) : null]));
-  return correlated.map((job) => {
-    const contact = contactMap.get(String(job.contact_id)) as Row | undefined;
-    const latest = (history ?? []).filter((row) => row.execution_job_id === job.id).sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))[0];
-    const payload = job.action_payload && typeof job.action_payload === 'object' ? (job.action_payload as Row) : {};
-    const campaignId = sourceCampaignId(job as Row)!;
+  const rows = selectedMappings.map((mapping) => ({
+    mapping,
+    job: correlated.filter((job) => String(job.contact_id) === String(mapping.contact_id) && sourceCampaignId(job as Row) === String(mapping.customer_campaign_id)).sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))[0] as Row | undefined,
+  }));
+  for (const job of correlated) if (!rows.some((row) => row.job?.id === job.id)) rows.push({ mapping: { id: job.id, customer_campaign_id: sourceCampaignId(job as Row), contact_id: job.contact_id, source: 'campaign_discovery', discovered_at: job.created_at }, job: job as Row });
+  return Promise.all(rows.map(async ({ mapping, job }) => {
+    const actualContact = contactMap.get(String(job?.contact_id ?? mapping.contact_id)) as Row | undefined;
+    const latest = job ? (history ?? []).filter((row) => row.execution_job_id === job.id).sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))[0] : null;
+    const payload = job?.action_payload && typeof job.action_payload === 'object' ? (job.action_payload as Row) : {};
+    const campaignId = String(mapping.customer_campaign_id);
     const outreachTimezone = timezoneMap.get(campaignId) ?? null;
-    const nextActionAt = job.scheduled_at ? String(job.scheduled_at) : null;
-    const status = customerStatus(String(job.status ?? ''), latest?.error_message ?? null);
+    const nextActionAt = job?.scheduled_at ? String(job.scheduled_at) : null;
+    const status = job ? customerStatus(String(job.status ?? ''), latest?.error_message ?? null) : 'Selected';
+    const { data: eligibility } = await supabase.functions.invoke('linkedin-v1-pipeline', { body: { action: 'check_acceptance_eligibility', workspace_id: workspaceId, campaign_id: campaignId, contact_id: String(mapping.contact_id) } });
     return {
       campaignId,
-      jobId: String(job.id),
-      contactId: String(job.contact_id),
-      name: String(contact?.full_name ?? `${contact?.first_name ?? ''} ${contact?.last_name ?? ''}`).trim() || 'Unknown prospect',
-      title: contact?.title ? String(contact.title) : null,
-      company: contact?.company_id ? (companyMap.get(String(contact.company_id)) ?? null) : null,
-      linkedinUrl: String(contact?.linkedin_url ?? payload.profile_url ?? '') || null,
-      source: 'Campaign discovery',
+      jobId: String(job?.id ?? mapping.id),
+      contactId: String(mapping.contact_id),
+      name: String(actualContact?.full_name ?? `${actualContact?.first_name ?? ''} ${actualContact?.last_name ?? ''}`).trim() || 'Unknown prospect',
+      title: actualContact?.job_title ? String(actualContact.job_title) : null,
+      company: actualContact?.company_id ? (companyMap.get(String(actualContact.company_id)) ?? null) : null,
+      linkedinUrl: String(actualContact?.linkedin_url ?? payload.profile_url ?? '') || null,
+      source: mapping.source === 'existing_workspace_prospect' ? 'Existing workspace prospect' : 'Campaign discovery',
       status,
       lastAction: latest ? `${String(latest.action_type).replaceAll('_', ' ')}: ${latest.error_message ? String(latest.error_message) : String(latest.action_result ?? 'processed')}` : null,
       nextAction: ['queued', 'scheduled', 'retry', 'pending'].includes(String(job.status)) ? (nextActionAt ? `Connection request scheduled for ${formatInTimezone(nextActionAt, outreachTimezone)}` : outreachTimezone ? 'Connection request awaiting the safety window' : 'Requires attention — configure outreach timezone') : null,
       nextActionAt,
       outreachTimezone,
-      createdAt: String(job.created_at),
-      updatedAt: String(job.updated_at ?? job.created_at),
+      createdAt: String(mapping.discovered_at ?? job?.created_at),
+      updatedAt: String(job?.updated_at ?? mapping.created_at ?? mapping.discovered_at),
+      acceptanceEligible: eligibility?.eligible === true,
     };
-  });
+  }));
 }
 
 function sourceCampaignId(row: Row): string | null {

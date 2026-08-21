@@ -37,6 +37,7 @@ export function CampaignsPage() {
   const [outreachTimezone, setOutreachTimezone] = useState('');
   const [launching, setLaunching] = useState(false);
   const [expandedCampaign, setExpandedCampaign] = useState<string | null>(null);
+  const [existingProspectId, setExistingProspectId] = useState('');
   const initializationKey = useRef(crypto.randomUUID());
 
   const connectedAccounts = (accounts.data ?? []).filter((a) => a.connection_state === 'connected' && ['healthy', 'degraded'].includes(a.health_status) && a.profile_url);
@@ -78,6 +79,14 @@ export function CampaignsPage() {
     queryKey: ['campaign-prospects', workspace?.id],
     enabled: !!workspace,
     queryFn: () => fetchCampaignProspects(workspace!.id),
+  });
+  const workspaceProspects = useQuery({
+    queryKey: ['selectable-prospects', workspace?.id], enabled: !!workspace,
+    queryFn: async () => {
+      const { data, error } = await supabase.from('prospects').select('id,first_name,last_name,title,linkedin_url').eq('workspace_id', workspace!.id).not('linkedin_url', 'is', null).order('created_at', { ascending: false });
+      if (error) throw error;
+      return data ?? [];
+    },
   });
 
   const payload = useMemo(() => (selectedIcp ? mapIcp(selectedIcp) : null), [selectedIcp]);
@@ -136,6 +145,15 @@ export function CampaignsPage() {
       return;
     }
     toast.success(`One connection request prepared${data?.scheduled_at ? ` for ${new Date(data.scheduled_at).toLocaleString()}` : ''}.`);
+    queryClient.invalidateQueries({ queryKey: ['campaign-prospects'] });
+  }
+
+  async function associateExistingProspect(campaignId: string) {
+    if (!workspace || !existingProspectId) return;
+    const { data, error } = await supabase.functions.invoke('linkedin-v1-pipeline', { body: { action: 'associate_existing_prospect', workspace_id: workspace.id, campaign_id: campaignId, prospect_id: existingProspectId } });
+    if (error) return toast.error(await edgeFunctionError(error));
+    toast.success(data?.job_created === false ? 'Prospect associated. No outreach was launched.' : 'Prospect associated.');
+    setExistingProspectId('');
     queryClient.invalidateQueries({ queryKey: ['campaign-prospects'] });
   }
 
@@ -296,6 +314,13 @@ export function CampaignsPage() {
                   </div>
                   {expandedCampaign === id && (
                     <div className="mt-4 space-y-2 border-t border-gold-500/10 pt-4">
+                      <div className="flex flex-col gap-2 rounded-lg border border-gold-500/10 p-3 md:flex-row">
+                        <Select value={existingProspectId} onChange={(e) => setExistingProspectId(e.target.value)}>
+                          <option value="">Select an existing workspace prospect</option>
+                          {(workspaceProspects.data ?? []).map((p) => <option key={p.id} value={p.id}>{`${p.first_name ?? ''} ${p.last_name ?? ''}`.trim() || p.linkedin_url}</option>)}
+                        </Select>
+                        <Button variant="secondary" size="sm" disabled={!existingProspectId} onClick={() => associateExistingProspect(id)}>Associate prospect</Button>
+                      </div>
                       {rows.length ? (
                         rows.map((p) => (
                           <div key={p.jobId} className="rounded-lg bg-maroon-900/50 p-3">
@@ -317,9 +342,9 @@ export function CampaignsPage() {
                               <p>Last action: {p.lastAction ?? 'No action yet'}</p>
                               <p>Next action: {p.nextAction ?? 'None scheduled'}</p>
                             </div>
-                            <Button className="mt-2" variant="secondary" size="sm" onClick={() => prepareControlledAcceptance(id, p.contactId)}>
+                            {p.acceptanceEligible && <Button className="mt-2" variant="secondary" size="sm" onClick={() => prepareControlledAcceptance(id, p.contactId)}>
                               Prepare one-write acceptance
-                            </Button>
+                            </Button>}
                           </div>
                         ))
                       ) : (

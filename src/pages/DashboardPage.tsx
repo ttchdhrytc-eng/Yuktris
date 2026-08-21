@@ -42,7 +42,7 @@ export function DashboardPage() {
       const [
         campaigns, prospects, meetings, messages, upcomingMeetings,
         repliedProspects, proposals, executionJobs, linkedinMessages,
-        linkedinConversations, qualifiedContacts, meetingConfirmations, customerCampaigns,
+        linkedinConversations, qualifiedContacts, meetingConfirmations, customerCampaigns, successfulWrites,
       ] = await Promise.all([
         supabase.from('customer_campaigns').select('id, name, status, created_at').eq('workspace_id', wsId).order('created_at', { ascending: false }),
         supabase.from('contacts').select('id', { count: 'exact', head: true }).eq('workspace_id', wsId),
@@ -57,6 +57,7 @@ export function DashboardPage() {
         supabase.from('contacts').select('id', { count: 'exact', head: true }).eq('workspace_id', wsId).eq('status', 'qualified'),
         supabase.from('linkedin_meeting_confirmations').select('id,metadata').eq('workspace_id', wsId),
         supabase.from('customer_campaigns').select('id,status').eq('workspace_id', wsId),
+        supabase.from('linkedin_write_audit').select('contact_id,action_type,execution_result,execution_completed_at').eq('workspace_id', wsId).eq('execution_result', 'success').not('execution_completed_at', 'is', null).not('contact_id', 'is', null),
       ]);
 
       const sent = messages.data?.filter(m => m.direction === 'sent').length ?? 0;
@@ -96,7 +97,7 @@ export function DashboardPage() {
         metrics: {
           activeCampaigns: customerCampaigns.data?.filter(c => c.status === 'running').length ?? activeCampaigns.length,
           prospectsDiscovered: canonicalTotals.prospects,
-          prospectsContacted: canonicalTotals.prospects,
+          prospectsContacted: new Set((successfulWrites.data ?? []).map(row => row.contact_id).filter(Boolean)).size,
           connectionsSent: canonicalTotals.connectionsSent,
           connectionsAccepted: canonicalTotals.connectionsAccepted,
           messagesSent: canonicalTotals.messagesSent,

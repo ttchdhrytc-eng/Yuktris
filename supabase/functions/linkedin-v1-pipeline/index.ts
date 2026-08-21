@@ -217,6 +217,49 @@ Deno.serve(async (req: Request) => {
       });
     }
 
+    if (action === "check_acceptance_eligibility") {
+      const campaignId = requireString(body.campaign_id, "campaign_id");
+      const contactId = requireString(body.contact_id, "contact_id");
+      const { data: campaign } = await admin.from("customer_campaigns").select("linkedin_account_id").eq("id", campaignId).eq("workspace_id", workspaceId).maybeSingle();
+      const { data: contact } = await admin.from("contacts").select("linkedin_url").eq("id", contactId).eq("workspace_id", workspaceId).maybeSingle();
+      const target = contact?.linkedin_url ? normalizeLinkedInProfile(contact.linkedin_url) : null;
+      let eligible = false;
+      if (campaign && target) {
+        const { data: allowed } = await admin.from("linkedin_safe_write_targets").select("id").eq("workspace_id", workspaceId).eq("linkedin_account_id", campaign.linkedin_account_id).eq("project_ref", "vdiqfiuqckaxdjkadinu").eq("target_identifier", target).eq("enabled", true).contains("allowed_action_types", ["connection_request"]).maybeSingle();
+        eligible = Boolean(allowed);
+      }
+      return json({ eligible, normalized_linkedin_url: target });
+    }
+
+    if (action === "associate_existing_prospect") {
+      const campaignId = requireString(body.campaign_id, "campaign_id");
+      const prospectId = requireString(body.prospect_id, "prospect_id");
+      const { data: campaign } = await admin.from("customer_campaigns").select("id").eq("id", campaignId).eq("workspace_id", workspaceId).maybeSingle();
+      if (!campaign) throw pipelineError("campaign_not_found", "Campaign was not found in this workspace", 404);
+      const { data: prospect } = await admin.from("prospects").select("*").eq("id", prospectId).eq("workspace_id", workspaceId).maybeSingle();
+      const target = prospect?.linkedin_url ? normalizeLinkedInProfile(prospect.linkedin_url) : null;
+      if (!prospect || !target) throw pipelineError("prospect_identity_required", "Select a genuine workspace prospect with a LinkedIn profile", 409);
+      const { data: existing } = await admin.from("contacts").select("id").eq("workspace_id", workspaceId).eq("normalized_linkedin_url", target).maybeSingle();
+      let contactId = existing?.id ?? null;
+      if (!contactId) {
+        const { data: contact, error } = await admin.from("contacts").insert({
+          workspace_id: workspaceId, company_id: prospect.company_id, source_prospect_id: prospect.id,
+          first_name: prospect.first_name, last_name: prospect.last_name,
+          full_name: `${prospect.first_name ?? ""} ${prospect.last_name ?? ""}`.trim() || null,
+          job_title: prospect.title, linkedin_url: target, email: prospect.email, phone: prospect.phone,
+          status: "selected", confidence_score: 1,
+        }).select("id").single();
+        if (error) throw pipelineError("identity_reconciliation_failed", error.message, 409);
+        contactId = contact.id;
+      }
+      const { error: mappingError } = await admin.from("customer_campaign_contacts").upsert({
+        workspace_id: workspaceId, customer_campaign_id: campaignId, contact_id: contactId,
+        prospect_id: prospect.id, source: "existing_workspace_prospect", discovered_at: prospect.created_at,
+      }, { onConflict: "customer_campaign_id,prospect_id" });
+      if (mappingError) throw pipelineError("campaign_association_failed", mappingError.message, 409);
+      return json({ status: "associated", campaign_id: campaignId, prospect_id: prospect.id, contact_id: contactId, job_created: false, write_performed: false });
+    }
+
     if (action === "prepare_controlled_acceptance") {
       const campaignId = requireString(body.campaign_id, "campaign_id");
       const contactId = requireString(body.contact_id, "contact_id");
@@ -225,6 +268,8 @@ Deno.serve(async (req: Request) => {
       if (!campaign.outreach_timezone) throw pipelineError("outreach_timezone_required", "Configure outreach timezone before preparing acceptance", 409);
       const { data: contact, error: contactError } = await admin.from("contacts").select("id,company_id,linkedin_url").eq("id", contactId).eq("workspace_id", workspaceId).maybeSingle();
       if (contactError || !contact?.linkedin_url) throw pipelineError("acceptance_contact_required", "Select a workspace prospect with a LinkedIn profile", 409);
+      const { data: association } = await admin.from("customer_campaign_contacts").select("id").eq("customer_campaign_id", campaignId).eq("contact_id", contactId).eq("workspace_id", workspaceId).maybeSingle();
+      if (!association) throw pipelineError("campaign_prospect_required", "Associate this workspace prospect with the campaign before preparing acceptance", 409);
       const target = normalizeLinkedInProfile(contact.linkedin_url);
       const { data: allowed } = await admin.from("linkedin_safe_write_targets").select("id").eq("workspace_id", workspaceId).eq("linkedin_account_id", campaign.linkedin_account_id).eq("project_ref", "vdiqfiuqckaxdjkadinu").eq("target_identifier", target).eq("enabled", true).contains("allowed_action_types", ["connection_request"]).maybeSingle();
       if (!allowed) throw pipelineError("unsafe_target", "The selected prospect is not authorized for the staging acceptance write", 409);

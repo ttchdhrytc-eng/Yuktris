@@ -275,7 +275,8 @@ test('fixture conversations and metrics are excluded from normal customer querie
 });
 test('dashboard and campaign cards aggregate the same canonical zero-safe metrics', () => {
   assert.match(dashboardPage, /Object\.values\(campaignMetrics\)\.reduce/);
-  assert.match(dashboardPage, /prospectsContacted: canonicalTotals\.prospects/);
+  assert.match(dashboardPage, /linkedin_write_audit[\s\S]*execution_result[\s\S]*success/);
+  assert.match(dashboardPage, /prospectsContacted: new Set\(\(successfulWrites\.data/);
   assert.match(campaignMetrics, /prospects: 0[\s\S]*meetingsBooked: 0/);
 });
 test('customer Settings exposes only supported V1 tabs', () => {
