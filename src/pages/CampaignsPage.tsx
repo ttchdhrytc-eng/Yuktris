@@ -38,6 +38,7 @@ export function CampaignsPage() {
   const [launching, setLaunching] = useState(false);
   const [expandedCampaign, setExpandedCampaign] = useState<string | null>(null);
   const [existingProspectId, setExistingProspectId] = useState('');
+  const [associating, setAssociating] = useState(false);
   const initializationKey = useRef(crypto.randomUUID());
 
   const connectedAccounts = (accounts.data ?? []).filter((a) => a.connection_state === 'connected' && ['healthy', 'degraded'].includes(a.health_status) && a.profile_url);
@@ -150,11 +151,22 @@ export function CampaignsPage() {
 
   async function associateExistingProspect(campaignId: string) {
     if (!workspace || !existingProspectId) return;
-    const { data, error } = await supabase.functions.invoke('linkedin-v1-pipeline', { body: { action: 'associate_existing_prospect', workspace_id: workspace.id, campaign_id: campaignId, prospect_id: existingProspectId } });
-    if (error) return toast.error(await edgeFunctionError(error));
-    toast.success(data?.job_created === false ? 'Prospect associated. No outreach was launched.' : 'Prospect associated.');
-    setExistingProspectId('');
-    queryClient.invalidateQueries({ queryKey: ['campaign-prospects'] });
+    setAssociating(true);
+    try {
+      const { data, error } = await supabase.functions.invoke('linkedin-v1-pipeline', { body: { action: 'associate_existing_prospect', workspace_id: workspace.id, campaign_id: campaignId, prospect_id: existingProspectId } });
+      if (error) {
+        toast.error(await edgeFunctionError(error));
+        return;
+      }
+      toast.success(data?.job_created === false ? 'Prospect associated. No outreach was launched.' : 'Prospect associated.');
+      setExistingProspectId('');
+      await queryClient.invalidateQueries({ queryKey: ['campaign-prospects'] });
+    } catch (error) {
+      console.error('[campaign-prospect-association-failed]', { message: error instanceof Error ? error.message : 'unknown_error' });
+      toast.error('Prospect could not be associated. No outreach was started.');
+    } finally {
+      setAssociating(false);
+    }
   }
 
   if (icps.isLoading || accounts.isLoading || google.isLoading)
@@ -320,7 +332,7 @@ export function CampaignsPage() {
                           <option value="">Select an existing workspace prospect</option>
                           {(workspaceProspects.data ?? []).map((p) => <option key={p.id} value={p.id}>{`${p.first_name ?? ''} ${p.last_name ?? ''}`.trim() || p.linkedin_url}</option>)}
                         </Select>
-                        <Button variant="secondary" size="sm" disabled={!existingProspectId} onClick={() => associateExistingProspect(id)}>Associate prospect</Button>
+                        <Button type="button" variant="secondary" size="sm" loading={associating} disabled={!existingProspectId} onClick={() => void associateExistingProspect(id)}>Associate prospect</Button>
                       </div>
                       {rows.length ? (
                         rows.map((p) => (

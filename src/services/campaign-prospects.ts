@@ -1,6 +1,6 @@
 import { supabase } from '@/lib/supabase';
 import { isTestFixture } from '@/services/campaign-metrics';
-import { resolveCampaignProspectIdentity } from '@/services/campaign-prospect-identity';
+import { resolveCampaignProspectIdentitySafely } from '@/services/campaign-prospect-identity';
 
 type Row = Record<string, unknown>;
 
@@ -21,6 +21,7 @@ export type CampaignProspect = {
   createdAt: string;
   updatedAt: string;
   acceptanceEligible: boolean;
+  identityDiagnostic: string | null;
 };
 
 export async function fetchCampaignProspects(workspaceId: string, campaignIds?: string[]): Promise<CampaignProspect[]> {
@@ -68,11 +69,6 @@ export async function fetchCampaignProspects(workspaceId: string, campaignIds?: 
   const companies = companyResult.data;
   const contactMap = new Map((contacts ?? []).map((row) => [String(row.id), row]));
   const companyMap = new Map((companies ?? []).map((row) => [String(row.id), String(row.name)]));
-  const missingContactIds = contactIds.filter((id) => !contactMap.has(id));
-  if (missingContactIds.length) {
-    console.error('[campaign-prospect-identity-missing]', { workspace_id: workspaceId, missing_contact_ids: missingContactIds });
-    throw new Error('Campaign prospect identities could not be loaded');
-  }
   const timezoneMap = new Map((campaigns ?? []).map((row) => [String(row.id), row.outreach_timezone ? String(row.outreach_timezone) : null]));
   const rows = selectedMappings.map((mapping) => ({
     mapping,
@@ -81,14 +77,18 @@ export async function fetchCampaignProspects(workspaceId: string, campaignIds?: 
   for (const job of correlated) if (!rows.some((row) => row.job?.id === job.id)) rows.push({ mapping: { id: job.id, customer_campaign_id: sourceCampaignId(job as Row), contact_id: job.contact_id, source: 'campaign_discovery', discovered_at: job.created_at }, job: job as Row });
   return Promise.all(rows.map(async ({ mapping, job }) => {
     const actualContactId = String(job?.contact_id ?? mapping.contact_id);
-    const identity = resolveCampaignProspectIdentity(actualContactId, contactMap, companyMap);
+    const identityResult = resolveCampaignProspectIdentitySafely(actualContactId, contactMap, companyMap);
+    if (!identityResult.ok) console.error('[campaign-prospect-identity-missing]', { workspace_id: workspaceId, contact_id: actualContactId });
+    const identity = identityResult.identity;
     const latest = job ? (history ?? []).filter((row) => row.execution_job_id === job.id).sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))[0] : null;
     const payload = job?.action_payload && typeof job.action_payload === 'object' ? (job.action_payload as Row) : {};
     const campaignId = String(mapping.customer_campaign_id);
     const outreachTimezone = timezoneMap.get(campaignId) ?? null;
     const nextActionAt = job?.scheduled_at ? String(job.scheduled_at) : null;
     const status = job ? customerStatus(String(job.status ?? ''), latest?.error_message ?? null) : 'Selected';
-    const { data: eligibility } = await supabase.functions.invoke('linkedin-v1-pipeline', { body: { action: 'check_acceptance_eligibility', workspace_id: workspaceId, campaign_id: campaignId, contact_id: String(mapping.contact_id) } });
+    const { data: eligibility } = identityResult.ok
+      ? await supabase.functions.invoke('linkedin-v1-pipeline', { body: { action: 'check_acceptance_eligibility', workspace_id: workspaceId, campaign_id: campaignId, contact_id: String(mapping.contact_id) } })
+      : { data: null };
     return {
       campaignId,
       jobId: String(job?.id ?? mapping.id),
@@ -98,14 +98,15 @@ export async function fetchCampaignProspects(workspaceId: string, campaignIds?: 
       company: identity.company,
       linkedinUrl: identity.linkedinUrl ?? (String(payload.profile_url ?? '') || null),
       source: mapping.source === 'existing_workspace_prospect' ? 'Existing workspace prospect' : 'Campaign discovery',
-      status,
+      status: identityResult.ok ? status : 'Needs attention — identity unavailable',
       lastAction: latest ? `${String(latest.action_type).replaceAll('_', ' ')}: ${latest.error_message ? String(latest.error_message) : String(latest.action_result ?? 'processed')}` : null,
       nextAction: job && ['queued', 'scheduled', 'retry', 'pending'].includes(String(job.status)) ? (nextActionAt ? `Connection request scheduled for ${formatInTimezone(nextActionAt, outreachTimezone)}` : outreachTimezone ? 'Connection request awaiting the safety window' : 'Requires attention — configure outreach timezone') : null,
       nextActionAt,
       outreachTimezone,
       createdAt: String(mapping.discovered_at ?? job?.created_at),
       updatedAt: String(job?.updated_at ?? mapping.created_at ?? mapping.discovered_at),
-      acceptanceEligible: eligibility?.eligible === true,
+      acceptanceEligible: identityResult.ok && eligibility?.eligible === true,
+      identityDiagnostic: identityResult.diagnostic,
     };
   }));
 }

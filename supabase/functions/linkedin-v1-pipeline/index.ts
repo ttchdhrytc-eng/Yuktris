@@ -226,7 +226,7 @@ Deno.serve(async (req: Request) => {
           first_name: prospect.first_name, last_name: prospect.last_name,
           full_name: `${prospect.first_name ?? ""} ${prospect.last_name ?? ""}`.trim() || null,
           job_title: prospect.title, linkedin_url: target, email: prospect.email, phone: prospect.phone,
-          status: "selected", confidence_score: 1,
+          status: "saved", confidence_score: 1,
         }).select("id").single();
         if (error) throw pipelineError("identity_reconciliation_failed", error.message, 409);
         contactId = contact.id;
