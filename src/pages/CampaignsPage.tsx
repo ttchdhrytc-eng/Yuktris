@@ -9,6 +9,7 @@ import { Field, Input, Select, Textarea } from '@/components/ui/Field';
 import { PageHeader } from '@/components/ui/PageHeader';
 import { Spinner } from '@/components/ui/Spinner';
 import { useWorkspace } from '@/contexts/WorkspaceContext';
+import { useAuth } from '@/contexts/AuthContext';
 import { useGoogleConnection } from '@/hooks/useGoogleAuth';
 import { useICP } from '@/hooks/useICPIntelligence';
 import { useLinkedInAccounts } from '@/hooks/useLinkedInBrowser';
@@ -26,7 +27,8 @@ const TIMEZONE_SUGGESTIONS = ['Asia/Kolkata', 'America/New_York', 'Europe/London
 type ScheduleDraft = { campaignId: string; days: string[]; start: string; end: string; timezone: string };
 
 export function CampaignsPage() {
-  const { workspace } = useWorkspace();
+  const { workspace, members } = useWorkspace();
+  const { user } = useAuth();
   const icps = useICP();
   const accounts = useLinkedInAccounts();
   const google = useGoogleConnection();
@@ -47,6 +49,7 @@ export function CampaignsPage() {
   const [associating, setAssociating] = useState(false);
   const [acceptanceConfirmation, setAcceptanceConfirmation] = useState<{ campaignId: string; contactId: string } | null>(null);
   const [preparingAcceptance, setPreparingAcceptance] = useState(false);
+  const [acceptanceGeneration, setAcceptanceGeneration] = useState<{ id: string; campaignId: string; contactId: string } | null>(null);
   const [scheduleDraft, setScheduleDraft] = useState<ScheduleDraft | null>(null);
   const [savingSchedule, setSavingSchedule] = useState(false);
   const initializationKey = useRef(crypto.randomUUID());
@@ -59,6 +62,8 @@ export function CampaignsPage() {
   const scheduleValid = days.length > 0 && startTime < endTime && isIanaTimezone(outreachTimezone);
   const canContinue = [name.trim().length > 1, !!selectedIcp, !!selectedAccount, strategy.trim().length > 20, dailyLimit >= 1 && dailyLimit <= 20 && scheduleValid, true][step];
   const nextWindow = useMemo(() => nextCampaignSendingWindow(days, startTime, endTime, outreachTimezone), [days, startTime, endTime, outreachTimezone]);
+  const mayManageAcceptance = import.meta.env.VITE_SUPABASE_URL?.includes('vdiqfiuqckaxdjkadinu') === true
+    && members.some((member) => member.user_id === user?.id && member.status === 'active' && ['owner', 'admin'].includes(member.role));
 
   const existing = useQuery({
     queryKey: ['customer-campaigns', workspace?.id],
@@ -195,6 +200,37 @@ export function CampaignsPage() {
     } finally {
       setPreparingAcceptance(false);
     }
+  }
+
+  async function startControlledAcceptanceGeneration(campaignId: string, contactId: string) {
+    if (!workspace || preparingAcceptance) return;
+    setPreparingAcceptance(true);
+    try {
+      const { data, error } = await supabase.functions.invoke('linkedin-v1-pipeline', { body: {
+        action: 'start_controlled_acceptance_generation', workspace_id: workspace.id, campaign_id: campaignId, contact_id: contactId,
+      } });
+      if (error) throw new Error(await edgeFunctionError(error));
+      setAcceptanceGeneration({ id: data.generation_id, campaignId, contactId });
+      setAcceptanceConfirmation(null);
+      toast.success('Immutable generation created. A read-only relationship check is running; no LinkedIn control was clicked.');
+    } catch (error) { toast.error(error instanceof Error ? error.message : 'Generation could not be started.'); }
+    finally { setPreparingAcceptance(false); }
+  }
+
+  async function classifyAcceptanceGeneration() {
+    if (!workspace || !acceptanceGeneration || preparingAcceptance) return;
+    setPreparingAcceptance(true);
+    try {
+      const { data, error } = await supabase.functions.invoke('linkedin-v1-pipeline', { body: {
+        action: 'advance_controlled_acceptance_generation', workspace_id: workspace.id, generation_id: acceptanceGeneration.id,
+      } });
+      if (error) throw new Error(await edgeFunctionError(error));
+      if (data.status === 'relationship_check_pending') toast.info('The read-only relationship check is still running.');
+      else if (data.status === 'write_prepared') toast.success(`Relationship classified eligible. Exactly one terminal attempt is scheduled for ${new Date(data.scheduled_at).toLocaleString()}.`);
+      else toast.info(`No write prepared. Relationship classification: ${data.status}.`);
+      if (data.status !== 'relationship_check_pending') setAcceptanceGeneration(null);
+    } catch (error) { toast.error(error instanceof Error ? error.message : 'Relationship could not be classified. No write was prepared.'); }
+    finally { setPreparingAcceptance(false); }
   }
 
   async function associateExistingProspect(campaignId: string) {
@@ -406,18 +442,24 @@ export function CampaignsPage() {
                               <p>Last action: {p.lastAction ?? 'No action yet'}</p>
                               <p>Next action: {p.nextAction ?? 'None scheduled'}</p>
                             </div>
-                            {p.acceptanceEligible && (
+                            {mayManageAcceptance && p.linkedinUrl?.replace(/\?.*$/, '').replace(/\/+$/, '').toLowerCase() === 'https://www.linkedin.com/in/tarun-chaudhary' && (
+                              acceptanceGeneration?.campaignId === id && acceptanceGeneration.contactId === p.contactId ? (
+                                <div className="mt-2 rounded-lg border border-warning-500/30 p-3">
+                                  <Reason text="Read-only relationship classification must finish before any attempt can be prepared." />
+                                  <Button className="mt-2" size="sm" loading={preparingAcceptance} onClick={() => void classifyAcceptanceGeneration()}>Classify relationship / continue safely</Button>
+                                </div>
+                              ) :
                               acceptanceConfirmation?.campaignId === id && acceptanceConfirmation.contactId === p.contactId ? (
                                 <div className="mt-2 rounded-lg border border-warning-500/30 p-3">
-                                  <Reason text="Confirm exactly one staging connection request. It will run only inside the campaign sending window." />
+                                  <Reason text="Create a new immutable staging generation. This first step performs only a read-only relationship check." />
                                   <div className="mt-2 flex gap-2">
                                     <Button variant="secondary" size="sm" disabled={preparingAcceptance} onClick={() => setAcceptanceConfirmation(null)}>Cancel</Button>
-                                    <Button size="sm" loading={preparingAcceptance} onClick={() => void prepareControlledAcceptance(id, p.contactId)}>Confirm one-write acceptance</Button>
+                                    <Button size="sm" loading={preparingAcceptance} onClick={() => void startControlledAcceptanceGeneration(id, p.contactId)}>Start new controlled acceptance generation</Button>
                                   </div>
                                 </div>
                               ) : (
                                 <Button className="mt-2" variant="secondary" size="sm" onClick={() => setAcceptanceConfirmation({ campaignId: id, contactId: p.contactId })}>
-                                  Prepare one-write acceptance
+                                  Start new controlled acceptance generation
                                 </Button>
                               )
                             )}

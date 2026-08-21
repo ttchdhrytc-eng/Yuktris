@@ -15,6 +15,7 @@ const acceptanceOverride = readFileSync(resolve(process.cwd(), '../../supabase/m
 const writeAcceptancePurpose = readFileSync(resolve(process.cwd(), '../../supabase/migrations/20260816090000_controlled_write_acceptance_purpose.sql'), 'utf8');
 const authoritativeSchedule = readFileSync(resolve(process.cwd(), '../../supabase/migrations/20260821090000_authoritative_campaign_outreach_schedule.sql'), 'utf8');
 const effectiveSchedule = readFileSync(resolve(process.cwd(), '../../supabase/migrations/20260821213000_linkedin_effective_sending_window.sql'), 'utf8');
+const acceptanceGenerations = readFileSync(resolve(process.cwd(), '../../supabase/migrations/20260822113000_controlled_acceptance_generations.sql'), 'utf8');
 const effectiveScheduleTests = readFileSync(resolve(process.cwd(), '../../supabase/tests/linkedin_effective_sending_window.sql'), 'utf8');
 const failedAcceptanceEvidence = readFileSync(resolve(process.cwd(), '../../supabase/migrations/20260821213500_preserve_failed_acceptance_terminal_evidence.sql'), 'utf8');
 const customerSchedule = readFileSync(resolve(process.cwd(), '../../supabase/migrations/20260821220000_customer_controlled_campaign_schedule.sql'), 'utf8');
@@ -346,11 +347,34 @@ test('failed acceptance evidence stays terminal and unscheduled', () => {
   assert.doesNotMatch(failedAcceptanceEvidence, /DELETE|status='pending'|status='queued'/);
 });
 
-test('controlled acceptance confirmation is inline and preparation failures are contained', () => {
+test('controlled acceptance generation is inline, staging-admin guarded, and failures are contained', () => {
   assert.doesNotMatch(campaignsPage, /window\.confirm\(/);
-  assert.match(campaignsPage, /Confirm one-write acceptance/);
-  assert.match(campaignsPage, /controlled-acceptance-prepare-failed/);
-  assert.match(campaignsPage, /No retry was started/);
+  assert.match(campaignsPage, /Start new controlled acceptance generation/);
+  assert.match(campaignsPage, /read-only relationship check/);
+  assert.match(linkedinV1Pipeline, /start_controlled_acceptance_generation[\s\S]*vdiqfiuqckaxdjkadinu/);
+  assert.match(acceptanceGenerations, /role IN \('owner','admin'\)/);
+});
+test('acceptance generations preserve history and isolate idempotency', () => {
+  assert.match(acceptanceGenerations, /controlled_acceptance_generation_events_are_append_only/);
+  assert.match(acceptanceGenerations, /controlled_acceptance_generation_history_is_immutable/);
+  assert.match(acceptanceGenerations, /idempotency_namespace text NOT NULL UNIQUE/);
+  assert.match(acceptanceGenerations, /'controlled-acceptance-generation:'\|\|gen_random_uuid\(\)/);
+  assert.doesNotMatch(acceptanceGenerations, /DELETE FROM public\.(linkedin_execution_jobs|browser_execution_queue|linkedin_write_audit)/);
+});
+test('generation relationship gate allows only exact allowlisted eligible target', () => {
+  assert.match(acceptanceGenerations, /tarun-chaudhary/);
+  assert.match(acceptanceGenerations, /check_connection_acceptance/);
+  assert.match(acceptanceGenerations, /max_retries,metadata\)[\s\S]*'pending',0/);
+  assert.match(acceptanceGenerations, /status:='pending'[\s\S]*status:='connected'[\s\S]*connect_available/);
+  assert.match(acceptanceGenerations, /status<>'eligible'/);
+  assert.match(acceptanceGenerations, /max_retries,action_payload\)[\s\S]*'connection_request','scheduled'[\s\S]*,-1,0,/);
+  assert.doesNotMatch(acceptanceGenerations, /send_message|follow_up_message/);
+});
+test('successful generation permanently blocks another while unknown is terminal', () => {
+  assert.match(acceptanceGenerations, /uq_one_successful_acceptance_generation/);
+  assert.match(acceptanceGenerations, /execution_result='success'/);
+  assert.match(acceptanceGenerations, /WHEN 'verified_sent' THEN 'succeeded'/);
+  assert.match(acceptanceGenerations, /ELSE 'outcome_unknown'/);
 });
 test('customer Settings exposes only supported V1 tabs', () => {
   const tabBlock = settingsPage.slice(settingsPage.indexOf('const tabs = ['), settingsPage.indexOf('] as const;'));

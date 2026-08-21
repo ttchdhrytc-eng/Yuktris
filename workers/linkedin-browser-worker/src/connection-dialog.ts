@@ -16,6 +16,18 @@ export function classifyConnectionProfileState(flags: ConnectionProfileFlags): C
   return 'unavailable';
 }
 
+export type PostClickOutcome = 'verified_sent' | 'connected' | 'outcome_unknown';
+
+export function classifyPostClickOutcome(flags: {
+  hasPending: boolean;
+  hasSentEvidence: boolean;
+  hasMessage: boolean;
+}): PostClickOutcome {
+  if (flags.hasPending || flags.hasSentEvidence) return 'verified_sent';
+  if (flags.hasMessage) return 'connected';
+  return 'outcome_unknown';
+}
+
 // Ordered by specificity — the first visible, enabled match wins. LinkedIn renders the no-note
 // confirmation control under different labels depending on account type, locale and cohort.
 export const NO_NOTE_CONFIRM_LABELS = ['Send without note', 'Send now', 'Send', 'Connect'] as const;

@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import {
   classifyConnectionProfileState,
+  classifyPostClickOutcome,
   isNoNoteConfirmCandidate,
   pickNoNoteConfirmLabel,
 } from './connection-dialog.js';
@@ -41,6 +42,17 @@ test('classifies unavailable when no known control is present', () => {
   assert.equal(classifyConnectionProfileState({ hasPending: false, hasConnect: false, hasMessage: false }), 'unavailable');
 });
 
+test('verifies immediate-send only from positive pending or invitation evidence', () => {
+  assert.equal(classifyPostClickOutcome({ hasPending: true, hasSentEvidence: false, hasMessage: false }), 'verified_sent');
+  assert.equal(classifyPostClickOutcome({ hasPending: false, hasSentEvidence: true, hasMessage: false }), 'verified_sent');
+});
+test('classifies modal-send without post-click evidence as ambiguous', () => {
+  assert.equal(classifyPostClickOutcome({ hasPending: false, hasSentEvidence: false, hasMessage: false }), 'outcome_unknown');
+});
+test('does not count a connected state as a newly verified send', () => {
+  assert.equal(classifyPostClickOutcome({ hasPending: false, hasSentEvidence: false, hasMessage: true }), 'connected');
+});
+
 // 9: challenge/restriction after opening — worker must check detectRestriction after the open click.
 test('worker checks for restriction after opening the connect dialog', () => {
   assert.match(worker, /await connectBtn\.click\(\);[\s\S]*?await this\.linkedin\.detectRestriction\(\)/);
@@ -59,6 +71,11 @@ test('worker never clicks the Connect button more than once per attempt', () => 
 });
 test('duplicate write dedupe remains untouched', () => {
   assert.match(worker, /preflight\.code === 'duplicate_action' && preflight\.already_done/);
+});
+
+test('connections are counted only after positive post-click verification', () => {
+  assert.match(worker, /positivelyVerifiedWrite[\s\S]*write_verified === true/);
+  assert.match(worker, /result_code: 'outcome_unknown'[\s\S]*retry_allowed: false/);
 });
 
 test('no-note confirm search excludes the Add a note control', () => {

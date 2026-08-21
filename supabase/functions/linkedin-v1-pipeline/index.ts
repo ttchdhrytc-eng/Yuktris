@@ -278,6 +278,32 @@ Deno.serve(async (req: Request) => {
       return json({ status: "associated", campaign_id: campaignId, prospect_id: prospect.id, contact_id: contactId, job_created: false, write_performed: false });
     }
 
+    if (action === "start_controlled_acceptance_generation") {
+      if (internalService || !userId) throw pipelineError("controlled_acceptance_human_initiation_required", "A signed-in staging administrator must explicitly start a generation", 403);
+      if (!Deno.env.get("SUPABASE_URL")?.includes("vdiqfiuqckaxdjkadinu")) throw pipelineError("staging_only", "Controlled acceptance generations are disabled outside staging", 403);
+      const campaignId = requireString(body.campaign_id, "campaign_id");
+      const contactId = requireString(body.contact_id, "contact_id");
+      const { data: campaign } = await admin.from("customer_campaigns").select("linkedin_account_id").eq("id", campaignId).eq("workspace_id", workspaceId).maybeSingle();
+      const { data: contact } = await admin.from("contacts").select("linkedin_url").eq("id", contactId).eq("workspace_id", workspaceId).maybeSingle();
+      if (!campaign?.linkedin_account_id || !contact?.linkedin_url) throw pipelineError("controlled_acceptance_scope_mismatch", "Campaign, account, and prospect must be associated", 409);
+      const target = normalizeLinkedInProfile(contact.linkedin_url);
+      const { data, error } = await admin.rpc("start_controlled_acceptance_generation", {
+        p_workspace_id: workspaceId, p_account_id: campaign.linkedin_account_id, p_campaign_id: campaignId,
+        p_contact_id: contactId, p_target: target, p_created_by: userId,
+      });
+      if (error) throw pipelineError("controlled_acceptance_generation_rejected", error.message, 409);
+      return json(data as Json);
+    }
+
+    if (action === "advance_controlled_acceptance_generation") {
+      if (internalService || !userId) throw pipelineError("controlled_acceptance_human_initiation_required", "A signed-in staging administrator must explicitly continue a generation", 403);
+      if (!Deno.env.get("SUPABASE_URL")?.includes("vdiqfiuqckaxdjkadinu")) throw pipelineError("staging_only", "Controlled acceptance generations are disabled outside staging", 403);
+      const generationId = requireString(body.generation_id, "generation_id");
+      const { data, error } = await admin.rpc("advance_controlled_acceptance_generation", { p_generation_id: generationId, p_actor: userId });
+      if (error) throw pipelineError("controlled_acceptance_generation_rejected", error.message, 409);
+      return json(data as Json);
+    }
+
     if (action === "prepare_controlled_acceptance") {
       if (internalService || !userId) throw pipelineError("controlled_acceptance_human_initiation_required", "A signed-in workspace member must explicitly initiate this attempt", 403);
       const campaignId = requireString(body.campaign_id, "campaign_id");

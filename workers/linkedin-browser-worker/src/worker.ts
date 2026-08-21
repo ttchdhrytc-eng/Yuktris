@@ -10,7 +10,7 @@ import { interactiveAuthTimeoutMs, interactiveBrowserSessionTimeoutMs } from './
 import { normalizeLinkedInAction, validateSalesNavigatorPayload } from './linkedin-agent-contract.js';
 import { CloudAgentStartupError, cloudAgentStartupTimeoutMs, withinStartupDeadline } from './startup-deadline.js';
 import { finalizeLinkedInWrite, LINKEDIN_WRITE_ACTIONS, normalizeLinkedInTarget, preflightLinkedInWrite } from './linkedin-execution-safety.js';
-import { classifyConnectionProfileState, isNoNoteConfirmCandidate, NO_NOTE_CONFIRM_LABELS } from './connection-dialog.js';
+import { classifyConnectionProfileState, classifyPostClickOutcome, isNoNoteConfirmCandidate, NO_NOTE_CONFIRM_LABELS } from './connection-dialog.js';
 
 const INTERACTIVE_AUTH_TIMEOUT_MS = interactiveAuthTimeoutMs();
 const TEST_CONNECTION_TIMEOUT = parseInt(process.env.TEST_CONNECTION_TIMEOUT_MS || '120000', 10);
@@ -1697,6 +1697,7 @@ export class Worker {
               data: {
                 result_code: 'already_done',
                 connection_state: 'request_already_pending',
+                write_verified: false,
               },
             };
             break;
@@ -1707,6 +1708,7 @@ export class Worker {
               data: {
                 result_code: 'already_done',
                 connection_state: 'already_connected',
+                write_verified: false,
               },
             };
             break;
@@ -1781,38 +1783,45 @@ export class Worker {
             }
             if (!confirmBtn) {
               // Some cohorts confirm immediately on the profile Connect click with no dialog at all.
-              const directState = await readProfileState();
-              if (directState === 'already_pending') {
-                result = {
-                  success: true,
-                  data: {
-                    result_code: 'success',
-                    connection_state: 'request_already_pending',
-                  },
-                };
-                break;
-              }
-              result = {
-                success: false,
-                error: 'Connection request send control unavailable',
-                data: { result_code: 'not_available' },
-              };
-              break;
+              // Some cohorts send immediately from the profile Connect control.
+              // Do not click again: post-click evidence below decides the outcome.
+            } else {
+              await confirmBtn.click();
             }
-            await confirmBtn.click();
           }
           await page.waitForTimeout(2000);
-          const stillOpen = await page.$('#custom-message, div[role="dialog"]:has-text("Add a note")');
-          if (stillOpen) {
+          const postState = await readProfileState();
+          const pageText = await page.locator('body').innerText().catch(() => '');
+          const hasSentEvidence = /invitation\s+(?:was\s+)?sent|request\s+(?:was\s+)?sent/i.test(pageText);
+          const postClickOutcome = classifyPostClickOutcome({
+            hasPending: postState === 'already_pending',
+            hasMessage: postState === 'already_connected',
+            hasSentEvidence,
+          });
+          if (postClickOutcome !== 'verified_sent') {
             result = {
               success: false,
-              error: 'Connection request was not confirmed as sent',
+              error: postClickOutcome === 'connected'
+                ? 'Profile became connected without positive invitation-send evidence'
+                : 'Connection request outcome is ambiguous',
+              data: {
+                result_code: 'outcome_unknown',
+                connection_state: postClickOutcome,
+                write_verified: false,
+                retry_allowed: false,
+              },
             };
             break;
           }
           result = {
             success: true,
-            data: { result_code: 'success', connected: url },
+            data: {
+              result_code: 'success',
+              connected: url,
+              connection_state: 'request_pending',
+              write_verified: true,
+              verification: postState === 'already_pending' ? 'pending_control' : 'sent_invitation_evidence',
+            },
           };
           break;
         }
@@ -2150,11 +2159,30 @@ export class Worker {
           }
         })();
         const classification = pathname.includes('/checkpoint') || pathname.includes('/challenge') ? 'verification_required' : result.success ? 'success' : 'failed';
-        await finalizeLinkedInWrite(this.client, writeAuditId, result.success, classification);
+        const positivelyVerifiedWrite = result.success && result.data?.result_code === 'success' && result.data?.write_verified === true;
+        await finalizeLinkedInWrite(this.client, writeAuditId, positivelyVerifiedWrite, classification);
         writeAuditId = null;
         if (classification === 'verification_required') {
           result = { success: false, error: 'LinkedIn verification required' };
         }
+      }
+
+      const acceptanceGenerationId = params.acceptance_generation_id as string | undefined;
+      if (acceptanceGenerationId && item.action_type === 'connection_request') {
+        const outcome = result.data?.write_verified === true
+          ? 'verified_sent'
+          : result.data?.connection_state === 'already_connected'
+            ? 'already_connected'
+            : result.data?.connection_state === 'request_already_pending'
+              ? 'already_pending'
+              : 'outcome_unknown';
+        const { error: generationError } = await this.client.rpc('finalize_controlled_acceptance_generation', {
+          p_generation_id: acceptanceGenerationId,
+          p_queue_id: item.id,
+          p_outcome: outcome,
+          p_evidence: result.data ?? { error: result.error ?? 'unknown' },
+        });
+        if (generationError) throw new Error(`Acceptance generation finalization failed: ${this.sanitizeError(generationError)}`);
       }
 
       if (persistentContext) await this.synchronizePersistentContext(persistentContext, persistentSessionId);
