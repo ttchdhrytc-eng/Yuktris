@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react';
+import { Component, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { AlertTriangle, CalendarClock, ChevronLeft, ChevronRight, Pause, Play, Rocket, Save } from 'lucide-react';
 import { toast } from 'sonner';
@@ -17,10 +17,11 @@ import { GOOGLE_SCOPES } from '@/types/google-auth';
 import type { FullICP } from '@/types/icp-intelligence';
 import { buildCampaignMetrics } from '@/services/campaign-metrics';
 import { fetchCampaignProspects } from '@/services/campaign-prospects';
+import { CAMPAIGN_SENDING_DAYS, CAMPAIGN_WEEKDAYS, formatCampaignWindow, isIanaTimezone, nextCampaignSendingWindow, normalizeIanaTimezone, parseCampaignDays, parseCampaignHours } from '@/services/campaign-schedule';
 
 const STEPS = ['Campaign', 'ICP', 'LinkedIn account', 'Outreach', 'Limits & Schedule', 'Review & Launch'];
-const SENDING_DAYS = [['monday', 'Mon'], ['tuesday', 'Tue'], ['wednesday', 'Wed'], ['thursday', 'Thu'], ['friday', 'Fri'], ['saturday', 'Sat'], ['sunday', 'Sun']] as const;
-const WEEKDAYS = SENDING_DAYS.slice(0, 5).map(([value]) => value);
+const SENDING_DAYS = CAMPAIGN_SENDING_DAYS;
+const WEEKDAYS = CAMPAIGN_WEEKDAYS;
 const TIMEZONE_SUGGESTIONS = ['Asia/Kolkata', 'America/New_York', 'Europe/London', 'America/Los_Angeles', 'Asia/Singapore', 'Australia/Sydney', 'UTC'];
 type ScheduleDraft = { campaignId: string; days: string[]; start: string; end: string; timezone: string };
 
@@ -39,7 +40,7 @@ export function CampaignsPage() {
   const [days, setDays] = useState<string[]>(WEEKDAYS);
   const [startTime, setStartTime] = useState('09:00');
   const [endTime, setEndTime] = useState('17:00');
-  const [outreachTimezone, setOutreachTimezone] = useState(() => Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC');
+  const [outreachTimezone, setOutreachTimezone] = useState(() => normalizeIanaTimezone(Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'));
   const [launching, setLaunching] = useState(false);
   const [expandedCampaign, setExpandedCampaign] = useState<string | null>(null);
   const [existingProspectId, setExistingProspectId] = useState('');
@@ -57,7 +58,7 @@ export function CampaignsPage() {
   const calendarConnected = google.data?.account?.status === 'connected' && !google.data.needsReconnect && (scopes.has(GOOGLE_SCOPES.CALENDAR) || scopes.has(GOOGLE_SCOPES.CALENDAR_EVENTS));
   const scheduleValid = days.length > 0 && startTime < endTime && isIanaTimezone(outreachTimezone);
   const canContinue = [name.trim().length > 1, !!selectedIcp, !!selectedAccount, strategy.trim().length > 20, dailyLimit >= 1 && dailyLimit <= 20 && scheduleValid, true][step];
-  const nextWindow = useMemo(() => nextSendingWindow(days, startTime, endTime, outreachTimezone), [days, startTime, endTime, outreachTimezone]);
+  const nextWindow = useMemo(() => nextCampaignSendingWindow(days, startTime, endTime, outreachTimezone), [days, startTime, endTime, outreachTimezone]);
 
   const existing = useQuery({
     queryKey: ['customer-campaigns', workspace?.id],
@@ -154,7 +155,7 @@ export function CampaignsPage() {
         outreach_timezone: scheduleDraft.timezone,
       } });
       if (error) throw new Error(await edgeFunctionError(error));
-      toast.success(data?.scheduled_at ? `Schedule updated. Next window: ${formatWindow(data.scheduled_at, scheduleDraft.timezone)}` : 'Schedule updated.');
+      toast.success(data?.scheduled_at ? `Schedule updated. Next window: ${formatCampaignWindow(data.scheduled_at, scheduleDraft.timezone)}` : 'Schedule updated.');
       setScheduleDraft(null);
       await queryClient.invalidateQueries({ queryKey: ['customer-campaigns'] });
       await queryClient.invalidateQueries({ queryKey: ['campaign-prospects'] });
@@ -285,7 +286,7 @@ export function CampaignsPage() {
               <Input type="number" min={1} max={20} value={dailyLimit} onChange={(e) => setDailyLimit(Number(e.target.value))} />
             </Field>
             <ScheduleEditor days={days} start={startTime} end={endTime} timezone={outreachTimezone} onDays={setDays} onStart={setStartTime} onEnd={setEndTime} onTimezone={setOutreachTimezone} />
-            {nextWindow && <div className="rounded-lg border border-brand-500/20 bg-brand-500/5 p-3 text-sm text-ink-200"><CalendarClock className="mr-2 inline h-4 w-4" />Next outreach window: {formatWindow(nextWindow.toISOString(), outreachTimezone)}</div>}
+            {nextWindow && <div className="rounded-lg border border-brand-500/20 bg-brand-500/5 p-3 text-sm text-ink-200"><CalendarClock className="mr-2 inline h-4 w-4" />Next outreach window: {formatCampaignWindow(nextWindow.toISOString(), outreachTimezone)}</div>}
           </div>
         )}
         {step === 5 && (
@@ -297,7 +298,7 @@ export function CampaignsPage() {
               <Review label="Estimated target pool" value={`Up to ${Math.min(dailyLimit, 5)} verified prospects in the initial run`} />
               <Review label="Message strategy" value={strategy} />
               <Review label="Sending schedule" value={`${dailyLimit}/day · ${days.map((d) => SENDING_DAYS.find(([value]) => value === d)?.[1]).join(', ')} · ${startTime}–${endTime} · ${outreachTimezone}`} />
-              <Review label="Next outreach window" value={nextWindow ? formatWindow(nextWindow.toISOString(), outreachTimezone) : 'Invalid schedule'} />
+              <Review label="Next outreach window" value={nextWindow ? formatCampaignWindow(nextWindow.toISOString(), outreachTimezone) : 'Invalid schedule'} />
             </div>
             <div className="flex items-center gap-2">
               <Badge tone={calendarConnected ? 'success' : 'neutral'} dot>
@@ -335,30 +336,30 @@ export function CampaignsPage() {
               const m = existing.data!.metrics[id] ?? {};
               const rows = (campaignProspects.data ?? []).filter((p) => p.campaignId === id);
               const campaignDays = parseCampaignDays(String(c.operating_days ?? ''));
-              const [campaignStart, campaignEnd] = parseHours(String(c.operating_hours ?? ''));
-              const campaignTimezone = String(c.outreach_timezone ?? 'UTC');
-              const campaignNextWindow = nextSendingWindow(campaignDays, campaignStart, campaignEnd, campaignTimezone);
+              const [campaignStart, campaignEnd] = parseCampaignHours(c.operating_hours);
+              const campaignTimezone = normalizeIanaTimezone(String(c.outreach_timezone ?? 'UTC'));
+              const campaignNextWindow = nextCampaignSendingWindow(campaignDays, campaignStart, campaignEnd, campaignTimezone);
               const derivedStatus = c.status === 'paused' ? 'Paused' : ['failed', 'action_required', 'blocked_prerequisite'].includes(String(c.status)) ? 'Needs Attention' : campaignNextWindow && campaignNextWindow.getTime() > Date.now() + 5000 ? 'Waiting for sending window' : 'Running';
               return (
                 <Card key={id} className="p-4">
                   <div className="flex items-start justify-between gap-3">
                     <div>
                       <p className="text-sm font-medium text-ink-100">{String(c.name)}</p>
-                      <p className="mt-1 text-xs text-ink-500">{derivedStatus === 'Waiting for sending window' && campaignNextWindow ? `Waiting for next sending window — ${formatWindow(campaignNextWindow.toISOString(), campaignTimezone)}` : String(c.status_reason ?? 'Campaign status is available below.')}</p>
+                      <p className="mt-1 text-xs text-ink-500">{derivedStatus === 'Waiting for sending window' && campaignNextWindow ? `Waiting for next sending window — ${formatCampaignWindow(campaignNextWindow.toISOString(), campaignTimezone)}` : String(c.status_reason ?? 'Campaign status is available below.')}</p>
                       <p className="mt-1 text-xs text-ink-500">{campaignDays.map((d) => SENDING_DAYS.find(([value]) => value === d)?.[1]).join(', ')} · {campaignStart}–{campaignEnd} · {campaignTimezone}</p>
                     </div>
                     <div className="flex items-center gap-2">
                       <Button variant="ghost" size="sm" onClick={() => setExpandedCampaign(expandedCampaign === id ? null : id)}>
                         {expandedCampaign === id ? 'Hide prospects' : 'View prospects'}
                       </Button>
-                      <Button variant="ghost" size="sm" onClick={() => setScheduleDraft({ campaignId: id, days: campaignDays, start: campaignStart, end: campaignEnd, timezone: campaignTimezone })}>Schedule / Edit</Button>
+                      <Button type="button" variant="ghost" size="sm" onClick={() => setScheduleDraft({ campaignId: id, days: [...campaignDays], start: campaignStart, end: campaignEnd, timezone: campaignTimezone })}>Schedule / Edit</Button>
                       {c.status === 'paused' ? <Button variant="ghost" size="sm" onClick={() => void changeCampaignPause(id, false)}><Play className="h-4 w-4" />Resume</Button> : !['failed', 'completed'].includes(String(c.status)) ? <Button variant="ghost" size="sm" onClick={() => void changeCampaignPause(id, true)}><Pause className="h-4 w-4" />Pause</Button> : null}
                       <Badge tone={derivedStatus === 'Running' ? 'success' : derivedStatus === 'Needs Attention' ? 'warning' : 'neutral'} dot>
                         {derivedStatus}
                       </Badge>
                     </div>
                   </div>
-                  {scheduleDraft?.campaignId === id && <div className="mt-4 rounded-xl border border-gold-500/15 p-4"><ScheduleEditor days={scheduleDraft.days} start={scheduleDraft.start} end={scheduleDraft.end} timezone={scheduleDraft.timezone} onDays={(value) => setScheduleDraft({ ...scheduleDraft, days: value })} onStart={(value) => setScheduleDraft({ ...scheduleDraft, start: value })} onEnd={(value) => setScheduleDraft({ ...scheduleDraft, end: value })} onTimezone={(value) => setScheduleDraft({ ...scheduleDraft, timezone: value })} /><div className="mt-3 flex gap-2"><Button variant="secondary" size="sm" onClick={() => setScheduleDraft(null)}>Cancel</Button><Button size="sm" loading={savingSchedule} disabled={!scheduleDraft.days.length || scheduleDraft.start >= scheduleDraft.end || !isIanaTimezone(scheduleDraft.timezone)} onClick={() => void saveSchedule()}><Save className="h-4 w-4" />Save schedule</Button></div></div>}
+                  {scheduleDraft?.campaignId === id && <ScheduleEditorBoundary onClose={() => setScheduleDraft(null)}><div className="mt-4 rounded-xl border border-gold-500/15 p-4"><ScheduleEditor days={scheduleDraft.days} start={scheduleDraft.start} end={scheduleDraft.end} timezone={scheduleDraft.timezone} onDays={(value) => setScheduleDraft({ ...scheduleDraft, days: value })} onStart={(value) => setScheduleDraft({ ...scheduleDraft, start: value })} onEnd={(value) => setScheduleDraft({ ...scheduleDraft, end: value })} onTimezone={(value) => setScheduleDraft({ ...scheduleDraft, timezone: normalizeIanaTimezone(value) })} /><div className="mt-3 flex gap-2"><Button type="button" variant="secondary" size="sm" onClick={() => setScheduleDraft(null)}>Cancel</Button><Button type="button" size="sm" loading={savingSchedule} disabled={!scheduleDraft.days.length || scheduleDraft.start >= scheduleDraft.end || !isIanaTimezone(scheduleDraft.timezone)} onClick={() => void saveSchedule()}><Save className="h-4 w-4" />Save schedule</Button></div></div></ScheduleEditorBoundary>}
                   <div className="mt-4 grid grid-cols-2 gap-2 md:grid-cols-4">
                     {(
                       [
@@ -472,6 +473,7 @@ function ScheduleEditor({ days, start, end, timezone, onDays, onStart, onEnd, on
   onDays: (value: string[]) => void; onStart: (value: string) => void; onEnd: (value: string) => void; onTimezone: (value: string) => void;
 }) {
   const toggle = (day: string) => onDays(days.includes(day) ? days.filter((value) => value !== day) : [...days, day]);
+  const editorNextWindow = useMemo(() => nextCampaignSendingWindow(days, start, end, timezone), [days, start, end, timezone]);
   return <div className="space-y-4 rounded-xl border border-gold-500/10 p-4">
     <div>
       <p className="text-sm font-medium text-ink-200">Sending Schedule</p>
@@ -496,43 +498,28 @@ function ScheduleEditor({ days, start, end, timezone, onDays, onStart, onEnd, on
       <p className="mt-2 text-xs text-ink-500">Detected from your browser for new campaigns. You can change it.</p>
     </Field>
     {!isIanaTimezone(timezone) && <Reason text="Enter a valid IANA timezone such as Asia/Kolkata." />}
+    {editorNextWindow && <div className="rounded-lg border border-brand-500/20 bg-brand-500/5 p-3 text-sm text-ink-200"><CalendarClock className="mr-2 inline h-4 w-4" />Next outreach window: {formatCampaignWindow(editorNextWindow.toISOString(), timezone)}</div>}
   </div>;
 }
 
-function parseCampaignDays(value: string): string[] {
+function _legacyParseCampaignDays(value: string): string[] {
   if (/^monday[–-]friday$/i.test(value.trim())) return [...WEEKDAYS];
   return value.toLowerCase().replace(/\s/g, '').split(',').filter((day) => SENDING_DAYS.some(([candidate]) => candidate === day));
 }
 
-function parseHours(value: string): [string, string] {
+function _legacyParseHours(value: string): [string, string] {
   const [start = '09:00', end = '17:00'] = value.replace('–', '-').split('-');
   return [start, end];
 }
 
-function isIanaTimezone(value: string): boolean {
-  try { new Intl.DateTimeFormat('en-US', { timeZone: value }).format(); return Boolean(value); }
-  catch { return false; }
-}
-
-function localParts(date: Date, timezone: string) {
-  const parts = new Intl.DateTimeFormat('en-US', { timeZone: timezone, weekday: 'long', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(date);
-  const get = (type: Intl.DateTimeFormatPartTypes) => parts.find((part) => part.type === type)?.value ?? '';
-  return { day: get('weekday').toLowerCase(), time: `${get('hour')}:${get('minute')}` };
-}
-
-function nextSendingWindow(days: string[], start: string, end: string, timezone: string, from = new Date()): Date | null {
-  if (!days.length || start >= end || !isIanaTimezone(timezone)) return null;
-  const candidate = new Date(Math.floor(from.getTime() / 60000) * 60000);
-  for (let minute = 0; minute <= 20160; minute += 1) {
-    const local = localParts(candidate, timezone);
-    if (days.includes(local.day) && local.time >= start && local.time < end) return new Date(candidate);
-    candidate.setUTCMinutes(candidate.getUTCMinutes() + 1);
+class ScheduleEditorBoundary extends Component<{ children: ReactNode; onClose: () => void }, { failed: boolean }> {
+  state = { failed: false };
+  static getDerivedStateFromError() { return { failed: true }; }
+  componentDidCatch(error: Error) { console.error('[campaign-schedule-editor-error]', { name: error.name, message: error.message }); }
+  render() {
+    if (!this.state.failed) return this.props.children;
+    return <div className="mt-4 rounded-xl border border-warning-500/30 p-4"><Reason text="This campaign schedule could not be displayed. The campaign was not changed." /><Button type="button" className="mt-3" variant="secondary" size="sm" onClick={this.props.onClose}>Close editor</Button></div>;
   }
-  return null;
-}
-
-function formatWindow(value: string, timezone: string): string {
-  return new Intl.DateTimeFormat(undefined, { timeZone: timezone, weekday: 'long', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short' }).format(new Date(value));
 }
 
 async function edgeFunctionError(error: unknown): Promise<string> {

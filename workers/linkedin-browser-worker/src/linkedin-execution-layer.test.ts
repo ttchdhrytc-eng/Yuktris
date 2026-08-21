@@ -29,6 +29,7 @@ const researchStart = readFileSync(resolve(process.cwd(), '../../supabase/functi
 const researchWorker = readFileSync(resolve(process.cwd(), '../../supabase/functions/research-worker/index.ts'), 'utf8');
 const dashboardPage = readFileSync(resolve(process.cwd(), '../../src/pages/DashboardPage.tsx'), 'utf8');
 const campaignsPage = readFileSync(resolve(process.cwd(), '../../src/pages/CampaignsPage.tsx'), 'utf8');
+const campaignSchedule = readFileSync(resolve(process.cwd(), '../../src/services/campaign-schedule.ts'), 'utf8');
 const campaignMetrics = readFileSync(resolve(process.cwd(), '../../src/services/campaign-metrics.ts'), 'utf8');
 const releaseClosure = readFileSync(resolve(process.cwd(), '../../supabase/migrations/20260820233000_campaign_release_closure.sql'), 'utf8');
 const sidebar = readFileSync(resolve(process.cwd(), '../../src/components/layout/Sidebar.tsx'), 'utf8');
@@ -306,7 +307,11 @@ test('schedule editing, pause and resume recalculate only nonterminal future wor
   assert.match(worker, /campaign_paused[\s\S]*status: 'waiting'/);
 });
 test('campaign UI supports browser timezone default, seven days, presets and lifecycle explanations', () => {
-  for (const value of ['resolvedOptions().timeZone', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun', 'Weekdays', 'Every day', 'Start time', 'End time', 'Schedule / Edit', 'Waiting for sending window', 'Pause', 'Resume']) assert.match(campaignsPage, new RegExp(value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  const scheduleUi = campaignsPage + campaignSchedule;
+  for (const value of ['resolvedOptions().timeZone', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun', 'Weekdays', 'Every day', 'Start time', 'End time', 'Schedule / Edit', 'Waiting for sending window', 'Pause', 'Resume']) assert.match(scheduleUi, new RegExp(value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.match(campaignSchedule, /\\u2013.*friday/);
+  assert.match(campaignSchedule, /Asia\/Calcutta.*Asia\/Kolkata/);
+  assert.match(campaignsPage, /ScheduleEditorBoundary/);
 });
 test('controlled acceptance permits only safe human-initiated pre-write retries', () => {
   assert.match(effectiveSchedule, /human_initiated_by/);
