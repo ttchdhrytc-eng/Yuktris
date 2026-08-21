@@ -30,6 +30,7 @@
     "test:execution-layer": "npm run build && node --test dist/linkedin-execution-layer.test.js",
     "test:connect-dialog-confirmation": "npm run build && node --test dist/connect-dialog-confirmation.test.js",
     "test:relationship-probe": "npm run build && node --test dist/relationship-probe.test.js",
+    "test:profile-readiness": "npm run build && node --test dist/linkedin-profile-readiness.test.js",
     "install-browser": "echo 'No local browser needed — using Browserbase'"
   },
   "dependencies": {

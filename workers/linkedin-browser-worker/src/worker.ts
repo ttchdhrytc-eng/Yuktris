@@ -12,6 +12,7 @@ import { CloudAgentStartupError, cloudAgentStartupTimeoutMs, withinStartupDeadli
 import { finalizeLinkedInWrite, LINKEDIN_WRITE_ACTIONS, normalizeLinkedInTarget, preflightLinkedInWrite } from './linkedin-execution-safety.js';
 import { classifyConnectionProfileState, classifyPostClickOutcome, isNoNoteConfirmCandidate, NO_NOTE_CONFIRM_LABELS } from './connection-dialog.js';
 import { classifyRelationshipProbe, type RelationshipProbeEvidence } from './relationship-probe.js';
+import { waitForLinkedInProfileReady } from './linkedin-profile-readiness.js';
 
 const INTERACTIVE_AUTH_TIMEOUT_MS = interactiveAuthTimeoutMs();
 const TEST_CONNECTION_TIMEOUT = parseInt(process.env.TEST_CONNECTION_TIMEOUT_MS || '120000', 10);
@@ -1632,19 +1633,34 @@ export class Worker {
           if (!url) throw new Error('profile_url required');
           const target = normalizeLinkedInTarget(url);
           if (!target) throw new Error('A valid LinkedIn personal profile URL is required');
-          await page.goto(target, {
-            waitUntil: 'domcontentloaded',
-            timeout: 30000,
-          });
-          await page.waitForFunction(() => {
-            const heading = document.querySelector('main h1, h1.text-heading-xlarge, main [data-view-name*="profile"] h1');
-            return !!heading?.textContent?.trim() && !document.querySelector('main .artdeco-loader, main [class*="skeleton"]');
-          }, undefined, { timeout: 12000 }).catch(() => {});
-          const presented = normalizeLinkedInTarget(await page.evaluate(() => document.querySelector<HTMLLinkElement>('link[rel="canonical"]')?.href || location.href));
-          if (presented !== target) {
+          const readiness = await waitForLinkedInProfileReady(page, target);
+          if (!readiness.targetMatched) {
             result = {
               success: false,
               error: 'Presented LinkedIn profile does not match the acceptance-check target',
+              data: { result_code: readiness.code, relationship_classification: 'probe_inconclusive', diagnostic_evidence: readiness },
+            };
+            break;
+          }
+          if (!readiness.ready) {
+            logger.warn('linkedin_profile_hydration_inconclusive', {
+              queue_item_id: item.id, target_path: new URL(target).pathname,
+              code: readiness.code, final_path: new URL(readiness.finalUrl).pathname,
+              header_found: readiness.headerFound, main_found: readiness.mainFound,
+              skeleton_detected: readiness.skeletonDetected, action_row_found: readiness.actionRowFound,
+              primary_actions: readiness.relevantActions, more_found: readiness.moreFound,
+              overlay_categories: readiness.overlayCategories, hydration_attempts: readiness.attemptCount,
+              hydration_elapsed_ms: readiness.elapsedMs, stable_observations: readiness.stableObservations,
+              recovery_used: readiness.recoveryUsed,
+            });
+            result = {
+              success: true,
+              data: {
+                result_code: readiness.code, relationship_classification: 'probe_inconclusive',
+                accepted: false, pending: false, connect_available: false, message_available: readiness.relevantActions.includes('message'),
+                follow_available: readiness.relevantActions.includes('follow'), first_degree: false, degree: null,
+                diagnostic_evidence: readiness,
+              },
             };
             break;
           }
@@ -1733,6 +1749,7 @@ export class Worker {
               follow_available: evidence.primary.follow,
               first_degree: evidence.degree === '1st', degree: evidence.degree,
               diagnostic_evidence: {
+                ...readiness,
                 hydrated: evidence.hydrated,
                 primary_controls: Object.entries(evidence.primary).filter(([, found]) => found).map(([name]) => name),
                 more_menu_inspected: evidence.moreMenu.inspected,
