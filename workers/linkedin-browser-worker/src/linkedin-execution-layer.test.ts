@@ -280,6 +280,13 @@ test('dashboard and campaign cards aggregate the same canonical zero-safe metric
   assert.match(dashboardPage, /prospectsContacted: new Set\(\(successfulWrites\.data/);
   assert.match(campaignMetrics, /prospects: 0[\s\S]*meetingsBooked: 0/);
 });
+
+test('controlled acceptance confirmation is inline and preparation failures are contained', () => {
+  assert.doesNotMatch(campaignsPage, /window\.confirm\(/);
+  assert.match(campaignsPage, /Confirm one-write acceptance/);
+  assert.match(campaignsPage, /controlled-acceptance-prepare-failed/);
+  assert.match(campaignsPage, /No retry was started/);
+});
 test('customer Settings exposes only supported V1 tabs', () => {
   const tabBlock = settingsPage.slice(settingsPage.indexOf('const tabs = ['), settingsPage.indexOf('] as const;'));
   for (const label of ['Workspace', 'Users', 'Notifications', 'Billing']) assert.match(tabBlock, new RegExp(`label: '${label}'`));

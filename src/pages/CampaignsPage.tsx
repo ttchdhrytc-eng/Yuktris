@@ -39,6 +39,8 @@ export function CampaignsPage() {
   const [expandedCampaign, setExpandedCampaign] = useState<string | null>(null);
   const [existingProspectId, setExistingProspectId] = useState('');
   const [associating, setAssociating] = useState(false);
+  const [acceptanceConfirmation, setAcceptanceConfirmation] = useState<{ campaignId: string; contactId: string } | null>(null);
+  const [preparingAcceptance, setPreparingAcceptance] = useState(false);
   const initializationKey = useRef(crypto.randomUUID());
 
   const connectedAccounts = (accounts.data ?? []).filter((a) => a.connection_state === 'connected' && ['healthy', 'degraded'].includes(a.health_status) && a.profile_url);
@@ -134,21 +136,30 @@ export function CampaignsPage() {
   }
 
   async function prepareControlledAcceptance(campaignId: string, contactId: string) {
-    if (!workspace || !window.confirm('Prepare exactly one staging connection request for this prospect? It will run automatically only inside the campaign sending window.')) return;
-    const { data, error } = await supabase.functions.invoke('linkedin-v1-pipeline', {
-      body: {
-        action: 'prepare_controlled_acceptance',
-        workspace_id: workspace.id,
-        campaign_id: campaignId,
-        contact_id: contactId,
-      },
-    });
-    if (error) {
-      toast.error(await edgeFunctionError(error));
-      return;
+    if (!workspace || preparingAcceptance) return;
+    setPreparingAcceptance(true);
+    try {
+      const { data, error } = await supabase.functions.invoke('linkedin-v1-pipeline', {
+        body: {
+          action: 'prepare_controlled_acceptance',
+          workspace_id: workspace.id,
+          campaign_id: campaignId,
+          contact_id: contactId,
+        },
+      });
+      if (error) {
+        toast.error(await edgeFunctionError(error));
+        return;
+      }
+      toast.success(`One connection request prepared${data?.scheduled_at ? ` for ${new Date(data.scheduled_at).toLocaleString()}` : ''}.`);
+      setAcceptanceConfirmation(null);
+      await queryClient.invalidateQueries({ queryKey: ['campaign-prospects'] });
+    } catch (error) {
+      console.error('[controlled-acceptance-prepare-failed]', { message: error instanceof Error ? error.message : 'unknown_error' });
+      toast.error('The one-write acceptance could not be prepared. No retry was started.');
+    } finally {
+      setPreparingAcceptance(false);
     }
-    toast.success(`One connection request prepared${data?.scheduled_at ? ` for ${new Date(data.scheduled_at).toLocaleString()}` : ''}.`);
-    queryClient.invalidateQueries({ queryKey: ['campaign-prospects'] });
   }
 
   async function associateExistingProspect(campaignId: string) {
@@ -357,9 +368,21 @@ export function CampaignsPage() {
                               <p>Last action: {p.lastAction ?? 'No action yet'}</p>
                               <p>Next action: {p.nextAction ?? 'None scheduled'}</p>
                             </div>
-                            {p.acceptanceEligible && <Button className="mt-2" variant="secondary" size="sm" onClick={() => prepareControlledAcceptance(id, p.contactId)}>
-                              Prepare one-write acceptance
-                            </Button>}
+                            {p.acceptanceEligible && (
+                              acceptanceConfirmation?.campaignId === id && acceptanceConfirmation.contactId === p.contactId ? (
+                                <div className="mt-2 rounded-lg border border-warning-500/30 p-3">
+                                  <Reason text="Confirm exactly one staging connection request. It will run only inside the campaign sending window." />
+                                  <div className="mt-2 flex gap-2">
+                                    <Button variant="secondary" size="sm" disabled={preparingAcceptance} onClick={() => setAcceptanceConfirmation(null)}>Cancel</Button>
+                                    <Button size="sm" loading={preparingAcceptance} onClick={() => void prepareControlledAcceptance(id, p.contactId)}>Confirm one-write acceptance</Button>
+                                  </div>
+                                </div>
+                              ) : (
+                                <Button className="mt-2" variant="secondary" size="sm" onClick={() => setAcceptanceConfirmation({ campaignId: id, contactId: p.contactId })}>
+                                  Prepare one-write acceptance
+                                </Button>
+                              )
+                            )}
                           </div>
                         ))
                       ) : (
