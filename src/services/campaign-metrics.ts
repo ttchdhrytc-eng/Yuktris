@@ -30,6 +30,7 @@ function sourceId(row: Row): string | null {
 
 export function buildCampaignMetrics(params: {
   campaignIds: string[];
+  campaignContacts?: Row[];
   jobs?: Row[];
   conversations?: Row[];
   messages?: Row[];
@@ -43,18 +44,26 @@ export function buildCampaignMetrics(params: {
   const profileCampaign = new Map<string, string>();
   for (const id of params.campaignIds) contacts.set(id, new Set());
 
+  if (params.campaignContacts) {
+    for (const mapping of params.campaignContacts) {
+      const campaignId = typeof mapping.customer_campaign_id === 'string' ? mapping.customer_campaign_id : null;
+      const contactId = typeof mapping.contact_id === 'string' ? mapping.contact_id : null;
+      if (campaignId && contactId && result[campaignId]) contacts.get(campaignId)?.add(contactId);
+    }
+  }
+
   if (params.jobs) {
     for (const job of params.jobs) {
       if (isTestFixture(job)) continue;
       const id = sourceId(job); if (!id || !result[id]) continue;
-      if (typeof job.contact_id === 'string') contacts.get(id)?.add(job.contact_id);
+      if (!params.campaignContacts && typeof job.contact_id === 'string') contacts.get(id)?.add(job.contact_id);
       const payload = job.action_payload && typeof job.action_payload === 'object' ? job.action_payload as Row : {};
       if (typeof payload.profile_url === 'string') profileCampaign.set(payload.profile_url.replace(/\/$/, '').toLowerCase(), id);
       if (job.action_type === 'connection_request' && job.status === 'completed') result[id].connectionsSent!++;
       if (job.action_type === 'check_connection_acceptance' && job.status === 'completed') result[id].connectionsAccepted!++;
     }
-    for (const id of params.campaignIds) result[id].prospects = contacts.get(id)?.size ?? 0;
   }
+  for (const id of params.campaignIds) result[id].prospects = contacts.get(id)?.size ?? 0;
 
   const conversationCampaign = new Map<string, string>();
   if (params.conversations) {
