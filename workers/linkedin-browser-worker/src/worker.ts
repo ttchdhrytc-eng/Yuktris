@@ -1876,10 +1876,11 @@ export class Worker {
           const url = params.profile_url as string;
           const note = params.note as string | undefined;
           if (!url) throw new Error('profile_url required');
-          await page.goto(url, {
-            waitUntil: 'domcontentloaded',
-            timeout: 30000,
-          });
+          const readiness = await waitForLinkedInProfileReady(page, url);
+          if (!readiness.ready || !readiness.targetMatched) {
+            result = { success: false, error: 'Final relationship preflight was inconclusive', data: { result_code: readiness.code, write_verified: false, interaction_crossed: false } };
+            break;
+          }
           const authorizedTarget = normalizeLinkedInTarget(url);
           const presentedTarget = normalizeLinkedInTarget(await page.evaluate(() => document.querySelector<HTMLLinkElement>('link[rel="canonical"]')?.href || location.href));
           if (!authorizedTarget || presentedTarget !== authorizedTarget) {
@@ -1889,15 +1890,28 @@ export class Worker {
             };
             break;
           }
-          await page.waitForTimeout(1500 + Math.random() * 2000);
-
-          const readProfileState = async () =>
-            classifyConnectionProfileState({
-              hasPending: !!(await page.$('button span:has-text("Pending")')),
-              hasConnect: !!(await page.$('button span:has-text("Connect")')),
-              hasMessage: !!(await page.$('button span:has-text("Message")')),
-            });
-          const initialState = await readProfileState();
+          const readProfileState = async () => page.evaluate(() => {
+            const visible = (element: Element) => { const n=element as HTMLElement,r=n.getBoundingClientRect(),s=getComputedStyle(n); return r.width>0&&r.height>0&&s.display!=='none'&&s.visibility!=='hidden'; };
+            const label = (element: Element) => [element.getAttribute('aria-label'),element.getAttribute('title'),element.textContent].filter(Boolean).join(' ').replace(/\s+/g,' ').trim().toLowerCase();
+            const heading=Array.from(document.querySelectorAll('main h1,main h2,main [role="heading"],.scaffold-layout__main h1,.scaffold-layout__main h2')).find(visible);
+            const header=heading?.closest('section,[data-view-name*="profile-top"],.pv-top-card')??heading?.parentElement?.parentElement??document.querySelector('main');
+            document.querySelectorAll('[data-yuktris-write-connect],[data-yuktris-write-more]').forEach(e=>{e.removeAttribute('data-yuktris-write-connect');e.removeAttribute('data-yuktris-write-more');});
+            const controls=Array.from(header?.querySelectorAll('button,a,[role="button"]')??[]).filter(visible);
+            const connect=controls.find(e=>/(?:^|\b)connect(?:\b|$)|invite\s+.+\s+to\s+connect/i.test(label(e)));
+            const more=controls.find(e=>/(?:^|\b)more(?:\b|$)|additional\s+actions/i.test(label(e)));
+            connect?.setAttribute('data-yuktris-write-connect','primary'); more?.setAttribute('data-yuktris-write-more','true');
+            const labels=controls.map(label),has=(p:RegExp)=>labels.some(v=>p.test(v));
+            return { hasPending:has(/\bpending\b|invitation\s+sent|withdraw\s+invitation/),hasConnect:!!connect,hasMessage:has(/(?:^|\b)message(?:\b|$)/),hasConnected:has(/remove\s+connection|connection\s+since|1st\s+degree/),hasMore:!!more };
+          });
+          let semanticState=await readProfileState();
+          let connectLocation: 'primary'|'more_menu'|null=semanticState.hasConnect?'primary':null;
+          if (!semanticState.hasConnect && semanticState.hasMore) {
+            const more=page.locator('[data-yuktris-write-more="true"]').first();
+            await more.click(); await page.waitForTimeout(700);
+            const menuConnect=page.locator('[role="menuitem"], [role="menu"] button, .artdeco-dropdown__item, [data-control-name]').filter({hasText:/connect/i}).first();
+            if (await menuConnect.isVisible().catch(()=>false)) { await menuConnect.evaluate(e=>e.setAttribute('data-yuktris-write-connect','more_menu')); semanticState={...semanticState,hasConnect:true}; connectLocation='more_menu'; }
+          }
+          const initialState = classifyConnectionProfileState({ hasPending: semanticState.hasPending, hasConnect: semanticState.hasConnect, hasMessage: semanticState.hasConnected });
           if (initialState === 'already_pending') {
             result = {
               success: true,
@@ -1929,14 +1943,16 @@ export class Worker {
             break;
           }
 
-          const connectBtn = await page.$('button span:has-text("Connect")');
-          if (!connectBtn) {
+          const connectBtn = page.locator('[data-yuktris-write-connect]').first();
+          if (!await connectBtn.isVisible().catch(() => false)) {
             result = {
               success: false,
               error: 'Connect button not found — may already be connected',
             };
             break;
           }
+          const connectElementType = await connectBtn.evaluate(e=>e.tagName.toLowerCase());
+          let modalAppeared=false, finalSendClicked=false, immediateSend=false;
           await connectBtn.click();
           await page.waitForTimeout(800 + Math.random() * 1200);
 
@@ -1944,7 +1960,7 @@ export class Worker {
             result = {
               success: false,
               error: 'LinkedIn restriction detected after opening connect dialog',
-              data: { result_code: 'restricted' },
+              data: { result_code: 'outcome_unknown', write_verified: false, retry_allowed: false, interaction_crossed: true, connect_clicked: true, connect_location: connectLocation, connect_element_type: connectElementType },
             };
             break;
           }
@@ -1976,8 +1992,10 @@ export class Worker {
               break;
             }
             await sendBtn.click();
+            finalSendClicked=true;
           } else {
             const dialog = await page.$('div[role="dialog"]');
+            modalAppeared=!!dialog;
             const scope = dialog ?? page;
             let confirmBtn: Awaited<ReturnType<typeof page.$>> = null;
             for (const label of NO_NOTE_CONFIRM_LABELS) {
@@ -1992,12 +2010,15 @@ export class Worker {
               // Some cohorts confirm immediately on the profile Connect click with no dialog at all.
               // Some cohorts send immediately from the profile Connect control.
               // Do not click again: post-click evidence below decides the outcome.
+              immediateSend=!dialog;
             } else {
               await confirmBtn.click();
+              finalSendClicked=true;
             }
           }
           await page.waitForTimeout(2000);
-          const postState = await readProfileState();
+          const postSemanticState = await readProfileState();
+          const postState = classifyConnectionProfileState({ hasPending: postSemanticState.hasPending, hasConnect: postSemanticState.hasConnect, hasMessage: postSemanticState.hasConnected });
           const pageText = await page.locator('body').innerText().catch(() => '');
           const hasSentEvidence = /invitation\s+(?:was\s+)?sent|request\s+(?:was\s+)?sent/i.test(pageText);
           const postClickOutcome = classifyPostClickOutcome({
@@ -2016,6 +2037,8 @@ export class Worker {
                 connection_state: postClickOutcome,
                 write_verified: false,
                 retry_allowed: false,
+                interaction_crossed: true, connect_clicked: true, connect_location: connectLocation, connect_element_type: connectElementType,
+                modal_appeared: modalAppeared, final_send_clicked: finalSendClicked, immediate_send_flow: immediateSend,
               },
             };
             break;
@@ -2028,6 +2051,8 @@ export class Worker {
               connection_state: 'request_pending',
               write_verified: true,
               verification: postState === 'already_pending' ? 'pending_control' : 'sent_invitation_evidence',
+              interaction_crossed: true, connect_clicked: true, connect_location: connectLocation, connect_element_type: connectElementType,
+              modal_appeared: modalAppeared, final_send_clicked: finalSendClicked, immediate_send_flow: immediateSend,
             },
           };
           break;

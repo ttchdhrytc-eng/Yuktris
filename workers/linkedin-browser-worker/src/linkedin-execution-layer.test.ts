@@ -16,6 +16,7 @@ const writeAcceptancePurpose = readFileSync(resolve(process.cwd(), '../../supaba
 const authoritativeSchedule = readFileSync(resolve(process.cwd(), '../../supabase/migrations/20260821090000_authoritative_campaign_outreach_schedule.sql'), 'utf8');
 const effectiveSchedule = readFileSync(resolve(process.cwd(), '../../supabase/migrations/20260821213000_linkedin_effective_sending_window.sql'), 'utf8');
 const acceptanceGenerations = readFileSync(resolve(process.cwd(), '../../supabase/migrations/20260822113000_controlled_acceptance_generations.sql'), 'utf8');
+const acceptanceClassificationFix = readFileSync(resolve(process.cwd(), '../../supabase/migrations/20260826053000_fix_controlled_acceptance_relationship_classification.sql'), 'utf8');
 const effectiveScheduleTests = readFileSync(resolve(process.cwd(), '../../supabase/tests/linkedin_effective_sending_window.sql'), 'utf8');
 const failedAcceptanceEvidence = readFileSync(resolve(process.cwd(), '../../supabase/migrations/20260821213500_preserve_failed_acceptance_terminal_evidence.sql'), 'utf8');
 const customerSchedule = readFileSync(resolve(process.cwd(), '../../supabase/migrations/20260821220000_customer_controlled_campaign_schedule.sql'), 'utf8');
@@ -132,7 +133,7 @@ test('Sales Navigator waits for results and normalizes positive candidate fields
 test('connection request verifies the presented canonical target before any Connect control', () => {
   const start = worker.lastIndexOf("case 'connection_request':");
   const branch = worker.slice(start, worker.indexOf("case 'send_message':", start));
-  assert.ok(branch.indexOf('presentedTarget !== authorizedTarget') < branch.indexOf('button span:has-text("Connect")'));
+  assert.ok(branch.indexOf('presentedTarget !== authorizedTarget') < branch.indexOf('data-yuktris-write-connect'));
   assert.match(branch, /Presented LinkedIn profile does not match the authorized target/);
 });
 for (const [surface, currentUrl] of [
@@ -369,6 +370,12 @@ test('generation relationship gate allows only exact allowlisted eligible target
   assert.match(acceptanceGenerations, /status<>'eligible'/);
   assert.match(acceptanceGenerations, /max_retries,action_payload\)[\s\S]*'connection_request','scheduled'[\s\S]*,-1,0,/);
   assert.doesNotMatch(acceptanceGenerations, /send_message|follow_up_message/);
+});
+
+test('message availability alone never classifies a controlled generation as connected', () => {
+  assert.match(acceptanceClassificationFix, /relationship_classification[^;]*already_connected/);
+  assert.match(acceptanceClassificationFix, /relationship_classification[^;]*eligible_for_connection_request/);
+  assert.doesNotMatch(acceptanceClassificationFix, /message_available/);
 });
 test('successful generation permanently blocks another while unknown is terminal', () => {
   assert.match(acceptanceGenerations, /uq_one_successful_acceptance_generation/);
