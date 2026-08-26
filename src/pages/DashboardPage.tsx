@@ -20,7 +20,7 @@ import { timeAgo, formatNumber, cn } from '@/lib/utils';
 import { useGoogleConnection } from '@/hooks/useGoogleAuth';
 import { useLinkedInAccounts } from '@/hooks/useLinkedInBrowser';
 import { GOOGLE_SCOPES } from '@/types/google-auth';
-import { buildCampaignMetrics, CAMPAIGN_STATUS_LABELS, type CampaignMetricSet } from '@/services/campaign-metrics';
+import { buildCampaignMetrics, CAMPAIGN_STATUS_LABELS, isVerifiedNormalCampaignWrite, type CampaignMetricSet } from '@/services/campaign-metrics';
 
 type DateRange = 'today' | 'week' | 'month' | 'all';
 
@@ -42,7 +42,7 @@ export function DashboardPage() {
       const [
         campaigns, prospects, meetings, messages, upcomingMeetings,
         repliedProspects, proposals, executionJobs, linkedinMessages,
-        linkedinConversations, qualifiedContacts, meetingConfirmations, customerCampaigns, successfulWrites,
+        linkedinConversations, qualifiedContacts, meetingConfirmations, customerCampaigns,
       ] = await Promise.all([
         supabase.from('customer_campaigns').select('id, name, status, created_at').eq('workspace_id', wsId).order('created_at', { ascending: false }),
         supabase.from('contacts').select('id', { count: 'exact', head: true }).eq('workspace_id', wsId),
@@ -51,13 +51,12 @@ export function DashboardPage() {
         supabase.from('meetings').select('id, title, scheduled_at, duration_minutes, prospect_id').eq('workspace_id', wsId).eq('status', 'scheduled').gte('scheduled_at', new Date().toISOString()).order('scheduled_at', { ascending: true }).limit(5),
         supabase.from('prospects').select('id, first_name, last_name, title, company_name, status, created_at').eq('workspace_id', wsId).eq('status', 'replied').order('created_at', { ascending: false }).limit(5),
         supabase.from('proposal_approvals').select('id, approval_status, approval_notes, created_at').eq('workspace_id', wsId).eq('approval_status', 'pending').order('created_at', { ascending: false }).limit(5),
-        supabase.from('linkedin_execution_jobs').select('contact_id,action_type,status,action_payload').eq('workspace_id', wsId),
+        supabase.from('linkedin_execution_jobs').select('contact_id,action_type,status,action_payload,result_payload').eq('workspace_id', wsId),
         supabase.from('linkedin_messages').select('conversation_id,direction,classification,metadata').eq('workspace_id', wsId),
         supabase.from('linkedin_conversations').select('id,stage,metadata,prospect_profile_url').eq('workspace_id', wsId),
         supabase.from('contacts').select('id', { count: 'exact', head: true }).eq('workspace_id', wsId).eq('status', 'qualified'),
         supabase.from('linkedin_meeting_confirmations').select('id,metadata').eq('workspace_id', wsId),
         supabase.from('customer_campaigns').select('id,status').eq('workspace_id', wsId),
-        supabase.from('linkedin_write_audit').select('contact_id,action_type,execution_result,execution_completed_at').eq('workspace_id', wsId).eq('execution_result', 'success').not('execution_completed_at', 'is', null).not('contact_id', 'is', null),
       ]);
 
       const sent = messages.data?.filter(m => m.direction === 'sent').length ?? 0;
@@ -97,7 +96,7 @@ export function DashboardPage() {
         metrics: {
           activeCampaigns: customerCampaigns.data?.filter(c => c.status === 'running').length ?? activeCampaigns.length,
           prospectsDiscovered: canonicalTotals.prospects,
-          prospectsContacted: new Set((successfulWrites.data ?? []).map(row => row.contact_id).filter(Boolean)).size,
+          prospectsContacted: new Set((executionJobs.data ?? []).filter(job => isVerifiedNormalCampaignWrite(job)).map(row => row.contact_id).filter(Boolean)).size,
           connectionsSent: canonicalTotals.connectionsSent,
           connectionsAccepted: canonicalTotals.connectionsAccepted,
           messagesSent: canonicalTotals.messagesSent,

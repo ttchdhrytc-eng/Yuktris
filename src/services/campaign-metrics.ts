@@ -28,6 +28,19 @@ function sourceId(row: Row): string | null {
   return typeof value === 'string' ? value : null;
 }
 
+function payloadFor(row: Row, key: 'action_payload' | 'result_payload'): Row {
+  return row[key] && typeof row[key] === 'object' ? row[key] as Row : {};
+}
+
+export function isVerifiedNormalCampaignWrite(row: Row): boolean {
+  const action = payloadFor(row, 'action_payload');
+  const result = payloadFor(row, 'result_payload');
+  return action.acceptance_test_mode !== true
+    && row.status === 'completed'
+    && result.write_verified === true
+    && result.result_code === 'success';
+}
+
 export function buildCampaignMetrics(params: {
   campaignIds: string[];
   campaignContacts?: Row[];
@@ -59,8 +72,11 @@ export function buildCampaignMetrics(params: {
       if (!params.campaignContacts && typeof job.contact_id === 'string') contacts.get(id)?.add(job.contact_id);
       const payload = job.action_payload && typeof job.action_payload === 'object' ? job.action_payload as Row : {};
       if (typeof payload.profile_url === 'string') profileCampaign.set(payload.profile_url.replace(/\/$/, '').toLowerCase(), id);
-      if (job.action_type === 'connection_request' && job.status === 'completed') result[id].connectionsSent!++;
-      if (job.action_type === 'check_connection_acceptance' && job.status === 'completed') result[id].connectionsAccepted!++;
+      if (job.action_type === 'connection_request' && isVerifiedNormalCampaignWrite(job)) result[id].connectionsSent!++;
+      if (job.action_type === 'check_connection_acceptance' && job.status === 'completed') {
+        const probe = payloadFor(job, 'result_payload');
+        if (probe.accepted === true || probe.relationship_classification === 'already_connected') result[id].connectionsAccepted!++;
+      }
     }
   }
   for (const id of params.campaignIds) result[id].prospects = contacts.get(id)?.size ?? 0;

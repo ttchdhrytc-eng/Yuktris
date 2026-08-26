@@ -30,3 +30,16 @@ test('canonical campaign mappings count association-only prospects without chang
     meetingsBooked: 0,
   });
 });
+
+test('campaign writes require positive verification and exclude controlled acceptance', () => {
+  const campaignId = 'campaign';
+  const metrics = buildCampaignMetrics({
+    campaignIds: [campaignId],
+    jobs: [
+      { contact_id: 'verified', action_type: 'connection_request', status: 'completed', action_payload: { source_campaign_id: campaignId }, result_payload: { result_code: 'success', write_verified: true } },
+      { contact_id: 'unverified', action_type: 'connection_request', status: 'completed', action_payload: { source_campaign_id: campaignId }, result_payload: {} },
+      { contact_id: 'controlled', action_type: 'connection_request', status: 'completed', action_payload: { source_campaign_id: campaignId, acceptance_test_mode: true }, result_payload: { result_code: 'success', write_verified: true } },
+    ],
+  });
+  assert.equal(metrics[campaignId].connectionsSent, 1);
+});

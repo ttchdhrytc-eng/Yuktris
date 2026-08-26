@@ -54,6 +54,7 @@ const campaignProspects = readFileSync(resolve(process.cwd(), '../../src/service
 const prospectsPage = readFileSync(resolve(process.cwd(), '../../src/pages/ProspectsPage.tsx'), 'utf8');
 const settingsPageV1 = readFileSync(resolve(process.cwd(), '../../src/pages/SettingsPage.tsx'), 'utf8');
 const conversationInboxPage = readFileSync(resolve(process.cwd(), '../../src/pages/ConversationInboxPage.tsx'), 'utf8');
+const billingPage = readFileSync(resolve(process.cwd(), '../../src/pages/BillingPage.tsx'), 'utf8');
 
 test('all current writes share one preflight before the switch', () => {
   for (const action of ['connection_request', 'send_message', 'follow_up_message', 'like_post', 'follow_company']) assert.ok(LINKEDIN_WRITE_ACTIONS.has(action));
@@ -291,8 +292,9 @@ test('fixture conversations and metrics are excluded from normal customer querie
 });
 test('dashboard and campaign cards aggregate the same canonical zero-safe metrics', () => {
   assert.match(dashboardPage, /Object\.values\(campaignMetrics\)\.reduce/);
-  assert.match(dashboardPage, /linkedin_write_audit[\s\S]*execution_result[\s\S]*success/);
-  assert.match(dashboardPage, /prospectsContacted: new Set\(\(successfulWrites\.data/);
+  assert.match(campaignMetrics, /isVerifiedNormalCampaignWrite[\s\S]*write_verified[\s\S]*result_code/);
+  assert.match(campaignMetrics, /acceptance_test_mode !== true/);
+  assert.match(dashboardPage, /prospectsContacted: new Set\(\(executionJobs\.data/);
   assert.match(campaignMetrics, /prospects: 0[\s\S]*meetingsBooked: 0/);
 });
 test('customer campaign is the sole authoritative IANA sending schedule', () => {
@@ -518,6 +520,17 @@ test('Inbox has an explicit customer empty state', () => {
 test('Upgrade CTAs no longer fail silently or imply checkout completion', () => {
   assert.match(settingsPageV1, /Plan upgrades are not available yet\. No payment will be taken\./);
   assert.match(sidebar, /window\.location\.assign\('\/app\/settings'\)/);
+  assert.match(billingPage, /Billing is not available yet/);
+  assert.match(billingPage, /No payment will be taken/);
+  assert.doesNotMatch(billingPage, /create_checkout|Add Card|\$99|5,000 prospects/);
+});
+test('hidden internal V1 routes redirect to customer-safe destinations', () => {
+  for (const path of ['execution-queue', 'browser', 'api-platform', 'ai-ceo', 'workforce']) {
+    assert.match(app, new RegExp(`path="/app/${path}" element=\\{<Navigate to="/app" replace />\\}`));
+  }
+  assert.match(app, /path="\/app\/integrations" element=\{<Navigate to="\/app\/settings" replace \/>\}/);
+  assert.match(app, /path="\/app\/payments" element=\{<Navigate to="\/app\/billing" replace \/>\}/);
+  assert.doesNotMatch(app, /path="\/app\/execution-queue" element=\{<ProtectedApp>/);
 });
 test('campaign launch failure, backend exception and timeout cannot remain initializing', () => {
   assert.match(linkedinV1Pipeline, /lifecycleCampaignId[\s\S]*status: "failed"[\s\S]*initialization_failed/);
