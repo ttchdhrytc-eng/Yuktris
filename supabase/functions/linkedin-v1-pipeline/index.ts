@@ -299,6 +299,41 @@ Deno.serve(async (req: Request) => {
       if (internalService || !userId) throw pipelineError("controlled_acceptance_human_initiation_required", "A signed-in staging administrator must explicitly continue a generation", 403);
       if (!Deno.env.get("SUPABASE_URL")?.includes("vdiqfiuqckaxdjkadinu")) throw pipelineError("staging_only", "Controlled acceptance generations are disabled outside staging", 403);
       const generationId = requireString(body.generation_id, "generation_id");
+      const { data: member } = await admin.from("workspace_members").select("role,status").eq("workspace_id", workspaceId).eq("user_id", userId).maybeSingle();
+      if (!member || member.status !== "active" || !["owner", "admin"].includes(member.role)) throw pipelineError("controlled_acceptance_admin_required", "Only an active staging owner or administrator may continue a generation", 403);
+      const { data: generation } = await admin.from("controlled_acceptance_generations")
+        .select("id,workspace_id,campaign_id,contact_id,linkedin_account_id,target_identifier,status,relationship_queue_id,write_job_id")
+        .eq("id", generationId).eq("workspace_id", workspaceId).maybeSingle();
+      if (!generation) throw pipelineError("controlled_acceptance_generation_not_found", "Generation was not found in this workspace", 404);
+      if (generation.status !== "relationship_check_pending") {
+        return json({ generation_id: generation.id, status: generation.status, write_job_id: generation.write_job_id, reused: true, write_performed: false });
+      }
+      const [{ data: campaign }, { data: contact }, { data: association }, { data: account }, { data: probe }] = await Promise.all([
+        admin.from("customer_campaigns").select("id,linkedin_account_id").eq("id", generation.campaign_id).eq("workspace_id", workspaceId).maybeSingle(),
+        admin.from("contacts").select("id,linkedin_url").eq("id", generation.contact_id).eq("workspace_id", workspaceId).maybeSingle(),
+        admin.from("customer_campaign_contacts").select("id").eq("customer_campaign_id", generation.campaign_id).eq("contact_id", generation.contact_id).eq("workspace_id", workspaceId).maybeSingle(),
+        admin.from("linkedin_accounts").select("id,profile_url,expected_profile_url").eq("id", generation.linkedin_account_id).eq("workspace_id", workspaceId).maybeSingle(),
+        admin.from("browser_execution_queue").select("id,status,result").eq("id", generation.relationship_queue_id).eq("workspace_id", workspaceId).maybeSingle(),
+      ]);
+      const exactTarget = "https://www.linkedin.com/in/tarun-chaudhary";
+      const exactSender = "https://www.linkedin.com/in/tarun-chaudhary06";
+      const canonicalContact = contact?.linkedin_url ? normalizeLinkedInProfile(contact.linkedin_url) : null;
+      if (!campaign || campaign.linkedin_account_id !== generation.linkedin_account_id || !contact || !association || canonicalContact !== exactTarget || normalizeLinkedInProfile(generation.target_identifier) !== exactTarget) {
+        throw pipelineError("controlled_acceptance_scope_mismatch", "Generation campaign, account, canonical contact, and exact target must remain associated", 409);
+      }
+      if (!account || normalizeLinkedInProfile(account.profile_url) !== exactSender || normalizeLinkedInProfile(account.expected_profile_url) !== exactSender) {
+        throw pipelineError("controlled_acceptance_sender_mismatch", "The expected authenticated staging sender is not bound to this generation", 409);
+      }
+      if (!probe || probe.status !== "completed" || probe.result?.result_code !== "success" || probe.result?.relationship_classification !== "eligible_for_connection_request" || probe.result?.connect_available !== true) {
+        throw pipelineError("controlled_acceptance_probe_not_eligible", "The persisted read-only relationship probe is not completed and eligible", 409);
+      }
+      const { data: allowed } = await admin.from("linkedin_safe_write_targets").select("id")
+        .eq("workspace_id", workspaceId).eq("linkedin_account_id", generation.linkedin_account_id)
+        .eq("project_ref", "vdiqfiuqckaxdjkadinu").eq("target_identifier", exactTarget).eq("enabled", true)
+        .contains("allowed_action_types", ["connection_request"]).maybeSingle();
+      if (!allowed) throw pipelineError("unsafe_target", "The exact staging target is not currently allowlisted for one connection request", 409);
+      const { data: windowValidation, error: windowError } = await admin.rpc("campaign_window_validation", { p_campaign_id: generation.campaign_id, p_not_before: new Date().toISOString() });
+      if (windowError || !windowValidation?.valid) throw pipelineError("invalid_campaign_schedule", "The campaign does not have a valid customer sending window", 409);
       const { data, error } = await admin.rpc("advance_controlled_acceptance_generation", { p_generation_id: generationId, p_actor: userId });
       if (error) throw pipelineError("controlled_acceptance_generation_rejected", error.message, 409);
       return json(data as Json);

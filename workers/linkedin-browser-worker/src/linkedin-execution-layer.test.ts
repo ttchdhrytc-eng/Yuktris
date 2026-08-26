@@ -19,6 +19,7 @@ const acceptanceGenerations = readFileSync(resolve(process.cwd(), '../../supabas
 const acceptanceClassificationFix = readFileSync(resolve(process.cwd(), '../../supabase/migrations/20260826053000_fix_controlled_acceptance_relationship_classification.sql'), 'utf8');
 const acceptanceServiceRoleFix = readFileSync(resolve(process.cwd(), '../../supabase/migrations/20260826053100_controlled_acceptance_service_role_compatibility.sql'), 'utf8');
 const campaignAuthorityRestore = readFileSync(resolve(process.cwd(), '../../supabase/migrations/20260826053300_restore_customer_campaign_schedule_authority.sql'), 'utf8');
+const acceptanceAdvanceGuardFix = readFileSync(resolve(process.cwd(), '../../supabase/migrations/20260826141500_fix_controlled_acceptance_advance_service_role_guard.sql'), 'utf8');
 const retryRunner = readFileSync(resolve(process.cwd(), '../../supabase/functions/linkedin-retry-runner/index.ts'), 'utf8');
 const legacySafety = readFileSync(resolve(process.cwd(), '../../src/services/linkedin-operations/LinkedInSafetyService.ts'), 'utf8');
 const effectiveScheduleTests = readFileSync(resolve(process.cwd(), '../../supabase/tests/linkedin_effective_sending_window.sql'), 'utf8');
@@ -431,6 +432,30 @@ test('generation RPCs remain service-role-only with current Supabase secret keys
   for (const rpc of ['start_controlled_acceptance_generation', 'advance_controlled_acceptance_generation', 'finalize_controlled_acceptance_generation']) {
     assert.match(acceptanceServiceRoleFix, new RegExp(rpc));
   }
+});
+test('controlled continuation crosses the authenticated server trust boundary', () => {
+  const continuation = linkedinV1Pipeline.slice(linkedinV1Pipeline.indexOf('if (action === "advance_controlled_acceptance_generation")'), linkedinV1Pipeline.indexOf('if (action === "prepare_controlled_acceptance")'));
+  assert.match(continuation, /internalService \|\| !userId/);
+  assert.match(continuation, /workspace_members[\s\S]*owner[\s\S]*admin/);
+  for (const scope of ['controlled_acceptance_generations', 'customer_campaigns', 'customer_campaign_contacts', 'contacts', 'linkedin_accounts', 'browser_execution_queue', 'linkedin_safe_write_targets']) assert.match(continuation, new RegExp(scope));
+  for (const evidence of ['eligible_for_connection_request', 'connect_available', 'tarun-chaudhary06', 'tarun-chaudhary', 'campaign_window_validation']) assert.match(continuation, new RegExp(evidence));
+  assert.match(continuation, /admin\.rpc\("advance_controlled_acceptance_generation"/);
+  assert.doesNotMatch(continuation, /SUPABASE_SERVICE_ROLE_KEY|createClient/);
+});
+test('advance RPC keeps service role exclusive and supports current server secrets', () => {
+  assert.match(acceptanceAdvanceGuardFix, /auth\.role\(\)/);
+  assert.match(acceptanceAdvanceGuardFix, /REVOKE ALL[\s\S]*PUBLIC,anon,authenticated/);
+  assert.match(acceptanceAdvanceGuardFix, /GRANT EXECUTE[\s\S]*TO service_role/);
+  assert.doesNotMatch(acceptanceAdvanceGuardFix, /GRANT EXECUTE[\s\S]*TO authenticated/);
+});
+test('controlled continuation is idempotent and never creates a replacement generation', () => {
+  const continuation = linkedinV1Pipeline.slice(linkedinV1Pipeline.indexOf('if (action === "advance_controlled_acceptance_generation")'), linkedinV1Pipeline.indexOf('if (action === "prepare_controlled_acceptance")'));
+  assert.match(continuation, /status !== "relationship_check_pending"[\s\S]*reused: true/);
+  assert.doesNotMatch(continuation, /start_controlled_acceptance_generation|\.insert\(/);
+});
+test('service role secret remains server-only and absent from Campaigns', () => {
+  assert.doesNotMatch(campaignsPage, /SERVICE_ROLE|service_role.*key|SUPABASE_SERVICE_ROLE_KEY/i);
+  assert.match(linkedinV1Pipeline, /authorizeLinkedInWorkspace/);
 });
 
 test('current scheduling authority ignores account working-hour metadata on every path', () => {
