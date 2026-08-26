@@ -13,6 +13,7 @@ import { finalizeLinkedInWrite, LINKEDIN_WRITE_ACTIONS, normalizeLinkedInTarget,
 import { classifyConnectionProfileState, classifyPostClickOutcome, isNoNoteConfirmCandidate, NO_NOTE_CONFIRM_LABELS } from './connection-dialog.js';
 import { classifyRelationshipProbe, type RelationshipProbeEvidence } from './relationship-probe.js';
 import { waitForLinkedInProfileReady } from './linkedin-profile-readiness.js';
+import type { Locator, Page } from 'playwright';
 
 const INTERACTIVE_AUTH_TIMEOUT_MS = interactiveAuthTimeoutMs();
 const TEST_CONNECTION_TIMEOUT = parseInt(process.env.TEST_CONNECTION_TIMEOUT_MS || '120000', 10);
@@ -44,6 +45,42 @@ export class Worker {
   private activeTasks = new Map<string, Promise<void>>();
   private workspaceId: string | null = null;
   private lastAutonomousMaintenanceAt = 0;
+
+  private async storeRelationshipProbeScreenshot(
+    item: QueueItem,
+    page: Page,
+    screenshotType: string,
+    locator?: Locator,
+  ): Promise<{ id: string; storage_path: string; screenshot_type: string }> {
+    const storagePath = `${item.workspace_id}/relationship-probes/${item.id}/${screenshotType}.jpeg`;
+    const image = locator
+      ? await locator.screenshot({ type: 'jpeg', quality: 82 })
+      : await page.screenshot({ type: 'jpeg', quality: 78, fullPage: true });
+    const { error: uploadError } = await this.client.storage
+      .from('browser-screenshots')
+      .upload(storagePath, image, { contentType: 'image/jpeg', upsert: false });
+    if (uploadError) throw new Error(`Diagnostic screenshot upload failed: ${this.sanitizeError(uploadError)}`);
+    const viewport = await page.evaluate(() => ({
+      width: innerWidth, height: innerHeight, device_scale_factor: devicePixelRatio,
+    }));
+    const { data, error } = await this.client.from('browser_screenshots').insert({
+      workspace_id: item.workspace_id,
+      screenshot_type: screenshotType,
+      storage_path: storagePath,
+      url: page.url(),
+      page_title: (await page.title()).slice(0, 200),
+      viewport,
+      file_size_bytes: image.byteLength,
+      metadata: {
+        queue_item_id: item.id,
+        worker_attempt_id: item.attempt_id,
+        browserbase_session_id: this.linkedin.getSessionId(),
+        forensic_read_only: true,
+      },
+    }).select('id, storage_path, screenshot_type').single();
+    if (error || !data) throw new Error(`Diagnostic screenshot metadata failed: ${this.sanitizeError(error)}`);
+    return data;
+  }
 
   constructor() {
     const supabaseUrl = process.env.SUPABASE_URL;
@@ -1665,6 +1702,46 @@ export class Worker {
             break;
           }
 
+          const browserEnvironment = await page.evaluate(() => {
+            const ua = navigator.userAgent;
+            const family = /Edg\//.test(ua) ? 'Edge' : /Chrome\//.test(ua) ? 'Chrome' : /Firefox\//.test(ua) ? 'Firefox' : /Safari\//.test(ua) ? 'Safari' : 'Other';
+            return {
+              viewport: { width: innerWidth, height: innerHeight },
+              device_scale_factor: devicePixelRatio,
+              user_agent_family: family,
+              locale: Intl.DateTimeFormat().resolvedOptions().locale,
+              timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+              language: navigator.language,
+              languages: [...navigator.languages],
+              form_factor: /Mobi|Android|iPhone|iPad/i.test(ua) ? 'mobile' : 'desktop',
+            };
+          });
+
+          const readSanitizedControls = async (scope: 'header' | 'menu') => page.evaluate((requestedScope) => {
+            const visible = (element: Element) => {
+              const node = element as HTMLElement; const rect = node.getBoundingClientRect(); const style = getComputedStyle(node);
+              return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
+            };
+            const candidates = requestedScope === 'menu'
+              ? Array.from(document.querySelectorAll('[role="menuitem"], [role="option"], [role="menu"] button, [role="menu"] [role="button"], .artdeco-dropdown__item, .artdeco-dropdown__content li, [data-control-name]'))
+              : Array.from(document.querySelectorAll('[data-yuktris-profile-header] button, [data-yuktris-profile-header] a, [data-yuktris-profile-header] [role="button"]'));
+            return candidates.filter(visible).map(element => {
+              const html = element as HTMLElement;
+              const visibleText = html.innerText?.replace(/\s+/g, ' ').trim().slice(0, 160) || null;
+              const ariaLabel = element.getAttribute('aria-label')?.trim().slice(0, 160) || null;
+              const title = element.getAttribute('title')?.trim().slice(0, 160) || null;
+              return {
+                role: element.getAttribute('role') || (element.tagName === 'BUTTON' ? 'button' : element.tagName === 'A' ? 'link' : null),
+                accessible_name: ariaLabel || title || visibleText,
+                visible_text: visibleText,
+                aria_label: ariaLabel,
+                title,
+                disabled: html.matches(':disabled, [aria-disabled="true"]'),
+                element_type: element.tagName.toLowerCase(),
+              };
+            }).filter((control, index, all) => control.accessible_name && all.findIndex(candidate => JSON.stringify(candidate) === JSON.stringify(control)) === index);
+          }, scope);
+
           const readPrimaryEvidence = async (): Promise<RelationshipProbeEvidence> => page.evaluate(() => {
             const visible = (element: Element) => {
               const node = element as HTMLElement;
@@ -1680,6 +1757,8 @@ export class Worker {
               return rect.width > 0 && rect.height > 0 && rect.top >= 0 && rect.top < Math.max(700, innerHeight) && style.display !== 'none' && style.visibility !== 'hidden';
             }) ?? null;
             const header = heading?.closest('section, [data-view-name*="profile-top"], .pv-top-card') ?? heading?.parentElement?.parentElement ?? document.querySelector('main');
+            document.querySelectorAll('[data-yuktris-profile-header]').forEach(element => element.removeAttribute('data-yuktris-profile-header'));
+            header?.setAttribute('data-yuktris-profile-header', 'true');
             const headerText = header?.textContent?.replace(/\s+/g, ' ') ?? '';
             const degree = /(?:^|\s)1st(?:\s|$)/i.test(headerText) ? '1st' : /(?:^|\s)2nd(?:\s|$)/i.test(headerText) ? '2nd' : /(?:^|\s)3rd(?:\s|$)/i.test(headerText) ? '3rd' : null;
             const headingRect = heading?.getBoundingClientRect();
@@ -1714,6 +1793,15 @@ export class Worker {
           }
           if (!evidence) throw new Error('Relationship probe produced no evidence');
 
+          const headerControls = await readSanitizedControls('header');
+          const artifacts: Array<{ id: string; storage_path: string; screenshot_type: string }> = [];
+          artifacts.push(await this.storeRelationshipProbeScreenshot(item, page, 'relationship_probe_profile_full'));
+          const profileHeader = page.locator('[data-yuktris-profile-header="true"]').first();
+          if (await profileHeader.isVisible().catch(() => false)) {
+            artifacts.push(await this.storeRelationshipProbeScreenshot(item, page, 'relationship_probe_header_actions', profileHeader));
+          }
+          let moreMenuControls: Awaited<ReturnType<typeof readSanitizedControls>> = [];
+
           if (!evidence.primary.connect && evidence.primary.more) {
             const moreButton = page.locator('[data-yuktris-relationship-more="true"]').first();
             if (await moreButton.isVisible().catch(() => false)) {
@@ -1735,6 +1823,13 @@ export class Worker {
                 pending: menuLabels.some(label => /pending|invitation\s+sent|withdraw\s+invitation/i.test(label)),
                 connected: menuLabels.some(label => /remove\s+connection|connection\s+since/i.test(label)),
               };
+              moreMenuControls = await readSanitizedControls('menu');
+              const visibleMenu = page.locator('[role="menu"]:visible, .artdeco-dropdown__content:visible').first();
+              if (await visibleMenu.isVisible().catch(() => false)) {
+                artifacts.push(await this.storeRelationshipProbeScreenshot(item, page, 'relationship_probe_more_menu', visibleMenu));
+              } else {
+                artifacts.push(await this.storeRelationshipProbeScreenshot(item, page, 'relationship_probe_more_menu'));
+              }
               await page.keyboard.press('Escape');
             }
           }
@@ -1759,7 +1854,16 @@ export class Worker {
               first_degree: evidence.degree === '1st', degree: evidence.degree,
               diagnostic_evidence: {
                 ...readiness,
+                sender_identity: intendedIdentity.profileUrl,
+                sender_identity_verified: true,
+                requested_target: target,
+                presented_target: normalizeLinkedInTarget(readiness.finalUrl),
+                route_surface: readiness.finalUrl.includes('/sales/') ? 'sales_navigator' : readiness.finalUrl.includes('/mwlite/') ? 'mobile' : 'standard_profile',
+                browser_environment: browserEnvironment,
                 hydrated: evidence.hydrated,
+                header_controls: headerControls,
+                more_menu_accessibility_controls: moreMenuControls,
+                artifacts,
                 primary_controls: Object.entries(evidence.primary).filter(([, found]) => found).map(([name]) => name),
                 more_menu_inspected: evidence.moreMenu.inspected,
                 more_menu_controls: Object.entries(evidence.moreMenu).filter(([name, found]) => name !== 'inspected' && found).map(([name]) => name),
