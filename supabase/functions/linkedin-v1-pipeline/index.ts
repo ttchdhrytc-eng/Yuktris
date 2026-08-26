@@ -321,7 +321,7 @@ Deno.serve(async (req: Request) => {
       const { data: eligibility, error: eligibilityError } = await admin.rpc("controlled_acceptance_eligibility", { p_workspace_id: workspaceId });
       if (eligibilityError) throw pipelineError("acceptance_eligibility_failed", "Controlled acceptance eligibility could not be verified", 500);
       if (!eligibility?.eligible) throw pipelineError(String(eligibility?.code ?? "controlled_acceptance_ineligible"), "This workspace is not eligible for another controlled acceptance attempt", 409);
-      const { data: windowValidation, error: windowError } = await admin.rpc("campaign_account_window_validation", { p_campaign_id: campaignId, p_not_before: new Date().toISOString() });
+      const { data: windowValidation, error: windowError } = await admin.rpc("campaign_window_validation", { p_campaign_id: campaignId, p_not_before: new Date().toISOString() });
       if (windowError || !windowValidation?.valid) throw pipelineError("invalid_campaign_schedule", "Choose at least one sending day, valid hours, and an IANA timezone", 409);
       const scheduledAt = windowValidation.scheduled_at;
       const { data: job, error: jobError } = await admin
@@ -408,7 +408,7 @@ Deno.serve(async (req: Request) => {
         if (customerCampaignError) throw new Error(`Campaign creation failed: ${customerCampaignError.message}`);
         customerCampaignId = customerCampaign.id;
         lifecycleCampaignId = customerCampaignId;
-        const { data: windowValidation, error: windowError } = await admin.rpc("campaign_account_window_validation", { p_campaign_id: customerCampaignId, p_not_before: new Date().toISOString() });
+        const { data: windowValidation, error: windowError } = await admin.rpc("campaign_window_validation", { p_campaign_id: customerCampaignId, p_not_before: new Date().toISOString() });
         if (windowError || !windowValidation?.valid) throw pipelineError("invalid_campaign_schedule", "Choose at least one sending day, valid hours, and an IANA timezone", 409);
       }
 

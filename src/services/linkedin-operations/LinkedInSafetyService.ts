@@ -25,12 +25,6 @@ class LinkedInSafetyService {
       return { allowed: false, reason: 'Account is disconnected', delayMs: 0, riskLevel: 'critical' };
     }
 
-    // Check working hours
-    const withinHours = this.isWithinWorkingHours(account);
-    if (!withinHours.allowed) {
-      return { allowed: false, reason: `Outside working hours (${account.working_hours_start}-${account.working_hours_end} ${account.timezone})`, delayMs: withinHours.delayMs, riskLevel: 'low' };
-    }
-
     // Check daily limits
     const usage = await this.loadTodayUsage(workspaceId, accountId);
     if (usage) {
@@ -161,41 +155,6 @@ class LinkedInSafetyService {
   // ----------------------------------------------------------
   // Helpers
   // ----------------------------------------------------------
-
-  private isWithinWorkingHours(account: LinkedInAccount): { allowed: boolean; delayMs: number } {
-    const now = new Date();
-    const dayName = now.toLocaleDateString('en-US', { weekday: 'long' }).toLowerCase();
-
-    if (!account.working_days.includes(dayName)) {
-      const nextWorkDay = this.getNextWorkDay(account.working_days);
-      const delayMs = nextWorkDay ? 24 * 60 * 60 * 1000 : 72 * 60 * 60 * 1000;
-      return { allowed: false, delayMs };
-    }
-
-    const currentHour = now.getHours();
-    const startHour = parseInt(account.working_hours_start.split(':')[0]);
-    const endHour = parseInt(account.working_hours_end.split(':')[0]);
-
-    if (currentHour < startHour) {
-      return { allowed: false, delayMs: (startHour - currentHour) * 60 * 60 * 1000 };
-    }
-    if (currentHour >= endHour) {
-      return { allowed: false, delayMs: 24 * 60 * 60 * 1000 };
-    }
-
-    return { allowed: true, delayMs: 0 };
-  }
-
-  private getNextWorkDay(workingDays: string[]): string | null {
-    const days = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
-    const today = new Date().toLocaleDateString('en-US', { weekday: 'long' }).toLowerCase();
-    const todayIdx = days.indexOf(today);
-    for (let i = 1; i <= 7; i++) {
-      const checkDay = days[(todayIdx + i) % 7];
-      if (workingDays.includes(checkDay)) return checkDay;
-    }
-    return null;
-  }
 
   private calculateRandomDelay(actionType: string): number {
     const baseDelays: Record<string, [number, number]> = {

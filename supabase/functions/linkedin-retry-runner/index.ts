@@ -53,7 +53,27 @@ Deno.serve(async (req: Request) => {
       // Calculate delay with exponential backoff
       const baseDelay = 60000;
       const delayMs = Math.min(baseDelay * Math.pow(2, job.retry_count), 3600000);
-      const scheduledAt = new Date(Date.now() + delayMs).toISOString();
+      const campaignId = job.action_payload?.source_campaign_id;
+      if (typeof campaignId !== "string" || !campaignId) {
+        // V1 retries must stay attached to a customer-controlled campaign.
+        skipped++;
+        continue;
+      }
+      const notBefore = new Date(Date.now() + delayMs).toISOString();
+      const scheduleRes = await fetch(`${supabaseUrl}/rest/v1/rpc/next_campaign_outreach_at`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${serviceKey}`, apikey: serviceKey, "Content-Type": "application/json" },
+        body: JSON.stringify({ p_campaign_id: campaignId, p_not_before: notBefore }),
+      });
+      if (!scheduleRes.ok) {
+        skipped++;
+        continue;
+      }
+      const scheduledAt = await scheduleRes.json();
+      if (typeof scheduledAt !== "string" || !scheduledAt) {
+        skipped++;
+        continue;
+      }
 
       // Update job for retry
       await fetch(`${supabaseUrl}/rest/v1/linkedin_execution_jobs?id=eq.${job.id}`, {

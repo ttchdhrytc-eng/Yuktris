@@ -6,7 +6,7 @@ export const LINKEDIN_WRITE_ACTIONS = new Set([
 ]);
 
 export type WriteSafetyCode =
-  | 'allowed' | 'daily_limit_reached' | 'cooldown_active' | 'outside_working_hours'
+  | 'allowed' | 'daily_limit_reached' | 'cooldown_active'
   | 'account_paused' | 'verification_required' | 'linkedin_restricted'
   | 'duplicate_action' | 'unsafe_target' | 'rate_limited' | 'invalid_request';
 
