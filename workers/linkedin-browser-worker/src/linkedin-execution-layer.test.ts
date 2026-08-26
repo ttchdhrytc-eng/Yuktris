@@ -18,6 +18,7 @@ const effectiveSchedule = readFileSync(resolve(process.cwd(), '../../supabase/mi
 const acceptanceGenerations = readFileSync(resolve(process.cwd(), '../../supabase/migrations/20260822113000_controlled_acceptance_generations.sql'), 'utf8');
 const acceptanceClassificationFix = readFileSync(resolve(process.cwd(), '../../supabase/migrations/20260826053000_fix_controlled_acceptance_relationship_classification.sql'), 'utf8');
 const acceptanceServiceRoleFix = readFileSync(resolve(process.cwd(), '../../supabase/migrations/20260826053100_controlled_acceptance_service_role_compatibility.sql'), 'utf8');
+const effectiveWindowRestore = readFileSync(resolve(process.cwd(), '../../supabase/migrations/20260826053200_restore_effective_campaign_account_window.sql'), 'utf8');
 const effectiveScheduleTests = readFileSync(resolve(process.cwd(), '../../supabase/tests/linkedin_effective_sending_window.sql'), 'utf8');
 const failedAcceptanceEvidence = readFileSync(resolve(process.cwd(), '../../supabase/migrations/20260821213500_preserve_failed_acceptance_terminal_evidence.sql'), 'utf8');
 const customerSchedule = readFileSync(resolve(process.cwd(), '../../supabase/migrations/20260821220000_customer_controlled_campaign_schedule.sql'), 'utf8');
@@ -384,6 +385,12 @@ test('generation RPCs remain service-role-only with current Supabase secret keys
   for (const rpc of ['start_controlled_acceptance_generation', 'advance_controlled_acceptance_generation', 'finalize_controlled_acceptance_generation']) {
     assert.match(acceptanceServiceRoleFix, new RegExp(rpc));
   }
+});
+
+test('controlled generation scheduling restores the campaign/account intersection', () => {
+  assert.match(effectiveWindowRestore, /campaign_local[\s\S]*account_local/);
+  assert.match(effectiveWindowRestore, /no_effective_sending_window/);
+  assert.match(effectiveWindowRestore, /acceptance_test_mode[\s\S]*status='failed'[\s\S]*scheduled_at=NULL/);
 });
 test('successful generation permanently blocks another while unknown is terminal', () => {
   assert.match(acceptanceGenerations, /uq_one_successful_acceptance_generation/);
