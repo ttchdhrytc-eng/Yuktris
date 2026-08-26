@@ -65,6 +65,12 @@ test('stabilized extractor supports current h2 and accessible heading variants',
   assert.match(worker, /data-yuktris-relationship-more/);
 });
 
+test('hydrated header actions include accessible anchor controls without an explicit button role', () => {
+  const probe = worker.slice(worker.lastIndexOf("case 'check_connection_acceptance':"), worker.lastIndexOf("case 'connection_request':"));
+  assert.match(probe, /header\?\.querySelectorAll\('button, a, \[role="button"\]'\)/);
+  assert.match(probe, /header_controls:[\s\S]*more_menu_accessibility_controls:[\s\S]*artifacts/);
+});
+
 test('More menu uses bounded semantic hydration and never selects Connect', () => {
   const probe = worker.slice(worker.lastIndexOf("case 'check_connection_acceptance':"), worker.lastIndexOf("case 'connection_request':"));
   assert.match(probe, /menuAttempt < 4[\s\S]*role="menuitem"[\s\S]*data-control-name/);

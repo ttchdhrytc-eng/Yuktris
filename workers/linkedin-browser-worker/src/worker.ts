@@ -1762,7 +1762,7 @@ export class Worker {
             const headerText = header?.textContent?.replace(/\s+/g, ' ') ?? '';
             const degree = /(?:^|\s)1st(?:\s|$)/i.test(headerText) ? '1st' : /(?:^|\s)2nd(?:\s|$)/i.test(headerText) ? '2nd' : /(?:^|\s)3rd(?:\s|$)/i.test(headerText) ? '3rd' : null;
             const headingRect = heading?.getBoundingClientRect();
-            const actionElements = Array.from(document.querySelectorAll('main button, main a[role="button"], main [role="button"], .scaffold-layout__main button, .scaffold-layout__main [role="button"]')).filter(element => {
+            const actionElements = Array.from(header?.querySelectorAll('button, a, [role="button"]') ?? []).filter(element => {
               if (!visible(element)) return false;
               if (!headingRect) return false;
               const rect = element.getBoundingClientRect();
