@@ -84,7 +84,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user]);
+  }, [user?.id]);
 
   const setWorkspace = (ws: AuthWorkspace) => {
     localStorage.setItem('revenueai_workspace_id', ws.id);

@@ -1,4 +1,4 @@
-import { Component, useMemo, useRef, useState, type ReactNode } from 'react';
+import { Component, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { AlertTriangle, CalendarClock, ChevronLeft, ChevronRight, Pause, Play, Rocket, Save } from 'lucide-react';
 import { toast } from 'sonner';
@@ -19,12 +19,24 @@ import type { FullICP } from '@/types/icp-intelligence';
 import { buildCampaignMetrics } from '@/services/campaign-metrics';
 import { fetchCampaignProspects } from '@/services/campaign-prospects';
 import { CAMPAIGN_SENDING_DAYS, CAMPAIGN_WEEKDAYS, formatCampaignWindow, isIanaTimezone, nextCampaignSendingWindow, normalizeIanaTimezone, parseCampaignDays, parseCampaignHours } from '@/services/campaign-schedule';
+import { readCampaignUiState, writeCampaignUiState, type PersistedScheduleDraft } from '@/services/campaign-ui-state';
 
 const STEPS = ['Campaign', 'ICP', 'LinkedIn account', 'Outreach', 'Limits & Schedule', 'Review & Launch'];
 const SENDING_DAYS = CAMPAIGN_SENDING_DAYS;
 const WEEKDAYS = CAMPAIGN_WEEKDAYS;
 const TIMEZONE_SUGGESTIONS = ['Asia/Kolkata', 'America/New_York', 'Europe/London', 'America/Los_Angeles', 'Asia/Singapore', 'Australia/Sydney', 'UTC'];
-type ScheduleDraft = { campaignId: string; days: string[]; start: string; end: string; timezone: string };
+type ScheduleDraft = PersistedScheduleDraft;
+type AcceptanceGeneration = {
+  id: string;
+  campaign_id: string;
+  contact_id: string;
+  status: string;
+  relationship_queue_id: string | null;
+  write_job_id: string | null;
+  relationship_evidence: Record<string, unknown>;
+  created_at: string;
+  probeStatus: string | null;
+};
 
 export function CampaignsPage() {
   const { workspace, members } = useWorkspace();
@@ -44,15 +56,19 @@ export function CampaignsPage() {
   const [endTime, setEndTime] = useState('17:00');
   const [outreachTimezone, setOutreachTimezone] = useState(() => normalizeIanaTimezone(Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'));
   const [launching, setLaunching] = useState(false);
-  const [expandedCampaign, setExpandedCampaign] = useState<string | null>(null);
+  const restoredUi = useMemo(() => readCampaignUiState(workspace?.id), [workspace?.id]);
+  const [expandedCampaign, setExpandedCampaign] = useState<string | null>(() => restoredUi.expandedCampaign);
   const [existingProspectId, setExistingProspectId] = useState('');
   const [associating, setAssociating] = useState(false);
   const [acceptanceConfirmation, setAcceptanceConfirmation] = useState<{ campaignId: string; contactId: string } | null>(null);
   const [preparingAcceptance, setPreparingAcceptance] = useState(false);
-  const [acceptanceGeneration, setAcceptanceGeneration] = useState<{ id: string; campaignId: string; contactId: string } | null>(null);
-  const [scheduleDraft, setScheduleDraft] = useState<ScheduleDraft | null>(null);
+  const [scheduleDraft, setScheduleDraft] = useState<ScheduleDraft | null>(() => restoredUi.scheduleDraft);
   const [savingSchedule, setSavingSchedule] = useState(false);
   const initializationKey = useRef(crypto.randomUUID());
+
+  useEffect(() => {
+    writeCampaignUiState(workspace?.id, { expandedCampaign, scheduleDraft });
+  }, [workspace?.id, expandedCampaign, scheduleDraft]);
 
   const connectedAccounts = (accounts.data ?? []).filter((a) => a.connection_state === 'connected' && ['healthy', 'degraded'].includes(a.health_status) && a.profile_url);
   const selectedIcp = (icps.data ?? []).find((i) => i.id === icpId);
@@ -104,6 +120,34 @@ export function CampaignsPage() {
     },
     placeholderData: (previous) => previous,
   });
+  const acceptanceGenerations = useQuery({
+    queryKey: ['controlled-acceptance-generations', workspace?.id],
+    enabled: !!workspace && mayManageAcceptance,
+    queryFn: async (): Promise<AcceptanceGeneration[]> => {
+      const { data: generations, error } = await supabase
+        .from('controlled_acceptance_generations')
+        .select('id,campaign_id,contact_id,status,relationship_queue_id,write_job_id,relationship_evidence,created_at')
+        .eq('workspace_id', workspace!.id)
+        .order('created_at', { ascending: false });
+      if (error) throw error;
+      const queueIds = (generations ?? []).map((generation) => generation.relationship_queue_id).filter((id): id is string => typeof id === 'string');
+      const queues = queueIds.length
+        ? await supabase.from('browser_execution_queue').select('id,status').in('id', queueIds)
+        : { data: [], error: null };
+      if (queues.error) throw queues.error;
+      const queueStatus = new Map((queues.data ?? []).map((queue) => [queue.id, queue.status]));
+      return (generations ?? []).map((generation) => ({
+        ...generation,
+        relationship_evidence: generation.relationship_evidence as Record<string, unknown>,
+        probeStatus: generation.relationship_queue_id ? queueStatus.get(generation.relationship_queue_id) ?? null : null,
+      }));
+    },
+    placeholderData: (previous) => previous,
+    refetchInterval: 5_000,
+    refetchIntervalInBackground: true,
+  });
+  const latestGeneration = (campaignId: string, contactId: string) =>
+    acceptanceGenerations.data?.find((generation) => generation.campaign_id === campaignId && generation.contact_id === contactId) ?? null;
 
   const payload = useMemo(() => (selectedIcp ? mapIcp(selectedIcp) : null), [selectedIcp]);
   async function launch() {
@@ -210,25 +254,25 @@ export function CampaignsPage() {
         action: 'start_controlled_acceptance_generation', workspace_id: workspace.id, campaign_id: campaignId, contact_id: contactId,
       } });
       if (error) throw new Error(await edgeFunctionError(error));
-      setAcceptanceGeneration({ id: data.generation_id, campaignId, contactId });
       setAcceptanceConfirmation(null);
+      await queryClient.invalidateQueries({ queryKey: ['controlled-acceptance-generations', workspace.id] });
       toast.success('Immutable generation created. A read-only relationship check is running; no LinkedIn control was clicked.');
     } catch (error) { toast.error(error instanceof Error ? error.message : 'Generation could not be started.'); }
     finally { setPreparingAcceptance(false); }
   }
 
-  async function classifyAcceptanceGeneration() {
-    if (!workspace || !acceptanceGeneration || preparingAcceptance) return;
+  async function classifyAcceptanceGeneration(generationId: string) {
+    if (!workspace || preparingAcceptance) return;
     setPreparingAcceptance(true);
     try {
       const { data, error } = await supabase.functions.invoke('linkedin-v1-pipeline', { body: {
-        action: 'advance_controlled_acceptance_generation', workspace_id: workspace.id, generation_id: acceptanceGeneration.id,
+        action: 'advance_controlled_acceptance_generation', workspace_id: workspace.id, generation_id: generationId,
       } });
       if (error) throw new Error(await edgeFunctionError(error));
       if (data.status === 'relationship_check_pending') toast.info('The read-only relationship check is still running.');
       else if (data.status === 'write_prepared') toast.success(`Relationship classified eligible. Exactly one terminal attempt is scheduled for ${new Date(data.scheduled_at).toLocaleString()}.`);
       else toast.info(`No write prepared. Relationship classification: ${data.status}.`);
-      if (data.status !== 'relationship_check_pending') setAcceptanceGeneration(null);
+      await queryClient.invalidateQueries({ queryKey: ['controlled-acceptance-generations', workspace.id] });
     } catch (error) { toast.error(error instanceof Error ? error.message : 'Relationship could not be classified. No write was prepared.'); }
     finally { setPreparingAcceptance(false); }
   }
@@ -422,8 +466,9 @@ export function CampaignsPage() {
                         <Button type="button" variant="secondary" size="sm" loading={associating} disabled={!existingProspectId} onClick={() => void associateExistingProspect(id)}>Associate prospect</Button>
                       </div>
                       {rows.length ? (
-                        rows.map((p) => (
-                          <div key={p.jobId} className="rounded-lg bg-maroon-900/50 p-3">
+                        rows.map((p) => {
+                          const generation = latestGeneration(id, p.contactId);
+                          return <div key={p.jobId} className="rounded-lg bg-maroon-900/50 p-3">
                             <div className="flex flex-wrap items-start justify-between gap-2">
                               <div>
                                 <p className="text-sm font-medium text-ink-100">{p.name}</p>
@@ -443,11 +488,15 @@ export function CampaignsPage() {
                               <p>Next action: {p.nextAction ?? 'None scheduled'}</p>
                             </div>
                             {mayManageAcceptance && p.linkedinUrl?.replace(/\?.*$/, '').replace(/\/+$/, '').toLowerCase() === 'https://www.linkedin.com/in/tarun-chaudhary' && (
-                              acceptanceGeneration?.campaignId === id && acceptanceGeneration.contactId === p.contactId ? (
+                              generation && ['relationship_check_pending', 'eligible'].includes(generation.status) ? (
                                 <div className="mt-2 rounded-lg border border-warning-500/30 p-3">
-                                  <Reason text="Read-only relationship classification must finish before any attempt can be prepared." />
-                                  <Button className="mt-2" size="sm" loading={preparingAcceptance} onClick={() => void classifyAcceptanceGeneration()}>Classify relationship / continue safely</Button>
+                                  <Reason text={generation.probeStatus === 'completed' ? 'Read-only relationship check completed. Continue to classify the persisted result safely.' : 'Read-only relationship classification must finish before any attempt can be prepared.'} />
+                                  <Button className="mt-2" size="sm" loading={preparingAcceptance} onClick={() => void classifyAcceptanceGeneration(generation.id)}>Classify relationship / continue safely</Button>
                                 </div>
+                              ) : generation?.status === 'write_prepared' ? (
+                                <Reason text="A controlled acceptance attempt is already prepared for this immutable generation." />
+                              ) : generation && ['connected', 'pending', 'succeeded', 'outcome_unknown'].includes(generation.status) ? (
+                                <Reason text={`Controlled acceptance generation is terminal: ${generation.status}.`} />
                               ) :
                               acceptanceConfirmation?.campaignId === id && acceptanceConfirmation.contactId === p.contactId ? (
                                 <div className="mt-2 rounded-lg border border-warning-500/30 p-3">
@@ -463,8 +512,8 @@ export function CampaignsPage() {
                                 </Button>
                               )
                             )}
-                          </div>
-                        ))
+                          </div>;
+                        })
                       ) : (
                         <p className="text-sm text-ink-500">No genuine campaign prospects.</p>
                       )}

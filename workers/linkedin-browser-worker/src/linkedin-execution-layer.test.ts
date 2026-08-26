@@ -36,6 +36,7 @@ const researchWorker = readFileSync(resolve(process.cwd(), '../../supabase/funct
 const dashboardPage = readFileSync(resolve(process.cwd(), '../../src/pages/DashboardPage.tsx'), 'utf8');
 const campaignsPage = readFileSync(resolve(process.cwd(), '../../src/pages/CampaignsPage.tsx'), 'utf8');
 const campaignSchedule = readFileSync(resolve(process.cwd(), '../../src/services/campaign-schedule.ts'), 'utf8');
+const campaignUiState = readFileSync(resolve(process.cwd(), '../../src/services/campaign-ui-state.ts'), 'utf8');
 const campaignMetrics = readFileSync(resolve(process.cwd(), '../../src/services/campaign-metrics.ts'), 'utf8');
 const campaignProspectDedup = readFileSync(resolve(process.cwd(), '../../src/services/campaign-prospect-dedup.ts'), 'utf8');
 const releaseClosure = readFileSync(resolve(process.cwd(), '../../supabase/migrations/20260820233000_campaign_release_closure.sql'), 'utf8');
@@ -44,6 +45,7 @@ const app = readFileSync(resolve(process.cwd(), '../../src/App.tsx'), 'utf8');
 const errorBoundary = readFileSync(resolve(process.cwd(), '../../src/components/ErrorBoundary.tsx'), 'utf8');
 const protectedRoute = readFileSync(resolve(process.cwd(), '../../src/components/ProtectedRoute.tsx'), 'utf8');
 const workspaceContext = readFileSync(resolve(process.cwd(), '../../src/contexts/WorkspaceContext.tsx'), 'utf8');
+const queryClientSource = readFileSync(resolve(process.cwd(), '../../src/lib/queryClient.ts'), 'utf8');
 const conversationReconciliation = readFileSync(resolve(process.cwd(), '../../supabase/migrations/20260820120000_linkedin_conversation_reconciliation_idempotency.sql'), 'utf8');
 const settingsPage = readFileSync(resolve(process.cwd(), '../../src/pages/SettingsPage.tsx'), 'utf8');
 const linkedinHooks = readFileSync(resolve(process.cwd(), '../../src/hooks/useLinkedInBrowser.ts'), 'utf8');
@@ -374,6 +376,48 @@ test('generation relationship gate allows only exact allowlisted eligible target
   assert.match(acceptanceGenerations, /status<>'eligible'/);
   assert.match(acceptanceGenerations, /max_retries,action_payload\)[\s\S]*'connection_request','scheduled'[\s\S]*,-1,0,/);
   assert.doesNotMatch(acceptanceGenerations, /send_message|follow_up_message/);
+});
+test('tab visibility and window focus cannot restart Campaigns mutations', () => {
+  assert.match(queryClientSource, /refetchOnWindowFocus: false/);
+  assert.doesNotMatch(campaignsPage, /visibilitychange|addEventListener\(['"](?:focus|blur)/);
+  assert.doesNotMatch(campaignsPage, /window\.location\.(?:reload|assign)/);
+  assert.match(campaignsPage, /onClick=\{\(\) => void startControlledAcceptanceGeneration\(/);
+  assert.match(campaignsPage, /onClick=\{\(\) => void classifyAcceptanceGeneration\(/);
+  for (const action of ['start_controlled_acceptance_generation', 'advance_controlled_acceptance_generation'])
+    assert.match(campaignsPage, new RegExp(`action: '${action}'`));
+});
+test('workspace auth refresh identity is stable and does not remount Campaigns', () => {
+  assert.match(workspaceContext, /\}, \[user\?\.id\]\);/);
+  assert.doesNotMatch(workspaceContext, /\}, \[user\]\);/);
+});
+test('Campaigns transient expansion and schedule editor state survive remount', () => {
+  assert.match(campaignUiState, /sessionStorage\.getItem/);
+  assert.match(campaignUiState, /sessionStorage\.setItem/);
+  assert.match(campaignUiState, /yuktris:campaigns-ui:\$\{workspaceId\}/);
+  assert.match(campaignsPage, /readCampaignUiState\(workspace\?\.id\)/);
+  assert.match(campaignsPage, /writeCampaignUiState\(workspace\?\.id, \{ expandedCampaign, scheduleDraft \}\)/);
+});
+test('persisted controlled generation restores after refresh without creating another', () => {
+  assert.match(campaignsPage, /controlled_acceptance_generations/);
+  assert.match(campaignsPage, /\.order\('created_at', \{ ascending: false \}\)/);
+  assert.match(campaignsPage, /latestGeneration\(id, p\.contactId\)/);
+  const generationQuery = campaignsPage.slice(campaignsPage.indexOf("queryKey: ['controlled-acceptance-generations'"), campaignsPage.indexOf('const latestGeneration'));
+  assert.doesNotMatch(generationQuery, /functions\.invoke|\.insert\(|\.update\(/);
+});
+test('generation and campaign background refreshes retain rendered state', () => {
+  for (const key of ['customer-campaigns', 'campaign-prospects', 'controlled-acceptance-generations']) {
+    const query = campaignsPage.slice(campaignsPage.indexOf(`queryKey: ['${key}'`));
+    assert.match(query.slice(0, 3000), /placeholderData: \(previous\) => previous/);
+  }
+  assert.match(campaignsPage, /refetchIntervalInBackground: true/);
+  assert.match(campaignsPage, /probeStatus === 'completed'/);
+  assert.match(campaignsPage, /initialBootstrapLoading = .*isLoading && !.*\.data/);
+});
+test('Campaigns lifecycle restoration performs no LinkedIn write or duplicate artifact creation', () => {
+  const generationQuery = campaignsPage.slice(campaignsPage.indexOf("queryKey: ['controlled-acceptance-generations'"), campaignsPage.indexOf('const latestGeneration'));
+  assert.doesNotMatch(generationQuery, /connection_request|linkedin_write_audit|linkedin_execution_jobs|functions\.invoke/);
+  assert.match(campaignsPage, /generation && \['relationship_check_pending', 'eligible'\]\.includes/);
+  assert.match(campaignsPage, /generation\?\.status === 'write_prepared'/);
 });
 
 test('message availability alone never classifies a controlled generation as connected', () => {
