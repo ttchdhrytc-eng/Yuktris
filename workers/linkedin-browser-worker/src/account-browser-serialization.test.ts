@@ -5,13 +5,14 @@ import { resolve } from 'node:path';
 
 const root = resolve(process.cwd(), '../..');
 const migration = readFileSync(resolve(root, 'supabase/migrations/20260827094500_linkedin_account_browser_serialization.sql'), 'utf8');
+const claimFix = readFileSync(resolve(root, 'supabase/migrations/20260827100000_fix_account_browser_claim_conflict.sql'), 'utf8');
 const worker = readFileSync(resolve(root, 'workers/linkedin-browser-worker/src/worker.ts'), 'utf8');
 const queue = readFileSync(resolve(root, 'workers/linkedin-browser-worker/src/queue.ts'), 'utf8');
 const campaignAuthority = readFileSync(resolve(root, 'supabase/migrations/20260826053300_restore_customer_campaign_schedule_authority.sql'), 'utf8');
 
 test('five same-account tasks have one durable active owner', () => {
   assert.match(migration, /account_id uuid PRIMARY KEY/);
-  assert.match(migration, /ON CONFLICT\(account_id\)[\s\S]*lease_expires_at<=now\(\)/);
+  assert.match(claimFix, /ON CONFLICT ON CONSTRAINT linkedin_account_browser_leases_pkey[\s\S]*lease_expires_at<=now\(\)/);
 });
 
 test('same-account contenders remain queued while another lease is active', () => {
