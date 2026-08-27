@@ -26,7 +26,9 @@ const tests: Array<[string, () => void]> = [
     assert.doesNotMatch(challengeWait, /newPage\(|newContext\(|createSession\(|openLinkedIn\(|session_key|session_password/);
   }],
   ['same queue attempt remains held and renewable during human challenge', () => {
-    assert.match(worker, /setInterval\([\s\S]*this\.queue\.renew\(item\.id\)/);
+    // Lease renewal moved to the task wrapper so every action, including an
+    // interactive challenge, shares the same ownership guard.
+    assert.match(worker, /const leaseTimer = setInterval[\s\S]*?\.renew\(item\.id\)/);
     assert.match(challengeWait, /browser_execution_queue[\s\S]*status === 'cancelled'/);
   }],
   ['challenge timeout and cancellation are non-retryable', () => {

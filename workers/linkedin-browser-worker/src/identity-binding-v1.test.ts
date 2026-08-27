@@ -36,7 +36,7 @@ test('12 Sales Navigator can resolve authenticated self through trusted navigati
 });
 test('13 second session opens the same persisted Context', () => {
   assert.match(worker, /linkedin_persistence_proof_started[\s\S]*openPersistentContextForTask\(item\)/);
-  assert.match(worker, /context_id: persistentContext\.id, context_generation: persistentContext\.generation/);
+  assert.match(worker, /context_id: proofContext\.id,[\s\S]{0,100}context_generation: proofContext\.generation/);
 });
 test('14 second session must remain authenticated', () => assert.match(worker, /verifyPersistentAuthentication[\s\S]*second_session_not_authenticated/));
 test('15 second-session identity must match bound identity', () => assert.match(worker, /profileUrl: effectiveProfileUrl[\s\S]*second_session_identity_mismatch/));

@@ -30,7 +30,7 @@ test('normal connect and test connection never claim or submit credentials', () 
   const testConnection = worker.match(/private async handleTestConnection[\s\S]*?private async handle/)?.[0] ?? '';
   assert.doesNotMatch(connect, /claimCredentials|markCredentialResult|credentials/);
   assert.doesNotMatch(testConnection, /claimCredentials|markCredentialResult|credentials/);
-  assert.match(connect, /this\.linkedin\.connect\([\s\S]*?preflight\.preserveCurrentPage, false,[\s\S]*?\);/);
+  assert.match(connect, /this\.linkedin\.connect\([\s\S]*?preflight\.preserveCurrentPage, false\)/);
   assert.doesNotMatch(connect, /preflight\.preserveCurrentPage, true, credentials/);
 });
 

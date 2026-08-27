@@ -27,6 +27,8 @@ const failedAcceptanceEvidence = readFileSync(resolve(process.cwd(), '../../supa
 const customerSchedule = readFileSync(resolve(process.cwd(), '../../supabase/migrations/20260821220000_customer_controlled_campaign_schedule.sql'), 'utf8');
 const terminalCampaignReconciliation = readFileSync(resolve(process.cwd(), '../../supabase/migrations/20260821190000_terminal_campaign_execution_reconciliation.sql'), 'utf8');
 const conversationEngine = readFileSync(resolve(process.cwd(), '../../supabase/functions/linkedin-conversation-engine/index.ts'), 'utf8');
+const acceptanceLifecycle = readFileSync(resolve(process.cwd(), '../../supabase/migrations/20260827090000_linkedin_v1_acceptance_lifecycle_certification.sql'), 'utf8');
+const campaignReporting = readFileSync(resolve(process.cwd(), '../../src/services/campaign-reporting.ts'), 'utf8');
 const linkedinV1Pipeline = readFileSync(resolve(process.cwd(), '../../supabase/functions/linkedin-v1-pipeline/index.ts'), 'utf8');
 const activationService = readFileSync(resolve(process.cwd(), '../../src/services/activation/ActivationService.ts'), 'utf8');
 const businessIntelligenceService = readFileSync(resolve(process.cwd(), '../../src/services/business-intelligence/BusinessIntelligenceService.ts'), 'utf8');
@@ -292,10 +294,11 @@ test('fixture conversations and metrics are excluded from normal customer querie
 });
 test('dashboard and campaign cards aggregate the same canonical zero-safe metrics', () => {
   assert.match(dashboardPage, /Object\.values\(campaignMetrics\)\.reduce/);
-  assert.match(campaignMetrics, /isVerifiedNormalCampaignWrite[\s\S]*write_verified[\s\S]*result_code/);
-  assert.match(campaignMetrics, /acceptance_test_mode !== true/);
-  assert.match(dashboardPage, /prospectsContacted: new Set\(\(executionJobs\.data/);
-  assert.match(campaignMetrics, /prospects: 0[\s\S]*meetingsBooked: 0/);
+  assert.match(campaignReporting, /get_linkedin_v1_campaign_metrics/);
+  assert.match(acceptanceLifecycle, /result_payload->>'write_verified'='true'/);
+  assert.match(acceptanceLifecycle, /acceptance_test_mode'[\s\S]*false/);
+  assert.match(dashboardPage, /prospectsContacted: Object\.values\(campaignMetrics\)/);
+  assert.match(campaignReporting, /prospects: Number[\s\S]*meetingsBooked: Number/);
 });
 test('customer campaign is the sole authoritative IANA sending schedule', () => {
   assert.match(customerSchedule, /next_campaign_outreach_at/);
@@ -562,7 +565,8 @@ test('research worker owns authoritative business-analysis completion', () => {
   assert.match(businessIntelligenceService, /workerCompleted[\s\S]*profileFromPersistedAnalysis/);
 });
 test('dashboard metrics use canonical customer and execution records', () => {
-  assert.match(dashboardPage, /from\('customer_campaigns'\)[\s\S]*from\('linkedin_execution_jobs'\)[\s\S]*from\('linkedin_messages'\)/);
+  assert.match(dashboardPage, /from\('customer_campaigns'\)[\s\S]*fetchCampaignMetrics\(wsId\)/);
+  assert.match(acceptanceLifecycle, /get_linkedin_v1_campaign_metrics[\s\S]*linkedin_execution_jobs[\s\S]*linkedin_messages/);
   assert.match(dashboardPage, /Prospects Discovered/);
   assert.doesNotMatch(dashboardPage, /Best Time to Send" value="Tue/);
 });
@@ -635,6 +639,25 @@ test('send_message and follow_up_message refuse an ambiguous recipient rather th
   const messagingCase = worker.slice(worker.lastIndexOf("case 'send_message':"), worker.lastIndexOf("case 'like_post':"));
   assert.match(messagingCase, /matchingConversations\.length > 1/);
   assert.match(messagingCase, /refusing to guess the recipient/);
+  assert.match(messagingCase, /recipient does not positively match the canonical target/);
+  assert.match(messagingCase, /exactOutboundAfter <= exactOutboundBefore/);
+  assert.match(messagingCase, /result_code: 'outcome_unknown'[\s\S]*retry_allowed: false/);
+  assert.match(messagingCase, /write_verified: true[\s\S]*exact_outbound_message_bubble/);
+});
+test('acceptance reconciliation normalizes historical and current result shapes fail closed', () => {
+  assert.match(acceptanceLifecycle, /p_result->'data'/);
+  assert.match(acceptanceLifecycle, /source_shape'[\s\S]*nested_data'[\s\S]*top_level'/);
+  assert.match(acceptanceLifecycle, /malformed_evidence/);
+  assert.match(acceptanceLifecycle, /security_interruption/);
+  assert.doesNotMatch(acceptanceLifecycle, /message_available[^\n]*accepted/);
+});
+test('acceptance accounting is immutable and exactly once under replay or concurrency', () => {
+  assert.match(acceptanceLifecycle, /UNIQUE\(connection_job_id\)/);
+  assert.match(acceptanceLifecycle, /UNIQUE\(workspace_id,customer_campaign_id,contact_id,linkedin_account_id\)/);
+  assert.match(acceptanceLifecycle, /ON CONFLICT DO NOTHING RETURNING id INTO v_event/);
+  assert.match(acceptanceLifecycle, /LinkedIn acceptance events are immutable/);
+  assert.match(acceptanceLifecycle, /acceptance_test_mode'[\s\S]*false/);
+  assert.match(acceptanceLifecycle, /GRANT EXECUTE ON FUNCTION public\.reconcile_linkedin_acceptance_events\(uuid\) TO service_role/);
 });
 test('read_replies refuses an ambiguous thread and scrolls to load full history before extraction', () => {
   const readRepliesCase = worker.slice(worker.lastIndexOf("case 'read_replies':"), worker.lastIndexOf('default:'));

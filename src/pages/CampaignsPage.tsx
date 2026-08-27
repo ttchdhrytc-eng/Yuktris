@@ -16,7 +16,7 @@ import { useLinkedInAccounts } from '@/hooks/useLinkedInBrowser';
 import { supabase } from '@/lib/supabase';
 import { GOOGLE_SCOPES } from '@/types/google-auth';
 import type { FullICP } from '@/types/icp-intelligence';
-import { buildCampaignMetrics } from '@/services/campaign-metrics';
+import { fetchCampaignMetrics } from '@/services/campaign-reporting';
 import { fetchCampaignProspects } from '@/services/campaign-prospects';
 import { CAMPAIGN_SENDING_DAYS, CAMPAIGN_WEEKDAYS, formatCampaignWindow, isIanaTimezone, nextCampaignSendingWindow, normalizeIanaTimezone, parseCampaignDays, parseCampaignHours } from '@/services/campaign-schedule';
 import { readCampaignUiState, writeCampaignUiState, type PersistedScheduleDraft } from '@/services/campaign-ui-state';
@@ -89,18 +89,9 @@ export function CampaignsPage() {
       if (error && error.code !== '42P01') throw error;
       const ids = (data ?? []).map((c) => c.id);
       if (!ids.length) return { campaigns: data ?? [], metrics: {} };
-      const [campaignContacts, jobs, conversations, messages, confirmations] = await Promise.all([supabase.from('customer_campaign_contacts').select('customer_campaign_id,contact_id').eq('workspace_id', workspace!.id).in('customer_campaign_id', ids), supabase.from('linkedin_execution_jobs').select('contact_id,action_type,status,action_payload,result_payload').eq('workspace_id', workspace!.id), supabase.from('linkedin_conversations').select('id,stage,metadata,prospect_profile_url').eq('workspace_id', workspace!.id), supabase.from('linkedin_messages').select('conversation_id,direction,classification,metadata').eq('workspace_id', workspace!.id), supabase.from('linkedin_meeting_confirmations').select('id,metadata').eq('workspace_id', workspace!.id)]);
-      if (campaignContacts.error) throw campaignContacts.error;
       return {
         campaigns: data ?? [],
-        metrics: buildCampaignMetrics({
-          campaignIds: ids,
-          campaignContacts: campaignContacts.data ?? [],
-          jobs: jobs.error ? undefined : (jobs.data ?? []),
-          conversations: conversations.error ? undefined : (conversations.data ?? []),
-          messages: messages.error ? undefined : (messages.data ?? []),
-          confirmations: confirmations.error ? undefined : (confirmations.data ?? []),
-        }),
+        metrics: await fetchCampaignMetrics(workspace!.id),
       };
     },
     placeholderData: (previous) => previous,
@@ -219,38 +210,11 @@ export function CampaignsPage() {
     } catch (error) { toast.error(error instanceof Error ? error.message : 'Campaign state could not be changed'); }
   }
 
-  async function prepareControlledAcceptance(campaignId: string, contactId: string) {
-    if (!workspace || preparingAcceptance) return;
-    setPreparingAcceptance(true);
-    try {
-      const { data, error } = await supabase.functions.invoke('linkedin-v1-pipeline', {
-        body: {
-          action: 'prepare_controlled_acceptance',
-          workspace_id: workspace.id,
-          campaign_id: campaignId,
-          contact_id: contactId,
-        },
-      });
-      if (error) {
-        toast.error(await edgeFunctionError(error));
-        return;
-      }
-      toast.success(`One connection request prepared${data?.scheduled_at ? ` for ${new Date(data.scheduled_at).toLocaleString()}` : ''}.`);
-      setAcceptanceConfirmation(null);
-      await queryClient.invalidateQueries({ queryKey: ['campaign-prospects'] });
-    } catch (error) {
-      console.error('[controlled-acceptance-prepare-failed]', { message: error instanceof Error ? error.message : 'unknown_error' });
-      toast.error('The one-write acceptance could not be prepared. No retry was started.');
-    } finally {
-      setPreparingAcceptance(false);
-    }
-  }
-
   async function startControlledAcceptanceGeneration(campaignId: string, contactId: string) {
     if (!workspace || preparingAcceptance) return;
     setPreparingAcceptance(true);
     try {
-      const { data, error } = await supabase.functions.invoke('linkedin-v1-pipeline', { body: {
+      const { error } = await supabase.functions.invoke('linkedin-v1-pipeline', { body: {
         action: 'start_controlled_acceptance_generation', workspace_id: workspace.id, campaign_id: campaignId, contact_id: contactId,
       } });
       if (error) throw new Error(await edgeFunctionError(error));

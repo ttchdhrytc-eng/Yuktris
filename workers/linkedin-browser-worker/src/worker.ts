@@ -2061,7 +2061,8 @@ export class Worker {
         case 'follow_up_message': {
           const prospectName = params.prospect_name as string;
           const message = params.message as string;
-          if (!prospectName || !message) throw new Error('prospect_name and message required');
+          const targetProfile = normalizeLinkedInTarget(params.profile_url as string);
+          if (!prospectName || !message || !targetProfile) throw new Error('prospect_name, message, and canonical profile_url required');
           await page.goto('https://www.linkedin.com/messaging', {
             waitUntil: 'domcontentloaded',
             timeout: 30000,
@@ -2085,6 +2086,18 @@ export class Worker {
           const convEl = matchingConversations[0];
           await convEl.click();
           await page.waitForTimeout(1000);
+          const presentedRecipient = await page.evaluate(() => {
+            const header = document.querySelector('.msg-thread__link-to-profile, .msg-s-message-group__profile-link, a[href*="/in/"]');
+            return header instanceof HTMLAnchorElement ? header.href : null;
+          });
+          if (!presentedRecipient || normalizeLinkedInTarget(presentedRecipient) !== targetProfile) {
+            result = {
+              success: false,
+              error: 'Conversation recipient does not positively match the canonical target',
+              data: { result_code: 'recipient_mismatch', write_verified: false, interaction_crossed: false },
+            };
+            break;
+          }
           const inputBox = await page.$('div.msg-form__contenteditable');
           if (!inputBox) {
             result = { success: false, error: 'Message input not found' };
@@ -2101,17 +2114,30 @@ export class Worker {
             };
             break;
           }
+          const exactOutboundBefore = await page.$$eval(
+            '.msg-s-message-list__event .msg-s-event-listitem--outbound, .msg-s-message-group__message-bubble--outbound',
+            (nodes, expected) => nodes.filter(node => (node.textContent ?? '').replace(/\s+/g, ' ').trim() === expected).length,
+            message.replace(/\s+/g, ' ').trim(),
+          ).catch(() => 0);
           await submitBtn.click();
           await page.waitForTimeout(2000);
-          const composerText = (await inputBox.textContent())?.trim() ?? '';
-          if (composerText === message.trim()) {
+          const exactOutboundAfter = await page.$$eval(
+            '.msg-s-message-list__event .msg-s-event-listitem--outbound, .msg-s-message-group__message-bubble--outbound',
+            (nodes, expected) => nodes.filter(node => (node.textContent ?? '').replace(/\s+/g, ' ').trim() === expected).length,
+            message.replace(/\s+/g, ' ').trim(),
+          ).catch(() => 0);
+          if (exactOutboundAfter <= exactOutboundBefore) {
             result = {
               success: false,
-              error: 'Message was not confirmed as sent',
+              error: 'Message outcome is ambiguous after Send',
+              data: { result_code: 'outcome_unknown', write_verified: false, retry_allowed: false, interaction_crossed: true, send_clicked: true },
             };
             break;
           }
-          result = { success: true, data: { sent_to: prospectName } };
+          result = {
+            success: true,
+            data: { result_code: 'success', write_verified: true, sent_to: prospectName, target_profile_url: targetProfile, verification: 'exact_outbound_message_bubble' },
+          };
           break;
         }
         case 'like_post': {

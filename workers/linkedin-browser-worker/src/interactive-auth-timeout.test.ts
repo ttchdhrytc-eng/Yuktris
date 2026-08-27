@@ -32,8 +32,8 @@ test('automatic and challenge login use separate bounded lifecycles', () => {
 
 test('active queue and Context leases renew throughout the interactive wait', () => {
   const worker = readFileSync('src/worker.ts', 'utf8');
-  assert.match(worker, /setInterval\(\(\) => \{[\s\S]*this\.queue\.renew\(item\.id\)/);
-  assert.match(worker, /this\.linkedinContexts\.renew/);
+  assert.match(worker, /const leaseTimer = setInterval\(\(\) => \{[\s\S]*?\.renew\(item\.id\)/);
+  assert.match(worker, /this\.linkedinContexts[\s\S]{0,30}\.renew\(active\.context\.id, active\.owner\)/);
   assert.match(worker, /\}, 30000\)/);
 });
 

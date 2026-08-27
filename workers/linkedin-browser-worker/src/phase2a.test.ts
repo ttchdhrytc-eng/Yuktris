@@ -27,7 +27,8 @@ const tests: Array<[string, () => void]> = [
     assert.doesNotMatch(hook, /user_response:\s*params\.response/);
   }],
   ['login beyond five minutes keeps a renewable lease', () => {
-    assert.match(worker, /setInterval[\s\S]*queue\.renew/);
+    // Renewal is owned by the common claimed-task wrapper, not handleConnect.
+    assert.match(worker, /const leaseTimer = setInterval[\s\S]*?\.renew\(item\.id\)/);
     assert.match(migration, /lease_expires_at/);
     assert.doesNotMatch(migration, /interval '5 minutes'/);
   }],
@@ -199,7 +200,8 @@ const tests: Array<[string, () => void]> = [
     assert.match(migration, /REVOKE INSERT, UPDATE, DELETE ON public\.browser_execution_queue FROM authenticated, anon/);
     assert.match(hook, /enqueue_linkedin_connection_test/);
     const testHook = hook.match(/export function useTestLinkedInConnection[\s\S]*?export function useDisconnectLinkedIn/)?.[0] ?? '';
-    assert.doesNotMatch(testHook, /from\('browser_execution_queue'\)/);
+    // Direct SELECT is required for status polling; writes remain RPC-only.
+    assert.doesNotMatch(testHook, /from\('browser_execution_queue'\)[\s\S]{0,120}\.(insert|update|delete)\(/);
   }],
   ['authentication responses are blocked before historical cleanup', () => {
     const constraint = migration.indexOf('CHECK (user_response IS NULL) NOT VALID');

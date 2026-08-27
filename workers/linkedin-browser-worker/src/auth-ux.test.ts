@@ -90,7 +90,7 @@ const tests: Array<[string, () => void]> = [
     const rest = worker.replace(connectHandler, '');
     assert.match(linkedin, /auth_surface_ready[\s\S]*browserbase_live_url: refreshedLiveUrl/);
     assert.doesNotMatch(rest, /browserbase_live_url: liveUrl/);
-    assert.match(worker, /browserbase_session_id: null, browser_connected_at: null/);
+    assert.match(worker, /browserbase_session_id: null,[\s\S]{0,80}browser_connected_at: null/);
     assert.match(worker, /await this\.linkedin\.neutralizeVisiblePage\(\)/);
   }],
   ['customer UI and logs do not expose credentials cookies or provider endpoints', () => {

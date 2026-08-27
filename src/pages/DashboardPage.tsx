@@ -1,11 +1,11 @@
 import { useQuery } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import {
-  Calendar, MessageSquare, Rocket, ArrowRight,
+  Calendar, MessageSquare, Rocket,
   CheckCircle2, AlertTriangle, TrendingUp, Sparkles,
-  ChevronRight, Users, Send, Target, DollarSign,
-  PlayCircle, Linkedin, Mail, Hand, FileText, RefreshCw,
-  Zap, Award, Clock3, BarChart3,
+  ChevronRight, Users, Send, Target,
+  Linkedin, Mail, Hand, FileText, RefreshCw,
+  Award, Clock3, BarChart3,
   Video, Activity,
 } from 'lucide-react';
 import { useState } from 'react';
@@ -20,7 +20,8 @@ import { timeAgo, formatNumber, cn } from '@/lib/utils';
 import { useGoogleConnection } from '@/hooks/useGoogleAuth';
 import { useLinkedInAccounts } from '@/hooks/useLinkedInBrowser';
 import { GOOGLE_SCOPES } from '@/types/google-auth';
-import { buildCampaignMetrics, CAMPAIGN_STATUS_LABELS, isVerifiedNormalCampaignWrite, type CampaignMetricSet } from '@/services/campaign-metrics';
+import { CAMPAIGN_STATUS_LABELS, type CampaignMetricSet } from '@/services/campaign-metrics';
+import { fetchCampaignMetrics } from '@/services/campaign-reporting';
 
 type DateRange = 'today' | 'week' | 'month' | 'all';
 
@@ -41,8 +42,7 @@ export function DashboardPage() {
 
       const [
         campaigns, prospects, meetings, messages, upcomingMeetings,
-        repliedProspects, proposals, executionJobs, linkedinMessages,
-        linkedinConversations, qualifiedContacts, meetingConfirmations, customerCampaigns,
+        repliedProspects, proposals, customerCampaigns, canonicalCampaignMetrics,
       ] = await Promise.all([
         supabase.from('customer_campaigns').select('id, name, status, created_at').eq('workspace_id', wsId).order('created_at', { ascending: false }),
         supabase.from('contacts').select('id', { count: 'exact', head: true }).eq('workspace_id', wsId),
@@ -51,25 +51,15 @@ export function DashboardPage() {
         supabase.from('meetings').select('id, title, scheduled_at, duration_minutes, prospect_id').eq('workspace_id', wsId).eq('status', 'scheduled').gte('scheduled_at', new Date().toISOString()).order('scheduled_at', { ascending: true }).limit(5),
         supabase.from('prospects').select('id, first_name, last_name, title, company_name, status, created_at').eq('workspace_id', wsId).eq('status', 'replied').order('created_at', { ascending: false }).limit(5),
         supabase.from('proposal_approvals').select('id, approval_status, approval_notes, created_at').eq('workspace_id', wsId).eq('approval_status', 'pending').order('created_at', { ascending: false }).limit(5),
-        supabase.from('linkedin_execution_jobs').select('contact_id,action_type,status,action_payload,result_payload').eq('workspace_id', wsId),
-        supabase.from('linkedin_messages').select('conversation_id,direction,classification,metadata').eq('workspace_id', wsId),
-        supabase.from('linkedin_conversations').select('id,stage,metadata,prospect_profile_url').eq('workspace_id', wsId),
-        supabase.from('contacts').select('id', { count: 'exact', head: true }).eq('workspace_id', wsId).eq('status', 'qualified'),
-        supabase.from('linkedin_meeting_confirmations').select('id,metadata').eq('workspace_id', wsId),
         supabase.from('customer_campaigns').select('id,status').eq('workspace_id', wsId),
+        fetchCampaignMetrics(wsId),
       ]);
 
       const sent = messages.data?.filter(m => m.direction === 'sent').length ?? 0;
       const received = messages.data?.filter(m => m.direction === 'received').length ?? 0;
       const replyRate = sent > 0 ? Math.round((received / sent) * 100) : 0;
       const activeCampaigns = campaigns.data?.filter(c => c.status === 'running') ?? [];
-      const campaignMetrics = buildCampaignMetrics({
-        campaignIds: (campaigns.data ?? []).map(c => c.id),
-        jobs: executionJobs.error ? undefined : executionJobs.data ?? [],
-        conversations: linkedinConversations.error ? undefined : linkedinConversations.data ?? [],
-        messages: linkedinMessages.error ? undefined : linkedinMessages.data ?? [],
-        confirmations: meetingConfirmations.error ? undefined : meetingConfirmations.data ?? [],
-      });
+      const campaignMetrics = canonicalCampaignMetrics;
       const canonicalTotals = Object.values(campaignMetrics).reduce((totals, metric) => ({
         prospects: totals.prospects + (metric.prospects ?? 0),
         connectionsSent: totals.connectionsSent + (metric.connectionsSent ?? 0),
@@ -96,7 +86,7 @@ export function DashboardPage() {
         metrics: {
           activeCampaigns: customerCampaigns.data?.filter(c => c.status === 'running').length ?? activeCampaigns.length,
           prospectsDiscovered: canonicalTotals.prospects,
-          prospectsContacted: new Set((executionJobs.data ?? []).filter(job => isVerifiedNormalCampaignWrite(job)).map(row => row.contact_id).filter(Boolean)).size,
+          prospectsContacted: Object.values(campaignMetrics).reduce((total, metric) => total + Number((metric as CampaignMetricSet & { prospects_contacted?: number }).prospects_contacted ?? 0), 0),
           connectionsSent: canonicalTotals.connectionsSent,
           connectionsAccepted: canonicalTotals.connectionsAccepted,
           messagesSent: canonicalTotals.messagesSent,
