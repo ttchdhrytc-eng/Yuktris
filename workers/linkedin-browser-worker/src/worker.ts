@@ -597,6 +597,12 @@ export class Worker {
           });
         });
       }
+      await this.queue.releaseAccountLease(item.id).catch((error) => {
+        logger.warn('LinkedIn account browser lease release failed', {
+          task_id: item.id,
+          error: this.sanitizeError(error),
+        });
+      });
       if (item.action_type === 'linkedin_connect' && item.account_id) {
         await this.cleanupConnectionArtifacts(item.workspace_id, item.account_id).catch((error) => {
           logger.warn('Connection artifact cleanup failed', {

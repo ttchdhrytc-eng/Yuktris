@@ -84,7 +84,6 @@ export class Queue {
       logger.error('Failed to mark task complete', { id: itemId, error: error.message });
       throw error;
     } else {
-      this.attempts.delete(itemId);
       logger.info('Task completed', { id: itemId, duration_ms: durationMs });
     }
   }
@@ -104,7 +103,6 @@ export class Queue {
       logger.error('Failed to mark task failed', { id: itemId, error: error.message });
       throw error;
     } else {
-      this.attempts.delete(itemId);
       logger.warn('Task failed', { id: itemId, error: errorMsg, retryable });
     }
   }
@@ -132,6 +130,18 @@ export class Queue {
       p_lease_seconds: 90,
     });
     if (error) throw error;
+    return data === true;
+  }
+
+  async releaseAccountLease(itemId: string): Promise<boolean> {
+    const attemptId = this.requireAttempt(itemId);
+    const { data, error } = await this.client.rpc('release_linkedin_account_browser_lease', {
+      p_task_id: itemId,
+      p_worker_id: this.workerId,
+      p_attempt_id: attemptId,
+    });
+    if (error) throw error;
+    this.attempts.delete(itemId);
     return data === true;
   }
 }
