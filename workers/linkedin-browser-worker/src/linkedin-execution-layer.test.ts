@@ -220,9 +220,9 @@ test('V1 discovery requires company and role evidence and reports bridge failure
 });
 test('V1 discovery preview is explicitly non-persistent and creates no execution jobs', () => {
   const previewStart = linkedinV1Pipeline.indexOf('if (action === "preview_discovery")');
-  const initializeStart = linkedinV1Pipeline.indexOf('if (action === "initialize")');
-  const preview = linkedinV1Pipeline.slice(previewStart, initializeStart);
-  assert.ok(previewStart > 0 && previewStart < initializeStart);
+  const pilotDiscoveryStart = linkedinV1Pipeline.indexOf('if (action === "discover_and_map_pilot_prospects")');
+  const preview = linkedinV1Pipeline.slice(previewStart, pilotDiscoveryStart);
+  assert.ok(previewStart > 0 && previewStart < pilotDiscoveryStart);
   assert.match(preview, /persisted: false/);
   assert.match(preview, /execution_jobs_created: 0/);
   assert.doesNotMatch(preview, /\.insert\(|\.update\(|\.from\("linkedin_execution_jobs"\)/);
@@ -299,6 +299,15 @@ test('dashboard and campaign cards aggregate the same canonical zero-safe metric
   assert.match(acceptanceLifecycle, /acceptance_test_mode'[\s\S]*false/);
   assert.match(dashboardPage, /prospectsContacted: Object\.values\(campaignMetrics\)/);
   assert.match(campaignReporting, /prospects: Number[\s\S]*meetingsBooked: Number/);
+});
+test('staging pilot discovery reuses canonical persistence without creating outbound artifacts', () => {
+  const branch = linkedinV1Pipeline.slice(linkedinV1Pipeline.indexOf('action === "discover_and_map_pilot_prospects"'), linkedinV1Pipeline.indexOf('action === "initialize"'));
+  assert.match(branch, /internalService/);
+  assert.match(branch, /vdiqfiuqckaxdjkadinu/);
+  assert.match(branch, /discoverVerifiedProspects/);
+  assert.match(branch, /findOrCreateCompany[\s\S]*findOrCreateContact[\s\S]*customer_campaign_contacts/);
+  assert.match(branch, /execution_jobs_created: 0[\s\S]*sequences_created: 0[\s\S]*browser_queues_created: 0[\s\S]*write_performed: false/);
+  assert.doesNotMatch(branch, /linkedin_execution_jobs|linkedin_sequences|browser_execution_queue|linkedin_write_audit/);
 });
 test('customer campaign is the sole authoritative IANA sending schedule', () => {
   assert.match(customerSchedule, /next_campaign_outreach_at/);

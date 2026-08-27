@@ -142,6 +142,51 @@ Deno.serve(async (req: Request) => {
       });
     }
 
+    if (action === "discover_and_map_pilot_prospects") {
+      if (!internalService) throw pipelineError("service_role_required", "Pilot discovery is an internal staging operation", 403);
+      if (!Deno.env.get("SUPABASE_URL")?.includes("vdiqfiuqckaxdjkadinu")) throw pipelineError("staging_only", "Pilot discovery is disabled outside staging", 403);
+      const campaignId = requireString(body.campaign_id, "campaign_id");
+      const maxProspects = clampNumber(body.max_prospects, 2, 12, 8);
+      const { data: campaign, error: campaignError } = await admin.from("customer_campaigns")
+        .select("id,icp").eq("id", campaignId).eq("workspace_id", workspaceId).maybeSingle();
+      if (campaignError || !campaign) throw pipelineError("campaign_not_found", "Campaign was not found in this workspace", 404);
+      const icp = (campaign.icp ?? {}) as ICP;
+      if (!icp.name?.trim() || !icp.industry?.trim() || !icp.companySize?.trim() || !icp.jobTitles?.length) {
+        throw pipelineError("meaningful_icp_required", "Campaign discovery requires a complete configured ICP", 409);
+      }
+      const prospects = await discoverVerifiedProspects(icp, maxProspects);
+      const mapped: Json[] = [];
+      for (const prospect of prospects) {
+        const normalized = normalizeLinkedInProfile(prospect.linkedinUrl);
+        if (!normalized) continue;
+        const { data: existingContact } = await admin.from("contacts").select("id")
+          .eq("workspace_id", workspaceId).eq("normalized_linkedin_url", normalized).maybeSingle();
+        if (existingContact) {
+          const { data: existingMapping } = await admin.from("customer_campaign_contacts").select("id")
+            .eq("workspace_id", workspaceId).eq("customer_campaign_id", campaignId)
+            .eq("contact_id", existingContact.id).maybeSingle();
+          if (existingMapping) continue;
+        }
+        const company = await findOrCreateCompany(admin, workspaceId, prospect);
+        const contact = await findOrCreateContact(admin, workspaceId, company.id, { ...prospect, linkedinUrl: normalized });
+        const { data: mapping, error: mappingError } = await admin.from("customer_campaign_contacts").insert({
+          workspace_id: workspaceId, customer_campaign_id: campaignId, contact_id: contact.id,
+          source: "campaign_discovery", discovered_at: new Date().toISOString(),
+        }).select("id").single();
+        if (mappingError) throw pipelineError("campaign_association_failed", mappingError.message, 409);
+        mapped.push({
+          name: `${prospect.contactFirstName} ${prospect.contactLastName}`, company: prospect.companyName,
+          title: prospect.contactTitle, linkedin_url: normalized, evidence: prospect.evidence.slice(0, 600),
+          confidence_score: prospect.confidenceScore, contact_id: contact.id, mapping_id: mapping.id,
+        });
+      }
+      return json({
+        status: "mapped", campaign_id: campaignId, prospects_discovered: prospects.length,
+        prospects_mapped: mapped.length, prospects: mapped, execution_jobs_created: 0,
+        sequences_created: 0, browser_queues_created: 0, write_performed: false,
+      });
+    }
+
     if (action === "initialize") {
       const icp = (body.icp ?? {}) as ICP;
       const selectedAccountId = optionalString(body.linkedin_account_id);
@@ -790,7 +835,9 @@ async function findOrCreateCompany(admin: any, workspaceId: string, p: Prospect)
 }
 
 async function findOrCreateContact(admin: any, workspaceId: string, companyId: unknown, p: Prospect): Promise<Json> {
-  const { data: existing } = await admin.from("contacts").select("*").eq("workspace_id", workspaceId).eq("linkedin_url", p.linkedinUrl).limit(1).maybeSingle();
+  const normalizedLinkedInUrl = normalizeLinkedInProfile(p.linkedinUrl);
+  if (!normalizedLinkedInUrl) throw new Error("Contact persistence failed: canonical LinkedIn profile URL required");
+  const { data: existing } = await admin.from("contacts").select("*").eq("workspace_id", workspaceId).eq("normalized_linkedin_url", normalizedLinkedInUrl).limit(1).maybeSingle();
   if (existing) return existing as Json;
   const { data, error } = await admin
     .from("contacts")
@@ -800,7 +847,7 @@ async function findOrCreateContact(admin: any, workspaceId: string, companyId: u
       first_name: p.contactFirstName,
       last_name: p.contactLastName,
       full_name: `${p.contactFirstName} ${p.contactLastName}`,
-      linkedin_url: p.linkedinUrl,
+      linkedin_url: normalizedLinkedInUrl,
       job_title: p.contactTitle,
       status: "discovered",
       confidence_score: p.confidenceScore,
