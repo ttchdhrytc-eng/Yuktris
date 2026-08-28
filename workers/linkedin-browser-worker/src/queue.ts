@@ -88,15 +88,16 @@ export class Queue {
     }
   }
 
-  async fail(itemId: string, errorMsg: string, durationMs: number, retryable: boolean) {
+  async fail(itemId: string, errorMsg: string, durationMs: number, retryable: boolean, result: Record<string, unknown> = {}) {
     const attemptId = this.requireAttempt(itemId);
-    const { error } = await this.client.rpc('fail_queue_task', {
+    const { error } = await this.client.rpc('fail_queue_task_with_result', {
       p_task_id: itemId,
       p_worker_id: this.workerId,
       p_attempt_id: attemptId,
       p_error: errorMsg,
       p_duration_ms: durationMs,
       p_retryable: retryable,
+      p_result: result,
     });
 
     if (error) {
@@ -131,6 +132,33 @@ export class Queue {
     });
     if (error) throw error;
     return data === true;
+  }
+
+  async recordBrowserCorrelation(itemId: string, browserbaseSessionId: string | null, persistentContextId: string | null): Promise<void> {
+    const attemptId = this.requireAttempt(itemId);
+    const { data, error } = await this.client.rpc('record_browser_attempt_correlation', {
+      p_task_id: itemId,
+      p_worker_id: this.workerId,
+      p_attempt_id: attemptId,
+      p_browserbase_session_id: browserbaseSessionId,
+      p_persistent_context_id: persistentContextId,
+    });
+    if (error) throw error;
+    if (data !== true) throw new Error('Browser attempt correlation ownership lost');
+  }
+
+  async recordWriteStage(itemId: string, stage: string, interactionCrossed: boolean, evidence: Record<string, unknown> = {}): Promise<void> {
+    const attemptId = this.requireAttempt(itemId);
+    const { data, error } = await this.client.rpc('record_linkedin_write_interaction_stage', {
+      p_task_id: itemId,
+      p_worker_id: this.workerId,
+      p_attempt_id: attemptId,
+      p_stage: stage,
+      p_interaction_crossed: interactionCrossed,
+      p_evidence: evidence,
+    });
+    if (error) throw error;
+    if (data !== true) throw new Error('Write interaction stage ownership lost');
   }
 
   async releaseAccountLease(itemId: string): Promise<boolean> {

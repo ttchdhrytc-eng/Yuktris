@@ -42,12 +42,18 @@ Deno.serve(async (req: Request) => {
     const requestedActionType = String(job.action_type ?? "");
     const actionType = requestedActionType === "first_message" ? "send_message" : requestedActionType;
     const idempotencyKey = `execution-job:${job_id}`;
+    const retryPolicy = effectiveRetryPolicy(job, actionType);
+    if (!retryPolicy.valid) return await failJob(supabase, workspace_id, job_id, retryPolicy.error, 422);
 
     // Resolve a completed bridge before enrichment. A retry must remain successful
     // even if optional source data changed after the queue item was persisted.
     const existing = await loadExistingQueueItem(supabase, workspace_id, idempotencyKey);
     if (existing.error) return jsonError(existing.error, 500);
-    if (existing.item) return equivalent(existing.item, job_id, actionType, job.linkedin_account_id) ? jsonResponse(queueResponse(existing.item, job_id, true)) : jsonError("Idempotency key conflicts with a different browser action", 409);
+    if (existing.item) {
+      if (!equivalent(existing.item, job_id, actionType, job.linkedin_account_id)) return jsonError("Idempotency key conflicts with a different browser action", 409);
+      if (!retryPolicyEquivalent(existing.item, retryPolicy)) return jsonError("Existing browser queue retry policy exceeds or resets the originating job budget", 409);
+      return jsonResponse(queueResponse(existing.item, job_id, true));
+    }
 
     const actionParams: Row = {
       job_id,
@@ -98,7 +104,7 @@ Deno.serve(async (req: Request) => {
     if (!transitioned) {
       const raced = await loadExistingQueueItem(supabase, workspace_id, idempotencyKey);
       if (raced.error) return jsonError(raced.error, 500);
-      if (raced.item && equivalent(raced.item, job_id, actionType, job.linkedin_account_id)) {
+      if (raced.item && equivalent(raced.item, job_id, actionType, job.linkedin_account_id) && retryPolicyEquivalent(raced.item, retryPolicy)) {
         return jsonResponse(queueResponse(raced.item, job_id, true));
       }
       return jsonError("Execution job state changed before it could be queued", 409);
@@ -125,6 +131,8 @@ Deno.serve(async (req: Request) => {
         status: "pending",
         idempotency_key: idempotencyKey,
         scheduled_at: job.scheduled_at ?? new Date().toISOString(),
+        retry_count: retryPolicy.consumed,
+        max_retries: retryPolicy.maximum,
       })
       .select("*")
       .single();
@@ -133,7 +141,7 @@ Deno.serve(async (req: Request) => {
       if (queueError.code === "23505") {
         const winner = await loadExistingQueueItem(supabase, workspace_id, idempotencyKey);
         if (winner.error) return jsonError(winner.error, 500);
-        if (winner.item && equivalent(winner.item, job_id, actionType, job.linkedin_account_id)) {
+        if (winner.item && equivalent(winner.item, job_id, actionType, job.linkedin_account_id) && retryPolicyEquivalent(winner.item, retryPolicy)) {
           return jsonResponse(queueResponse(winner.item, job_id, true));
         }
         return jsonError("Idempotency key conflicts with a different browser action", 409);
@@ -187,6 +195,25 @@ async function loadExistingQueueItem(supabase: any, workspaceId: string, key: st
 function equivalent(item: Row, jobId: string, actionType: string, accountId: unknown): boolean {
   const params = (item.action_params as Row | null) ?? {};
   return params.job_id === jobId && item.action_type === actionType && (item.account_id ?? null) === (accountId ?? null);
+}
+
+type RetryPolicy = { valid: true; consumed: number; maximum: number } | { valid: false; error: string };
+
+function effectiveRetryPolicy(job: Row, actionType: string): RetryPolicy {
+  const consumed = job.retry_count;
+  const maximum = job.max_retries;
+  const externalWrite = ["connection_request", "send_message", "follow_up_message"].includes(actionType);
+  if (!Number.isInteger(consumed) || !Number.isInteger(maximum) || Number(consumed) < 0 || Number(maximum) < 0 || Number(consumed) > Number(maximum)) {
+    return { valid: false, error: externalWrite ? "External write job has a missing or invalid retry policy" : "Execution job has a missing or invalid retry policy" };
+  }
+  return { valid: true, consumed: Number(consumed), maximum: Number(maximum) };
+}
+
+function retryPolicyEquivalent(item: Row, policy: Extract<RetryPolicy, { valid: true }>): boolean {
+  return Number.isInteger(item.retry_count) && Number.isInteger(item.max_retries)
+    && Number(item.retry_count) >= policy.consumed
+    && Number(item.max_retries) <= policy.maximum
+    && Number(item.retry_count) <= Number(item.max_retries);
 }
 
 function queueResponse(item: Row, jobId: string, idempotent: boolean): Row {

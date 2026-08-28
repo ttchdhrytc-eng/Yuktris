@@ -13,7 +13,8 @@ import { finalizeLinkedInWrite, LINKEDIN_WRITE_ACTIONS, normalizeLinkedInTarget,
 import { classifyConnectionProfileState, classifyPostClickOutcome, isNoNoteConfirmCandidate, NO_NOTE_CONFIRM_LABELS } from './connection-dialog.js';
 import { classifyRelationshipProbe, type RelationshipProbeEvidence } from './relationship-probe.js';
 import { waitForLinkedInProfileReady } from './linkedin-profile-readiness.js';
-import type { Locator, Page } from 'playwright';
+import { failureOutcomeForStage, type WriteInteractionStage } from './write-interaction-stage.js';
+import type { ElementHandle, Locator, Page } from 'playwright';
 
 const INTERACTIVE_AUTH_TIMEOUT_MS = interactiveAuthTimeoutMs();
 const TEST_CONNECTION_TIMEOUT = parseInt(process.env.TEST_CONNECTION_TIMEOUT_MS || '120000', 10);
@@ -1493,6 +1494,16 @@ export class Worker {
       error?: string;
     };
     let writeAuditId: string | null = null;
+    let interactionStage: WriteInteractionStage = 'not_started';
+    let interactionCrossed = false;
+    const recordWriteStage = async (stage: WriteInteractionStage, crossed = interactionCrossed, evidence: Record<string, unknown> = {}) => {
+      if (!LINKEDIN_WRITE_ACTIONS.has(item.action_type)) return;
+      // Set the in-memory boundary first so an RPC/network exception while durably
+      // recording a pre-click intent still fails closed in this worker attempt.
+      interactionStage = stage;
+      interactionCrossed = interactionCrossed || crossed;
+      await this.queue.recordWriteStage(item.id, stage, interactionCrossed, evidence);
+    };
 
     try {
       logger.info('linkedin_job_started', {
@@ -1506,6 +1517,7 @@ export class Worker {
       if (usePersistentContext) {
         persistentContext = await this.openPersistentContextForTask(item);
         persistentSessionId = this.linkedin.getSessionId();
+        await this.queue.recordBrowserCorrelation(item.id, persistentSessionId, persistentContext.id);
         const binding = await this.linkedinContexts.verifiedIdentityBinding(persistentContext);
         const authentication = await this.linkedin.verifyPersistentAuthentication(intendedIdentity, binding);
         if (authentication.identityState === 'mismatch') {
@@ -1552,6 +1564,7 @@ export class Worker {
       } else {
         await this.linkedin.launch(undefined);
         await this.linkedin.newContext();
+        await this.queue.recordBrowserCorrelation(item.id, this.linkedin.getSessionId(), null);
         const restored = await this.linkedin.restoreSession(sessionData!);
         if (!restored) {
           await this.linkedin.close();
@@ -1896,6 +1909,7 @@ export class Worker {
             };
             break;
           }
+          await recordWriteStage('profile_verified', false, { authorized_target: authorizedTarget, presented_target: presentedTarget });
           const readProfileState = async () => page.evaluate(() => {
             const visible = (element: Element) => { const n=element as HTMLElement,r=n.getBoundingClientRect(),s=getComputedStyle(n); return r.width>0&&r.height>0&&s.display!=='none'&&s.visibility!=='hidden'; };
             const label = (element: Element) => [element.getAttribute('aria-label'),element.getAttribute('title'),element.textContent].filter(Boolean).join(' ').replace(/\s+/g,' ').trim().toLowerCase();
@@ -1919,6 +1933,7 @@ export class Worker {
           }
           const initialState = classifyConnectionProfileState({ hasPending: semanticState.hasPending, hasConnect: semanticState.hasConnect, hasMessage: semanticState.hasConnected });
           if (initialState === 'already_pending') {
+            await recordWriteStage('relationship_verified', false, { relationship: 'already_pending' });
             result = {
               success: true,
               data: {
@@ -1930,6 +1945,7 @@ export class Worker {
             break;
           }
           if (initialState === 'already_connected') {
+            await recordWriteStage('relationship_verified', false, { relationship: 'already_connected' });
             result = {
               success: true,
               data: {
@@ -1941,6 +1957,7 @@ export class Worker {
             break;
           }
           if (initialState === 'unavailable') {
+            await recordWriteStage('relationship_verified', false, { relationship: 'unavailable' });
             result = {
               success: false,
               error: 'Connect control not found — action unavailable',
@@ -1958,8 +1975,12 @@ export class Worker {
             break;
           }
           const connectElementType = await connectBtn.evaluate(e=>e.tagName.toLowerCase());
+          await recordWriteStage('relationship_verified', false, { relationship: 'eligible_for_connection_request' });
+          await recordWriteStage('connect_control_resolved', false, { connect_location: connectLocation, connect_element_type: connectElementType });
           let modalAppeared=false, finalSendClicked=false, immediateSend=false;
+          await recordWriteStage('before_connect_click', true, { connect_location: connectLocation, connect_element_type: connectElementType });
           await connectBtn.click();
+          await recordWriteStage('connect_clicked', true, { connect_location: connectLocation, connect_element_type: connectElementType });
           await page.waitForTimeout(800 + Math.random() * 1200);
 
           if (await this.linkedin.detectRestriction()) {
@@ -1997,8 +2018,12 @@ export class Worker {
               };
               break;
             }
-            await sendBtn.click();
+            await recordWriteStage('confirmation_present', true, { confirmation_kind: 'connection_note_send' });
+            await recordWriteStage('before_confirmation_click', true, { confirmation_kind: 'connection_note_send' });
+            await recordWriteStage('confirmation_click_attempted', true, { confirmation_kind: 'connection_note_send' });
+            await this.clickExpectedLinkedInWriteControl(page, sendBtn, 'connection_note_send');
             finalSendClicked=true;
+            await recordWriteStage('confirmation_clicked', true, { confirmation_kind: 'connection_note_send' });
           } else {
             const dialog = await page.$('div[role="dialog"]');
             modalAppeared=!!dialog;
@@ -2018,11 +2043,16 @@ export class Worker {
               // Do not click again: post-click evidence below decides the outcome.
               immediateSend=!dialog;
             } else {
-              await confirmBtn.click();
+              await recordWriteStage('confirmation_present', true, { confirmation_kind: 'invitation_send', modal_appeared: modalAppeared });
+              await recordWriteStage('before_confirmation_click', true, { confirmation_kind: 'invitation_send', modal_appeared: modalAppeared });
+              await recordWriteStage('confirmation_click_attempted', true, { confirmation_kind: 'invitation_send', modal_appeared: modalAppeared });
+              await this.clickExpectedLinkedInWriteControl(page, confirmBtn, 'invitation_send');
               finalSendClicked=true;
+              await recordWriteStage('confirmation_clicked', true, { confirmation_kind: 'invitation_send', modal_appeared: modalAppeared });
             }
           }
           await page.waitForTimeout(2000);
+          await recordWriteStage('post_write_verification', true, { modal_appeared: modalAppeared, final_send_clicked: finalSendClicked, immediate_send_flow: immediateSend });
           const postSemanticState = await readProfileState();
           const postState = classifyConnectionProfileState({ hasPending: postSemanticState.hasPending, hasConnect: postSemanticState.hasConnect, hasMessage: postSemanticState.hasConnected });
           const pageText = await page.locator('body').innerText().catch(() => '');
@@ -2104,6 +2134,7 @@ export class Worker {
             };
             break;
           }
+          await recordWriteStage('profile_verified', false, { authorized_target: targetProfile, presented_target: normalizeLinkedInTarget(presentedRecipient) });
           const inputBox = await page.$('div.msg-form__contenteditable');
           if (!inputBox) {
             result = { success: false, error: 'Message input not found' };
@@ -2125,8 +2156,11 @@ export class Worker {
             (nodes, expected) => nodes.filter(node => (node.textContent ?? '').replace(/\s+/g, ' ').trim() === expected).length,
             message.replace(/\s+/g, ' ').trim(),
           ).catch(() => 0);
+          await recordWriteStage('before_message_send', true, { action_type: item.action_type, target_profile_url: targetProfile });
           await submitBtn.click();
+          await recordWriteStage('message_send_attempted', true, { action_type: item.action_type, target_profile_url: targetProfile });
           await page.waitForTimeout(2000);
+          await recordWriteStage('post_write_verification', true, { action_type: item.action_type, target_profile_url: targetProfile });
           const exactOutboundAfter = await page.$$eval(
             '.msg-s-message-list__event .msg-s-event-listitem--outbound, .msg-s-message-group__message-bubble--outbound',
             (nodes, expected) => nodes.filter(node => (node.textContent ?? '').replace(/\s+/g, ' ').trim() === expected).length,
@@ -2144,6 +2178,7 @@ export class Worker {
             success: true,
             data: { result_code: 'success', write_verified: true, sent_to: prospectName, target_profile_url: targetProfile, verification: 'exact_outbound_message_bubble' },
           };
+          await recordWriteStage('message_sent', true, { action_type: item.action_type, target_profile_url: targetProfile, verification: 'exact_outbound_message_bubble' });
           break;
         }
         case 'like_post': {
@@ -2424,7 +2459,15 @@ export class Worker {
         })();
         const classification = pathname.includes('/checkpoint') || pathname.includes('/challenge') ? 'verification_required' : result.success ? 'success' : 'failed';
         const positivelyVerifiedWrite = result.success && result.data?.result_code === 'success' && result.data?.write_verified === true;
-        await finalizeLinkedInWrite(this.client, writeAuditId, positivelyVerifiedWrite, classification);
+        const resultCode = positivelyVerifiedWrite ? 'success' : result.data?.result_code === 'outcome_unknown' || (interactionCrossed && !result.success) ? 'outcome_unknown' : String(result.data?.result_code ?? 'failed');
+        const outcomeEvidence = {
+          ...(result.data ?? {}),
+          interaction_stage: interactionStage,
+          interaction_crossed: interactionCrossed,
+          retry_allowed: resultCode === 'outcome_unknown' ? false : !interactionCrossed,
+          error: result.error ?? null,
+        };
+        await finalizeLinkedInWrite(this.client, writeAuditId, resultCode, positivelyVerifiedWrite, classification, outcomeEvidence);
         writeAuditId = null;
         if (classification === 'verification_required') {
           result = { success: false, error: 'LinkedIn verification required' };
@@ -2468,9 +2511,11 @@ export class Worker {
           action: item.action_type,
         });
       } else {
-        // Once write preflight has allowed an action, any browser-side failure is
-        // potentially post-interaction and therefore unsafe to retry automatically.
-        await this.queue.fail(item.id, result.error || 'Automation action failed', Date.now() - startTime, !LINKEDIN_WRITE_ACTIONS.has(item.action_type));
+        const explicitUnknown = result.data?.result_code === 'outcome_unknown';
+        const outcome = interactionCrossed || explicitUnknown
+          ? { ...(result.data ?? {}), result_code: 'outcome_unknown', write_verified: false, retry_allowed: false, interaction_crossed: true, interaction_stage: interactionStage }
+          : { ...(result.data ?? {}), result_code: result.data?.result_code ?? 'failed', write_verified: false, retry_allowed: true, interaction_crossed: false, interaction_stage: interactionStage };
+        await this.queue.fail(item.id, result.error || 'Automation action failed', Date.now() - startTime, !interactionCrossed, outcome);
         logger.warn('linkedin_job_failed', {
           queue_item_id: item.id,
           workspace_id: item.workspace_id,
@@ -2488,7 +2533,16 @@ export class Worker {
         } catch {
           /* retain sanitized failure classification */
         }
-        await finalizeLinkedInWrite(this.client, writeAuditId, false, classification).catch((finalizeError) => {
+        const resultCode = interactionCrossed ? 'outcome_unknown' : 'failed';
+        const evidence = {
+          result_code: resultCode,
+          write_verified: false,
+          retry_allowed: !interactionCrossed,
+          interaction_crossed: interactionCrossed,
+          interaction_stage: interactionStage,
+          error: this.sanitizeError(err),
+        };
+        await finalizeLinkedInWrite(this.client, writeAuditId, resultCode, false, classification, evidence).catch((finalizeError) => {
           logger.error('linkedin_write_audit_finalize_failed', {
             queue_item_id: item.id,
             error: this.sanitizeError(finalizeError),
@@ -2508,7 +2562,59 @@ export class Worker {
         action: item.action_type,
         reason: msg,
       });
-      await this.queue.fail(item.id, msg, Date.now() - startTime, !LINKEDIN_WRITE_ACTIONS.has(item.action_type));
+      const outcome = failureOutcomeForStage(interactionStage, msg);
+      await this.queue.fail(item.id, msg, Date.now() - startTime, !interactionCrossed, outcome);
+    }
+  }
+
+  private async clickExpectedLinkedInWriteControl(
+    page: Page,
+    control: ElementHandle<HTMLElement | SVGElement>,
+    expectedKind: 'invitation_send' | 'connection_note_send',
+  ): Promise<void> {
+    const descriptor = await control.evaluate((element) => {
+      const rect = element.getBoundingClientRect();
+      return {
+        accessibleName: element.getAttribute('aria-label') || element.getAttribute('title') || element.textContent?.replace(/\s+/g, ' ').trim() || '',
+        center: { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 },
+      };
+    });
+    if (!descriptor.accessibleName || await this.linkedin.detectRestriction()) throw new Error('Expected LinkedIn confirmation control is not safe to click');
+    try {
+      await control.click({ timeout: 5000 });
+      return;
+    } catch (firstError) {
+      const obstruction = await page.evaluate(({ x, y }) => {
+        const top = document.elementFromPoint(x, y);
+        const checkpoint = /checkpoint|challenge|captcha|security verification/i.test(`${location.pathname} ${document.body.innerText.slice(0, 2000)}`);
+        return {
+          checkpoint,
+          tag: top?.tagName.toLowerCase() ?? null,
+          id: top?.id || null,
+          testId: top?.getAttribute('data-testid') || null,
+          benignInteropOutlet: !!top?.closest('#interop-outlet[data-testid="interop-shadowdom"]'),
+        };
+      }, descriptor.center);
+      logger.warn('linkedin_write_control_obstructed', { expected_kind: expectedKind, obstruction });
+      if (obstruction.checkpoint || await this.linkedin.detectRestriction()) throw new Error('LinkedIn security or checkpoint UI obstructed confirmation');
+      if (!obstruction.benignInteropOutlet) throw new Error(`Unknown LinkedIn UI obstruction before ${expectedKind}`);
+      await page.waitForFunction(
+        ({ x, y }) => !document.elementFromPoint(x, y)?.closest('#interop-outlet[data-testid="interop-shadowdom"]'),
+        descriptor.center,
+        { timeout: 2500 },
+      ).catch(() => {});
+      if (await this.linkedin.detectRestriction()) throw new Error('LinkedIn security UI appeared before confirmation retry');
+      const resolved = page.getByRole('button', { name: descriptor.accessibleName, exact: true }).first();
+      if (!(await resolved.isVisible().catch(() => false)) || await resolved.isDisabled().catch(() => true)) {
+        throw new Error(`Expected ${expectedKind} control was not stable after transient obstruction`);
+      }
+      const remainsObstructed = await resolved.evaluate((element) => {
+        const rect = element.getBoundingClientRect();
+        return !!document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2)?.closest('#interop-outlet[data-testid="interop-shadowdom"]');
+      });
+      if (remainsObstructed) throw new Error(`Transient LinkedIn interop outlet did not clear before ${expectedKind}`);
+      await resolved.click({ timeout: 5000 });
+      logger.info('linkedin_write_control_resolved_after_transient_obstruction', { expected_kind: expectedKind, initial_error: this.sanitizeError(firstError) });
     }
   }
 

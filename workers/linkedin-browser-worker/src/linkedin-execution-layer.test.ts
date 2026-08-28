@@ -346,7 +346,7 @@ test('campaign polling preserves rendered data and canonical LinkedIn identities
   assert.match(campaignProspectDedup, /linkedin:.*pathname\.toLowerCase/);
 });
 test('post-preflight LinkedIn write failures never retry automatically', () => {
-  assert.match(worker, /unsafe to retry automatically[\s\S]*!LINKEDIN_WRITE_ACTIONS\.has\(item\.action_type\)/);
+  assert.match(worker, /interactionCrossed[\s\S]*result_code: 'outcome_unknown'[\s\S]*retry_allowed: false/);
   assert.match(customerSchedule, /semantic_key=v_semantic[\s\S]*duplicate_action/);
 });
 test('controlled acceptance permits only safe human-initiated pre-write retries', () => {

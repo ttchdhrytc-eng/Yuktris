@@ -73,13 +73,17 @@ export async function preflightLinkedInWrite(
 export async function finalizeLinkedInWrite(
   client: SupabaseClient,
   auditId: string,
-  success: boolean,
+  resultCode: string,
+  writeVerified: boolean,
   classification: string,
+  evidence: Record<string, unknown> = {},
 ): Promise<void> {
-  const { error } = await client.rpc('finalize_linkedin_write', {
+  const { error } = await client.rpc('finalize_linkedin_write_outcome', {
     p_audit_id: auditId,
-    p_success: success,
+    p_result_code: resultCode,
+    p_write_verified: writeVerified,
     p_classification: classification,
+    p_evidence: evidence,
   });
   if (error) throw new Error(`LinkedIn write finalization failed: ${error.message}`);
 }
