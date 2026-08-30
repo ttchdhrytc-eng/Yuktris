@@ -28,7 +28,7 @@ const tests: Array<[string, () => void]> = [
   }],
   ['login beyond five minutes keeps a renewable lease', () => {
     // Renewal is owned by the common claimed-task wrapper, not handleConnect.
-    assert.match(worker, /const leaseTimer = setInterval[\s\S]*?\.renew\(item\.id\)/);
+    assert.match(worker, /new TaskOwnershipLifecycle\(this\.queue, item\.id[\s\S]*await ownership\.start\(\)/);
     assert.match(migration, /lease_expires_at/);
     assert.doesNotMatch(migration, /interval '5 minutes'/);
   }],

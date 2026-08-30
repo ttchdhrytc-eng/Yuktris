@@ -27,7 +27,7 @@ test('different accounts are not globally serialized', () => {
 
 test('lease heartbeat renews queue and account ownership atomically', () => {
   assert.match(migration, /renew_queue_lease[\s\S]*linkedin_account_browser_leases[\s\S]*browser_execution_queue/);
-  assert.match(worker, /this\.queue[\s\S]*\.renew\(item\.id\)/);
+  assert.match(worker, /new TaskOwnershipLifecycle\(this\.queue, item\.id[\s\S]*await ownership\.start\(\)/);
 });
 
 test('release occurs after persistent Context and browser cleanup', () => {

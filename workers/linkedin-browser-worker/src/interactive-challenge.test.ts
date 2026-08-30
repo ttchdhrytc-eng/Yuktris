@@ -28,7 +28,7 @@ const tests: Array<[string, () => void]> = [
   ['same queue attempt remains held and renewable during human challenge', () => {
     // Lease renewal moved to the task wrapper so every action, including an
     // interactive challenge, shares the same ownership guard.
-    assert.match(worker, /const leaseTimer = setInterval[\s\S]*?\.renew\(item\.id\)/);
+    assert.match(worker, /new TaskOwnershipLifecycle\(this\.queue, item\.id[\s\S]*await ownership\.start\(\)/);
     assert.match(challengeWait, /browser_execution_queue[\s\S]*status === 'cancelled'/);
   }],
   ['challenge timeout and cancellation are non-retryable', () => {

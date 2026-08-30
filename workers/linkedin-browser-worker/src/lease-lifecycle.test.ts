@@ -24,8 +24,7 @@ test('per-task controller inherits the exact queue claimant worker identity', ()
 });
 
 test('lease renews before slow Browserbase startup and then every 30 seconds', () => {
-  assert.match(worker, /const initiallyRenewed = await this\.queue\.renew\(item\.id\)/);
-  assert.match(worker, /setInterval\([\s\S]*this\.queue[\s\S]*\.renew\(item\.id\)[\s\S]*30000\)/);
+  assert.match(worker, /await ownership\.start\(\)/);
   let lease: Lease = { owner: 'railway-1', attempt: 'a', expiresAt: 90_000, crossed: false, infra: 0, maxInfra: 2 };
   for (const now of [30_000, 60_000, 90_000, 120_000, 180_000]) lease = renew(lease, 'railway-1', 'a', now)!;
   assert.equal(recover(lease, 200_000), 'owned');

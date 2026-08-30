@@ -15,6 +15,8 @@ import { classifyRelationshipProbe, type RelationshipProbeEvidence } from './rel
 import { waitForLinkedInProfileReady } from './linkedin-profile-readiness.js';
 import { failureOutcomeForStage, type WriteInteractionStage } from './write-interaction-stage.js';
 import type { ElementHandle, Locator, Page } from 'playwright';
+import { runtimeWorkerId } from './worker-identity.js';
+import { TaskOwnershipLifecycle } from './task-ownership.js';
 
 const INTERACTIVE_AUTH_TIMEOUT_MS = interactiveAuthTimeoutMs();
 const TEST_CONNECTION_TIMEOUT = parseInt(process.env.TEST_CONNECTION_TIMEOUT_MS || '120000', 10);
@@ -103,7 +105,7 @@ export class Worker {
         detectSessionInUrl: false,
       },
     });
-    this.workerId = workerIdOverride || process.env.WORKER_ID || crypto.randomUUID();
+    this.workerId = workerIdOverride || runtimeWorkerId();
     this.workerName = `linkedin-worker-${this.workerId}`;
     this.region = process.env.WORKER_REGION || 'local';
     this.encryptionSecret = encKey;
@@ -502,30 +504,15 @@ export class Worker {
       return;
     }
     let leaseLost = false;
-    let leaseRenewalFailures = 0;
-    const initiallyRenewed = await this.queue.renew(item.id);
-    if (!initiallyRenewed) throw new Error('Queue lease ownership lost before task startup');
-    const leaseTimer = setInterval(() => {
-      void this.queue
-        .renew(item.id)
-        .then((renewed) => {
-          leaseRenewalFailures = 0;
-          if (!renewed) {
-            leaseLost = true;
-            this.linkedin.cancel('Queue lease ownership lost');
-          }
-        })
-        .catch((error) => {
-          leaseRenewalFailures++;
-          logger.warn('Queue lease renewal failed', {
-            task_id: item.id,
-            error: this.sanitizeError(error),
-          });
-          if (leaseRenewalFailures >= 2) {
-            leaseLost = true;
-            this.linkedin.cancel('Queue lease could not be renewed');
-          }
-        });
+    const ownership = new TaskOwnershipLifecycle(this.queue, item.id, (reason) => {
+      leaseLost = true;
+      this.linkedin.cancel(reason);
+    }, (error) => logger.warn('Queue lease renewal failed', {
+      task_id: item.id,
+      error: this.sanitizeError(error),
+    }));
+    await ownership.start();
+    const contextLeaseTimer = setInterval(() => {
       const active = this.activeContextLease;
       if (active)
         void this.linkedinContexts
@@ -599,7 +586,8 @@ export class Worker {
       });
       await this.queue.fail(item.id, msg, Date.now() - startTime, isRetryable);
     } finally {
-      clearInterval(leaseTimer);
+      ownership.stop();
+      clearInterval(contextLeaseTimer);
       this.currentTaskId = null;
       // Every task owns a short-lived browser session. Cleanup is idempotent and
       // prevents Browserbase keep-alive sessions from leaking on unexpected errors.
