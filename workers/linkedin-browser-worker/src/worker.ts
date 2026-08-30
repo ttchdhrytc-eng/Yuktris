@@ -44,6 +44,7 @@ export class Worker {
   private sessionHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private currentTaskId: string | null = null;
   private activeTasks = new Map<string, Promise<void>>();
+  private activeTaskWorkers = new Map<string, Worker>();
   private workspaceId: string | null = null;
   private lastAutonomousMaintenanceAt = 0;
 
@@ -83,7 +84,7 @@ export class Worker {
     return data;
   }
 
-  constructor() {
+  constructor(workerIdOverride?: string) {
     const supabaseUrl = process.env.SUPABASE_URL;
     const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
     const encKey = process.env.LINKEDIN_SESSION_ENCRYPTION_KEY;
@@ -102,7 +103,7 @@ export class Worker {
         detectSessionInUrl: false,
       },
     });
-    this.workerId = process.env.WORKER_ID || crypto.randomUUID();
+    this.workerId = workerIdOverride || process.env.WORKER_ID || crypto.randomUUID();
     this.workerName = `linkedin-worker-${this.workerId}`;
     this.region = process.env.WORKER_REGION || 'local';
     this.encryptionSecret = encKey;
@@ -175,9 +176,10 @@ export class Worker {
     // exists instead of terminating the process.
     await this.ensureRegistered();
 
-    // Fix 9: Recover orphaned queue tasks from previous worker crash
+    // Recover only database-expired ownership. The queue lease is renewed by
+    // healthy tasks, so elapsed wall time alone must never steal long work.
     try {
-      const { data: recovered, error: recoverError } = await this.client.rpc('recover_orphaned_queue_tasks', { p_timeout_minutes: 10 });
+      const { data: recovered, error: recoverError } = await this.client.rpc('recover_expired_browser_queue_leases', { p_limit: 50 });
       if (recoverError) {
         logger.warn('Queue recovery RPC error', {
           error: recoverError.message,
@@ -222,6 +224,14 @@ export class Worker {
     if (this.sessionHeartbeatTimer) {
       clearInterval(this.sessionHeartbeatTimer);
       this.sessionHeartbeatTimer = null;
+    }
+    for (const taskWorker of this.activeTaskWorkers.values())
+      taskWorker.linkedin.cancel('Worker is shutting down');
+    if (this.activeTasks.size) {
+      await Promise.race([
+        Promise.allSettled(this.activeTasks.values()),
+        new Promise((resolve) => setTimeout(resolve, 20_000)),
+      ]);
     }
     await this.linkedin.close();
     const { error: stopErr } = await this.client.rpc('set_browser_worker_closing', { p_worker_id: this.workerId });
@@ -369,9 +379,12 @@ export class Worker {
           // Each account task owns its own browser/controller state. Database
           // Context leases still serialize the same account, while unrelated
           // accounts no longer wait behind a 30-minute human login.
-          const taskWorker = new Worker();
+          // Queue ownership is bound to the process worker ID used by claimNext.
+          // Per-task browser controllers must retain that exact identity.
+          const taskWorker = new Worker(this.workerId);
           taskWorker.workspaceId = this.workspaceId;
           taskWorker.queue.rememberClaim(item);
+          this.activeTaskWorkers.set(item.id, taskWorker);
           const task = taskWorker
             .processTask(item)
             .catch((error) => {
@@ -380,7 +393,10 @@ export class Worker {
                 error: taskWorker.sanitizeError(error),
               });
             })
-            .finally(() => this.activeTasks.delete(item.id));
+            .finally(() => {
+              this.activeTasks.delete(item.id);
+              this.activeTaskWorkers.delete(item.id);
+            });
           this.activeTasks.set(item.id, task);
         } else {
           logger.info(`Poll #${pollCount}: no tasks`, {
@@ -487,6 +503,8 @@ export class Worker {
     }
     let leaseLost = false;
     let leaseRenewalFailures = 0;
+    const initiallyRenewed = await this.queue.renew(item.id);
+    if (!initiallyRenewed) throw new Error('Queue lease ownership lost before task startup');
     const leaseTimer = setInterval(() => {
       void this.queue
         .renew(item.id)
@@ -528,6 +546,7 @@ export class Worker {
       workspace: item.workspace_id,
       account: item.account_id,
     });
+    this.currentTaskId = item.id;
 
     try {
       await this.client.rpc('heartbeat_browser_worker', {
@@ -581,6 +600,7 @@ export class Worker {
       await this.queue.fail(item.id, msg, Date.now() - startTime, isRetryable);
     } finally {
       clearInterval(leaseTimer);
+      this.currentTaskId = null;
       // Every task owns a short-lived browser session. Cleanup is idempotent and
       // prevents Browserbase keep-alive sessions from leaking on unexpected errors.
       await this.linkedin.close().catch((error) => {

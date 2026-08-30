@@ -23,7 +23,7 @@ test('10 Live View retrieval is retried on the same session', () => assert.match
 test('11 unavailable Live View is a classified terminal startup event', () => assert.match(linkedin, /startup_failed[\s\S]*auth_surface_unavailable/));
 test('12 authenticated Context bypasses Live View', () => assert.match(worker, /if \(preflight\.result\)[\s\S]*existing_session_authenticated/));
 test('13 startup timeout is non-retryable and cleanup remains in finally', () => assert.match(worker, /CloudAgentStartupError[\s\S]*isRetryable = !\(err instanceof CloudAgentStartupError\)[\s\S]*finally/));
-test('14 concurrent task runners prevent unrelated account starvation', () => assert.match(worker, /new Worker\(\)[\s\S]*activeTasks\.set/));
+test('14 concurrent task runners preserve claimant identity without unrelated account starvation', () => assert.match(worker, /new Worker\(this\.workerId\)[\s\S]*activeTasks\.set/));
 test('15 30-minute human deadline starts after usable auth surface', () => {
   assert.ok(worker.indexOf('linkedin_login_surface') < worker.indexOf('result = await connection'));
   assert.match(browserbase, /MAX_SESSION_TIMEOUT_SECONDS = 21600/);

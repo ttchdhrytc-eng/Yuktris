@@ -74,7 +74,7 @@ export function OnboardingPage() {
   const [icps, setIcps] = useState<ICPRecommendation[]>([]);
   const [selectedIcp, setSelectedIcp] = useState<string | null>(null);
   const [goal] = useState('book_meetings');
-  const [channels] = useState({ linkedin: true, email: true });
+  const [channels] = useState({ linkedin: true, email: false });
   const [progress, setProgress] = useState<ActivationProgress[]>([]);
   const [editing, setEditing] = useState<Record<string, string>>({});
   const [linkedinAccountId, setLinkedinAccountId] = useState<string | null>(null);
@@ -916,7 +916,7 @@ export function OnboardingPage() {
                 <div className="space-y-2 mb-5">
                   <PlanRow label="Target Customer" value={icps.find((i) => i.id === selectedIcp)?.name ?? icps[0]?.name ?? '—'} />
                   <PlanRow label="Goal" value={CAMPAIGN_GOALS.find((g) => g.id === goal)?.label ?? goal} />
-                  <PlanRow label="Channels" value={[channels.linkedin ? 'LinkedIn' : null, channels.email ? 'Email' : null].filter(Boolean).join(' + ') || 'None selected'} />
+                  <PlanRow label="Channel" value="LinkedIn" />
                   <PlanRow label="Connections" value={[
                     gmailConnected ? 'Gmail' : null,
                     calendarConnected ? 'Calendar' : null,
@@ -930,7 +930,7 @@ export function OnboardingPage() {
                       { icon: Search, text: 'Find companies matching your ideal customer profile' },
                       { icon: Users, text: 'Identify decision-makers at each company' },
                       { icon: MessageSquare, text: 'Write personalized messages for each person' },
-                      { icon: Mail, text: 'Send connection requests and outreach automatically' },
+                      { icon: Linkedin, text: 'Send LinkedIn connection requests and outreach automatically' },
                       { icon: RefreshCw, text: 'Follow up at the right time, every time' },
                       { icon: MessageSquare, text: 'Handle replies and objections' },
                       { icon: Calendar, text: 'Book meetings directly to your calendar' },
