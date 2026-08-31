@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { TaskOwnershipLifecycle } from './task-ownership.js';
-import { runtimeWorkerId } from './worker-identity.js';
+import { isProcessUniqueWorkerId, runtimeWorkerId, runtimeWorkerIdentity } from './worker-identity.js';
 
 const actions = ['check_connection_acceptance', 'connection_request', 'send_message', 'follow_up_message'];
 
@@ -46,5 +46,32 @@ test('each process gets a unique claimant while child controllers can inherit it
   const env={WORKER_ID:'worker-1',RAILWAY_DEPLOYMENT_ID:'dep',RAILWAY_REPLICA_ID:'replica'} as NodeJS.ProcessEnv;
   const first=runtimeWorkerId(env),second=runtimeWorkerId(env);
   assert.notEqual(first,second);
-  assert.match(first,/^worker-1:dep:replica:/);
+  assert.match(first,/^v1:worker-1:dep:replica:/);
+  assert.equal(isProcessUniqueWorkerId(first),true);
+});
+
+test('one process identity is stable for claim, renew, complete, fail, release, account lease, and child controller', () => {
+  const identity=runtimeWorkerIdentity({WORKER_NAME:'worker-1',RAILWAY_DEPLOYMENT_ID:'dep-a',RAILWAY_REPLICA_ID:'replica-a'} as NodeJS.ProcessEnv,'123e4567-e89b-42d3-a456-426614174000');
+  const operations=['claim','renew','complete','fail','release','account_lease','child_controller'];
+  const owners=operations.map(()=>identity.id);
+  assert.equal(new Set(owners).size,1);
+  assert.equal(isProcessUniqueWorkerId(identity.id),true);
+});
+
+test('generic, empty, malformed, and legacy durable identities are rejected', () => {
+  for(const value of ['', 'worker-1', 'worker', 'default', 'worker-1:dep:replica:123e4567-e89b-42d3-a456-426614174000', 'v1:worker-1:dep:replica:not-a-uuid', null])
+    assert.equal(isProcessUniqueWorkerId(value),false,String(value));
+});
+
+test('rolling deployment processes cannot impersonate each other', () => {
+  const oldIdentity=runtimeWorkerIdentity({WORKER_NAME:'worker-1',RAILWAY_DEPLOYMENT_ID:'old',RAILWAY_REPLICA_ID:'replica'} as NodeJS.ProcessEnv,'123e4567-e89b-42d3-a456-426614174000');
+  const newIdentity=runtimeWorkerIdentity({WORKER_NAME:'worker-1',RAILWAY_DEPLOYMENT_ID:'new',RAILWAY_REPLICA_ID:'replica'} as NodeJS.ProcessEnv,'123e4567-e89b-42d3-a456-426614174001');
+  assert.notEqual(oldIdentity.id,newIdentity.id);
+  assert.equal(isProcessUniqueWorkerId(oldIdentity.id),true);
+  assert.equal(isProcessUniqueWorkerId(newIdentity.id),true);
+});
+
+test('invalid identity components fail startup construction', () => {
+  assert.throws(()=>runtimeWorkerIdentity({WORKER_NAME:'bad:name'} as NodeJS.ProcessEnv),/Invalid worker identity/);
+  assert.throws(()=>runtimeWorkerIdentity({} as NodeJS.ProcessEnv,'not-a-uuid'),/runtime ID/);
 });

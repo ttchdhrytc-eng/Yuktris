@@ -10,6 +10,7 @@ import { createClient } from '@supabase/supabase-js';
 import { Worker } from './worker.js';
 import { logger } from './logger.js';
 import { browserbase } from './browserbase.js';
+import { runtimeWorkerIdentity } from './worker-identity.js';
 
 const HEALTH_PORT = parseInt(process.env.WORKER_PORT || process.env.HEALTH_PORT || '3100', 10);
 
@@ -73,8 +74,18 @@ const server = http.createServer(async (req, res) => {
 });
 
 async function main() {
+  const identity = runtimeWorkerIdentity();
   const useBrowserbase = browserbase.isConfigured();
-  logger.info('LinkedIn Browser Worker starting', { health_port: HEALTH_PORT, provider: useBrowserbase ? 'browserbase' : 'local-chromium' });
+  logger.info('LinkedIn Browser Worker starting', {
+    health_port: HEALTH_PORT,
+    provider: useBrowserbase ? 'browserbase' : 'local-chromium',
+    worker_identity_version: identity.version,
+    worker_name: identity.workerName,
+    deployment_id: identity.deploymentId,
+    replica_id: identity.replicaId,
+    runtime_id: identity.runtimeId,
+    worker_id: identity.id,
+  });
 
   // Startup diagnostics
   logger.info('=== STARTUP DIAGNOSTICS ===');
@@ -95,7 +106,7 @@ async function main() {
     });
   });
 
-  worker = new Worker();
+  worker = new Worker(identity.id);
   await worker.start();
 
   const shutdown = async (signal: string) => {

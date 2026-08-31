@@ -15,7 +15,7 @@ import { classifyRelationshipProbe, type RelationshipProbeEvidence } from './rel
 import { waitForLinkedInProfileReady } from './linkedin-profile-readiness.js';
 import { failureOutcomeForStage, type WriteInteractionStage } from './write-interaction-stage.js';
 import type { ElementHandle, Locator, Page } from 'playwright';
-import { runtimeWorkerId } from './worker-identity.js';
+import { isProcessUniqueWorkerId, runtimeWorkerId } from './worker-identity.js';
 import { TaskOwnershipLifecycle } from './task-ownership.js';
 
 const INTERACTIVE_AUTH_TIMEOUT_MS = interactiveAuthTimeoutMs();
@@ -106,6 +106,7 @@ export class Worker {
       },
     });
     this.workerId = workerIdOverride || runtimeWorkerId();
+    if (!isProcessUniqueWorkerId(this.workerId)) throw new Error('Worker durable identity must satisfy the process-unique v1 contract');
     this.workerName = `linkedin-worker-${this.workerId}`;
     this.region = process.env.WORKER_REGION || 'local';
     this.encryptionSecret = encKey;
