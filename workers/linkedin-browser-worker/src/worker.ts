@@ -798,6 +798,7 @@ export class Worker {
           await this.updateAccount(accountId, {
             connection_state: 'connected',
             session_status: 'connected',
+            health_status: 'healthy',
             status: 'active',
             last_validated_at: new Date().toISOString(),
             last_login_at: new Date().toISOString(),
@@ -1243,6 +1244,7 @@ export class Worker {
     await this.updateAccount(accountId, {
       connection_state: 'connected',
       session_status: 'connected',
+      health_status: 'healthy',
       status: 'active',
       last_validated_at: new Date().toISOString(),
       last_login_at: new Date().toISOString(),
@@ -1321,6 +1323,7 @@ export class Worker {
         await this.updateAccount(accountId, {
           connection_state: 'connected',
           session_status: 'connected',
+          health_status: 'healthy',
           status: 'active',
           last_validated_at: new Date().toISOString(),
           last_error: null,
@@ -1381,6 +1384,7 @@ export class Worker {
       });
       await this.updateAccount(accountId, {
         connection_state: 'connected',
+        health_status: 'healthy',
         last_validated_at: new Date().toISOString(),
         last_error: null,
         profile_url: result.identity?.profileUrl,
@@ -1577,6 +1581,7 @@ export class Worker {
         await this.updateAccount(accountId, {
           connection_state: 'connected',
           session_status: 'connected',
+          health_status: 'healthy',
           status: 'active',
           last_validated_at: new Date().toISOString(),
           last_error: null,
@@ -2895,6 +2900,7 @@ export class Worker {
       });
       await this.updateAccount(accountId, {
         connection_state: 'connected',
+        health_status: 'healthy',
         last_validated_at: new Date().toISOString(),
         last_error: null,
       });
@@ -3043,6 +3049,7 @@ export class Worker {
       await this.updateAccount(accountId, {
         connection_state: 'connected',
         session_status: 'connected',
+        health_status: 'healthy',
         last_validated_at: new Date().toISOString(),
         last_error: null,
       });

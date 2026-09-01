@@ -918,6 +918,7 @@ export function OnboardingPage() {
                   <PlanRow label="Goal" value={CAMPAIGN_GOALS.find((g) => g.id === goal)?.label ?? goal} />
                   <PlanRow label="Channel" value="LinkedIn" />
                   <PlanRow label="Connections" value={[
+                    linkedinConnected ? 'LinkedIn' : null,
                     gmailConnected ? 'Gmail' : null,
                     calendarConnected ? 'Calendar' : null,
                   ].filter(Boolean).join(', ') || 'None connected'} />
