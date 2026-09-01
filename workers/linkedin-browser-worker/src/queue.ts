@@ -134,6 +134,28 @@ export class Queue {
     return data === true;
   }
 
+  async claimNextAuthentication(): Promise<QueueItem | null> {
+    logger.info('Polling authentication queue for tasks...', { worker_id: this.workerId });
+
+    const { data, error } = await this.client.rpc('claim_linkedin_auth_task', {
+      p_worker_id: this.workerId,
+      p_lease_seconds: 90,
+    });
+
+    if (error) {
+      logger.error('Authentication queue claim error', { worker_id: this.workerId, error: error.message, code: error.code });
+      return null;
+    }
+
+    if (!data || (Array.isArray(data) && data.length === 0)) return null;
+    const item = Array.isArray(data) ? data[0] : data;
+    if (!item?.id) return null;
+    if (item.action_type !== 'linkedin_connect')
+      throw new Error(`Authentication-only claim returned prohibited action ${String(item.action_type)}`);
+    logger.info('Claimed authentication task', { id: item.id, action: item.action_type, account_id: item.account_id });
+    return this.rememberClaim(item as QueueItem);
+  }
+
   async recordBrowserCorrelation(itemId: string, browserbaseSessionId: string | null, persistentContextId: string | null): Promise<void> {
     const attemptId = this.requireAttempt(itemId);
     const { data, error } = await this.client.rpc('record_browser_attempt_correlation', {

@@ -361,18 +361,6 @@ export class Worker {
             });
           });
         }
-        if (!this.executionGate.outboundEnabled) {
-          if (pollCount === 1 || pollCount % 20 === 0)
-            logger.info('Global LinkedIn outbound gate disabled; queue work remains unclaimed', {
-              worker_id: this.workerId,
-              reason: this.executionGate.reason,
-            });
-          await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL));
-          continue;
-        }
-        logger.info(`Poll #${pollCount}: calling claimNext()`, {
-          worker_id: this.workerId,
-        });
         if (this.activeTasks.size >= MAX_CONCURRENT_ACCOUNTS) {
           logger.info('Cloud agent concurrency capacity reached', {
             active_tasks: this.activeTasks.size,
@@ -381,7 +369,14 @@ export class Worker {
           await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL));
           continue;
         }
-        const item = await this.queue.claimNext();
+        if (!this.executionGate.outboundEnabled && (pollCount === 1 || pollCount % 20 === 0))
+          logger.info('Global LinkedIn outbound gate disabled; polling authentication bootstrap only', {
+            worker_id: this.workerId,
+            reason: this.executionGate.reason,
+          });
+        const item = this.executionGate.outboundEnabled
+          ? await this.queue.claimNext()
+          : await this.queue.claimNextAuthentication();
         if (item) {
           if (item.action_type === 'linkedin_connect')
             logger.info('LinkedIn queue orchestration timing', {

@@ -10,9 +10,8 @@ import {
 import { runtimeWorkerIdentity } from './worker-identity.js';
 
 const workerSource = readFileSync(resolve(process.cwd(), 'src/worker.ts'), 'utf8');
-const disabledGate = workerSource.indexOf('if (!this.executionGate.outboundEnabled)');
-const claimLog = workerSource.indexOf('logger.info(`Poll #${pollCount}: calling claimNext()`');
-const claim = workerSource.indexOf('const item = await this.queue.claimNext()');
+const disabledClaim = workerSource.indexOf('await this.queue.claimNextAuthentication()');
+const outboundClaim = workerSource.indexOf('await this.queue.claimNext()');
 
 test('explicit disabled mode fails closed', () => {
   assert.deepEqual(resolveLinkedInExecutionGate(LINKEDIN_EXECUTION_DISABLED), {
@@ -29,17 +28,15 @@ test('only the explicit recognized value enables the existing path', () => {
   assert.equal(resolveLinkedInExecutionGate(LINKEDIN_EXECUTION_ENABLED).outboundEnabled, true);
 });
 
-test('disabled gate precedes queue claim and preserves queued work', () => {
-  assert.ok(disabledGate > 0 && claim > disabledGate);
-  const gateBranch = workerSource.slice(disabledGate, claimLog);
-  assert.match(gateBranch, /continue;/);
-  assert.doesNotMatch(gateBranch, /\.complete|\.fail|\.cancel|\.release|queue\.claimNext/);
+test('disabled gate selects only the dedicated authentication claim', () => {
+  assert.ok(disabledClaim > 0 && outboundClaim > 0);
+  assert.match(workerSource, /this\.executionGate\.outboundEnabled\s*\? await this\.queue\.claimNext\(\)\s*:\s*await this\.queue\.claimNextAuthentication\(\)/);
 });
 
 test('disabled path cannot construct task browser execution', () => {
   const taskWorker = workerSource.indexOf('const taskWorker = new Worker(this.workerId)');
   const processTask = workerSource.indexOf('.processTask(item)');
-  assert.ok(taskWorker > claim && processTask > taskWorker);
+  assert.ok(taskWorker > disabledClaim && processTask > taskWorker);
 });
 
 test('heartbeat and registration remain outside the outbound gate', () => {
@@ -47,9 +44,9 @@ test('heartbeat and registration remain outside the outbound gate', () => {
   assert.match(workerSource, /outbound_enabled: this\.executionGate\.outboundEnabled/);
 });
 
-test('certification action names receive no bypass', () => {
-  const claimBoundary = workerSource.slice(disabledGate, claim + 'const item = await this.queue.claimNext()'.length);
-  assert.doesNotMatch(claimBoundary, /action_type|controlled_acceptance|pooya|tarun|vdiqfiuqckaxdjkadinu/i);
+test('certification and outbound action names receive no bypass', () => {
+  const claimBoundary = workerSource.slice(Math.min(disabledClaim, outboundClaim), Math.max(disabledClaim, outboundClaim) + 50);
+  assert.doesNotMatch(claimBoundary, /controlled_acceptance|pooya|tarun|vdiqfiuqckaxdjkadinu|connection_request|send_message|follow_up|accept_connection|book_meeting/i);
   assert.equal((workerSource.match(/queue\.claimNext\(\)/g) ?? []).length, 1);
 });
 

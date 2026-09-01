@@ -6,6 +6,7 @@ import { resolve } from 'node:path';
 const root=resolve(process.cwd(),'../..');
 const migration=readFileSync(resolve(root,'supabase/migrations/20260831100000_fail_closed_process_unique_worker_claims.sql'),'utf8');
 const worker=readFileSync(resolve(root,'workers/linkedin-browser-worker/src/worker.ts'),'utf8');
+const queue=readFileSync(resolve(root,'workers/linkedin-browser-worker/src/queue.ts'),'utf8');
 const index=readFileSync(resolve(root,'workers/linkedin-browser-worker/src/index.ts'),'utf8');
 
 test('server rejects generic, empty, null, and malformed identities before queue recovery or claim',()=>{
@@ -32,10 +33,11 @@ test('worker and child controller fail closed and inherit the exact claimant ide
   assert.match(worker,/const taskWorker = new Worker\(this\.workerId\)/);
 });
 
-test('read, connection, message, and follow-up all share the guarded queue claimant',()=>{
+test('outbound work shares the guarded claimant while authentication has a restricted claimant',()=>{
   for(const action of ['check_connection_acceptance','connection_request','send_message','follow_up_message'])
     assert.match(worker,new RegExp(action));
-  assert.match(worker,/const item = await this\.queue\.claimNext\(\)/);
+  assert.match(worker,/this\.executionGate\.outboundEnabled\s*\? await this\.queue\.claimNext\(\)\s*:\s*await this\.queue\.claimNextAuthentication\(\)/);
+  assert.match(queue,/item\.action_type !== 'linkedin_connect'/);
 });
 
 test('preinteraction recovery and postinteraction outcome_unknown safety remain in force',()=>{
