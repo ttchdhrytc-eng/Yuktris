@@ -31,7 +31,10 @@ CREATE TABLE public.linkedin_production_acceptance_authorizations (
   CONSTRAINT production_acceptance_canonical_target CHECK (
     canonical_target_url ~ '^https://www[.]linkedin[.]com/in/[A-Za-z0-9%_-]+$'
   ),
-  CONSTRAINT production_acceptance_expiry CHECK (expires_at > created_at)
+  CONSTRAINT production_acceptance_expiry CHECK (expires_at > created_at),
+  CONSTRAINT production_acceptance_target_once UNIQUE (
+    project_ref,workspace_id,linkedin_account_id,canonical_target_url,action_type
+  )
 );
 
 CREATE UNIQUE INDEX one_active_production_linkedin_acceptance

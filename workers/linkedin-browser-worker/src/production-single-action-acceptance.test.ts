@@ -6,6 +6,7 @@ import { productionAcceptanceAuthorizationId } from './production-acceptance.js'
 
 const root = resolve(process.cwd(), '../..');
 const migration = readFileSync(resolve(root, 'supabase/migrations/20260901170000_production_single_action_acceptance_gate.sql'), 'utf8');
+const targetOnce = readFileSync(resolve(root, 'supabase/migrations/20260901171000_production_acceptance_target_once.sql'), 'utf8');
 const worker = readFileSync(resolve(root, 'workers/linkedin-browser-worker/src/worker.ts'), 'utf8');
 const queue = readFileSync(resolve(root, 'workers/linkedin-browser-worker/src/queue.ts'), 'utf8');
 const safety = readFileSync(resolve(root, 'workers/linkedin-browser-worker/src/linkedin-execution-safety.ts'), 'utf8');
@@ -33,6 +34,8 @@ test('production authorization is exact, expiring, one-attempt and context-bound
   assert.match(migration, /max_retries,\s*max_infrastructure_retries[\s\S]*'pending',0,0/);
   assert.match(migration, /q\.persistent_context_id=a\.persistent_context_id/);
   assert.match(migration, /a\.preflighted_at IS NOT NULL OR a\.consumed_at IS NOT NULL/);
+  assert.match(migration, /production_acceptance_target_once[\s\S]*project_ref,workspace_id,linkedin_account_id,canonical_target_url,action_type/);
+  assert.match(targetOnce, /production_acceptance_target_once[\s\S]*project_ref,workspace_id,linkedin_account_id,canonical_target_url,action_type/);
   for (const safety of ['hourly_action_limit', 'daily_connection_limit', 'daily_total_action_limit', 'minimum_write_interval_seconds', 'cooldown_until', 'outside_working_hours'])
     assert.match(migration, new RegExp(safety));
 });
