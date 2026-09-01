@@ -54,7 +54,11 @@ export async function preflightLinkedInWrite(
   if (!item.account_id || !target || !item.idempotency_key) {
     return { allowed: false, code: 'invalid_request' };
   }
-  const { data, error } = await client.rpc('preflight_linkedin_write', {
+  const authorizationId = typeof item.action_params.production_acceptance_authorization_id === 'string'
+    ? item.action_params.production_acceptance_authorization_id
+    : null;
+  const rpc = authorizationId ? 'preflight_production_linkedin_acceptance_write' : 'preflight_linkedin_write';
+  const args: Record<string, unknown> = {
     p_task_id: item.id,
     p_attempt_id: item.attempt_id,
     p_workspace_id: item.workspace_id,
@@ -65,7 +69,9 @@ export async function preflightLinkedInWrite(
     p_project_ref: projectRef(),
     p_campaign_id: typeof item.action_params.campaign_id === 'string' ? item.action_params.campaign_id : null,
     p_contact_id: typeof item.action_params.contact_id === 'string' ? item.action_params.contact_id : null,
-  });
+  };
+  if (authorizationId) args.p_authorization_id = authorizationId;
+  const { data, error } = await client.rpc(rpc, args);
   if (error) throw new Error(`LinkedIn write preflight failed: ${error.message}`);
   return data as WritePreflightResult;
 }
@@ -77,13 +83,19 @@ export async function finalizeLinkedInWrite(
   writeVerified: boolean,
   classification: string,
   evidence: Record<string, unknown> = {},
+  acceptanceAuthorizationId: string | null = null,
 ): Promise<void> {
-  const { error } = await client.rpc('finalize_linkedin_write_outcome', {
+  const rpc = acceptanceAuthorizationId
+    ? 'finalize_production_linkedin_acceptance_write'
+    : 'finalize_linkedin_write_outcome';
+  const args: Record<string, unknown> = {
     p_audit_id: auditId,
     p_result_code: resultCode,
     p_write_verified: writeVerified,
     p_classification: classification,
     p_evidence: evidence,
-  });
+  };
+  if (acceptanceAuthorizationId) args.p_authorization_id = acceptanceAuthorizationId;
+  const { error } = await client.rpc(rpc, args);
   if (error) throw new Error(`LinkedIn write finalization failed: ${error.message}`);
 }

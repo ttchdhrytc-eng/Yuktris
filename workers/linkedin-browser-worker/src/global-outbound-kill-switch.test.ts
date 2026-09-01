@@ -28,9 +28,9 @@ test('only the explicit recognized value enables the existing path', () => {
   assert.equal(resolveLinkedInExecutionGate(LINKEDIN_EXECUTION_ENABLED).outboundEnabled, true);
 });
 
-test('disabled gate selects only the dedicated authentication claim', () => {
+test('disabled gate selects authentication unless an exact production authorization is configured', () => {
   assert.ok(disabledClaim > 0 && outboundClaim > 0);
-  assert.match(workerSource, /this\.executionGate\.outboundEnabled\s*\? await this\.queue\.claimNext\(\)\s*:\s*await this\.queue\.claimNextAuthentication\(\)/);
+  assert.match(workerSource, /this\.executionGate\.outboundEnabled\s*\? await this\.queue\.claimNext\(\)\s*:\s*this\.acceptanceAuthorizationId\s*\? await this\.queue\.claimProductionAcceptance\(this\.acceptanceAuthorizationId\)\s*:\s*await this\.queue\.claimNextAuthentication\(\)/);
 });
 
 test('disabled path cannot construct task browser execution', () => {
@@ -44,9 +44,9 @@ test('heartbeat and registration remain outside the outbound gate', () => {
   assert.match(workerSource, /outbound_enabled: this\.executionGate\.outboundEnabled/);
 });
 
-test('certification and outbound action names receive no bypass', () => {
+test('historical certification and broad outbound names receive no bypass', () => {
   const claimBoundary = workerSource.slice(Math.min(disabledClaim, outboundClaim), Math.max(disabledClaim, outboundClaim) + 50);
-  assert.doesNotMatch(claimBoundary, /controlled_acceptance|pooya|tarun|vdiqfiuqckaxdjkadinu|connection_request|send_message|follow_up|accept_connection|book_meeting/i);
+  assert.doesNotMatch(claimBoundary, /controlled_acceptance|pooya|tarun|vdiqfiuqckaxdjkadinu|send_message|follow_up|accept_connection|book_meeting/i);
   assert.equal((workerSource.match(/queue\.claimNext\(\)/g) ?? []).length, 1);
 });
 

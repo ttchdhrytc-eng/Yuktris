@@ -18,6 +18,7 @@ import type { ElementHandle, Locator, Page } from 'playwright';
 import { isProcessUniqueWorkerId, runtimeWorkerId } from './worker-identity.js';
 import { TaskOwnershipLifecycle } from './task-ownership.js';
 import { LinkedInExecutionGate, resolveLinkedInExecutionGate } from './execution-mode.js';
+import { productionAcceptanceAuthorizationId } from './production-acceptance.js';
 
 const INTERACTIVE_AUTH_TIMEOUT_MS = interactiveAuthTimeoutMs();
 const TEST_CONNECTION_TIMEOUT = parseInt(process.env.TEST_CONNECTION_TIMEOUT_MS || '120000', 10);
@@ -36,6 +37,7 @@ export class Worker {
   private encryptionSecret: string;
   private credentialEncryptionSecret: string;
   private executionGate: LinkedInExecutionGate;
+  private acceptanceAuthorizationId: string | null;
   private queue: Queue;
   private linkedin: LinkedInBrowser;
   private linkedinContexts: LinkedInContextService;
@@ -98,6 +100,7 @@ export class Worker {
     if (!encKey) throw new Error('Missing LINKEDIN_SESSION_ENCRYPTION_KEY — generate with: openssl rand -base64 32');
 
     this.executionGate = resolveLinkedInExecutionGate(process.env.LINKEDIN_EXECUTION_MODE);
+    this.acceptanceAuthorizationId = productionAcceptanceAuthorizationId(process.env.LINKEDIN_PRODUCTION_ACCEPTANCE_AUTHORIZATION_ID);
     if (credentialKey && credentialKey.length < 32) throw new Error('Invalid LINKEDIN_CREDENTIAL_ENCRYPTION_KEY');
     this.client = createClient(supabaseUrl, serviceKey, {
       auth: {
@@ -162,6 +165,7 @@ export class Worker {
       INTERACTIVE_BROWSER_SESSION_TIMEOUT_MS,
       LINKEDIN_OUTBOUND_ENABLED: this.executionGate.outboundEnabled,
       LINKEDIN_EXECUTION_GATE_REASON: this.executionGate.reason,
+      LINKEDIN_PRODUCTION_ACCEPTANCE_ARMED: !!this.acceptanceAuthorizationId,
     });
 
     // Auto-detect browser provider (Fix 4): use Browserbase if configured, else local Chromium
@@ -376,7 +380,9 @@ export class Worker {
           });
         const item = this.executionGate.outboundEnabled
           ? await this.queue.claimNext()
-          : await this.queue.claimNextAuthentication();
+          : this.acceptanceAuthorizationId
+            ? await this.queue.claimProductionAcceptance(this.acceptanceAuthorizationId)
+            : await this.queue.claimNextAuthentication();
         if (item) {
           if (item.action_type === 'linkedin_connect')
             logger.info('LinkedIn queue orchestration timing', {
@@ -2492,7 +2498,15 @@ export class Worker {
           retry_allowed: resultCode === 'outcome_unknown' ? false : !interactionCrossed,
           error: result.error ?? null,
         };
-        await finalizeLinkedInWrite(this.client, writeAuditId, resultCode, positivelyVerifiedWrite, classification, outcomeEvidence);
+        await finalizeLinkedInWrite(
+          this.client,
+          writeAuditId,
+          resultCode,
+          positivelyVerifiedWrite,
+          classification,
+          outcomeEvidence,
+          typeof params.production_acceptance_authorization_id === 'string' ? params.production_acceptance_authorization_id : null,
+        );
         writeAuditId = null;
         if (classification === 'verification_required') {
           result = { success: false, error: 'LinkedIn verification required' };
@@ -2567,7 +2581,17 @@ export class Worker {
           interaction_stage: interactionStage,
           error: this.sanitizeError(err),
         };
-        await finalizeLinkedInWrite(this.client, writeAuditId, resultCode, false, classification, evidence).catch((finalizeError) => {
+        await finalizeLinkedInWrite(
+          this.client,
+          writeAuditId,
+          resultCode,
+          false,
+          classification,
+          evidence,
+          typeof item.action_params.production_acceptance_authorization_id === 'string'
+            ? item.action_params.production_acceptance_authorization_id
+            : null,
+        ).catch((finalizeError) => {
           logger.error('linkedin_write_audit_finalize_failed', {
             queue_item_id: item.id,
             error: this.sanitizeError(finalizeError),

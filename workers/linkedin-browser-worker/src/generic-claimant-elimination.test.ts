@@ -36,7 +36,7 @@ test('worker and child controller fail closed and inherit the exact claimant ide
 test('outbound work shares the guarded claimant while authentication has a restricted claimant',()=>{
   for(const action of ['check_connection_acceptance','connection_request','send_message','follow_up_message'])
     assert.match(worker,new RegExp(action));
-  assert.match(worker,/this\.executionGate\.outboundEnabled\s*\? await this\.queue\.claimNext\(\)\s*:\s*await this\.queue\.claimNextAuthentication\(\)/);
+  assert.match(worker,/this\.executionGate\.outboundEnabled\s*\? await this\.queue\.claimNext\(\)\s*:\s*this\.acceptanceAuthorizationId\s*\? await this\.queue\.claimProductionAcceptance\(this\.acceptanceAuthorizationId\)\s*:\s*await this\.queue\.claimNextAuthentication\(\)/);
   assert.match(queue,/item\.action_type !== 'linkedin_connect'/);
 });
 
