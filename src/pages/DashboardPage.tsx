@@ -4,7 +4,7 @@ import {
   Calendar, MessageSquare, Rocket,
   CheckCircle2, AlertTriangle, TrendingUp, Sparkles,
   ChevronRight, Users, Send, Target,
-  Linkedin, Mail, Hand, FileText, RefreshCw,
+  Linkedin, Hand, FileText, RefreshCw,
   Award, Clock3, BarChart3,
   Video, Activity,
 } from 'lucide-react';
@@ -17,11 +17,10 @@ import { supabase } from '@/lib/supabase';
 import { useWorkspace } from '@/contexts/WorkspaceContext';
 import { useAuth } from '@/contexts/AuthContext';
 import { timeAgo, formatNumber, cn } from '@/lib/utils';
-import { useGoogleConnection } from '@/hooks/useGoogleAuth';
 import { useLinkedInAccounts } from '@/hooks/useLinkedInBrowser';
-import { GOOGLE_SCOPES } from '@/types/google-auth';
 import { CAMPAIGN_STATUS_LABELS, type CampaignMetricSet } from '@/services/campaign-metrics';
 import { fetchCampaignMetrics } from '@/services/campaign-reporting';
+import { isLinkedInOutboundEnabled } from '@/lib/linkedinExecutionMode';
 
 type DateRange = 'today' | 'week' | 'month' | 'all';
 
@@ -29,8 +28,8 @@ export function DashboardPage() {
   const navigate = useNavigate();
   const { workspace } = useWorkspace();
   const { user } = useAuth();
-  const googleConnection = useGoogleConnection();
   const linkedinAccounts = useLinkedInAccounts();
+  const outboundEnabled = isLinkedInOutboundEnabled();
   const [range, setRange] = useState<DateRange>('week');
 
   const { data, isLoading, isError } = useQuery({
@@ -152,19 +151,9 @@ export function DashboardPage() {
   }
 
   const linkedinConnected = (linkedinAccounts.data ?? []).some(a => a.connection_state === 'connected' && ['healthy', 'degraded'].includes(a.health_status));
-  const googleScopes = new Set(googleConnection.data?.token?.scope?.split(' ').filter(Boolean) ?? []);
-  const googleReady = googleConnection.data?.account?.status === 'connected' && !googleConnection.data?.needsReconnect;
-  const gmailConnected = googleReady && googleScopes.has(GOOGLE_SCOPES.GMAIL_SEND);
-  const calendarConnected = googleReady && (googleScopes.has(GOOGLE_SCOPES.CALENDAR) || googleScopes.has(GOOGLE_SCOPES.CALENDAR_EVENTS));
 
   if (!linkedinConnected) {
     tasks.push({ icon: Linkedin, title: 'Reconnect LinkedIn', desc: 'Your LinkedIn account needs to be reconnected to continue outreach', tone: 'error', action: 'Reconnect', onClick: () => navigate('/app/integrations') });
-  }
-  if (!gmailConnected) {
-    tasks.push({ icon: Mail, title: 'Reconnect Gmail', desc: 'Your Gmail account needs to be reconnected to send emails', tone: 'error', action: 'Reconnect', onClick: () => navigate('/app/integrations') });
-  }
-  if (!calendarConnected) {
-    tasks.push({ icon: Calendar, title: 'Connect Calendar', desc: 'Connect your calendar so your AI can book meetings automatically', tone: 'brand', action: 'Connect', onClick: () => navigate('/app/integrations') });
   }
   if (d.campaigns.length === 0) {
     tasks.push({ icon: Rocket, title: 'Launch Your First Campaign', desc: 'Your AI sales team is ready. Launch a campaign to start finding prospects.', tone: 'brand', action: 'Launch', onClick: () => navigate('/app/campaigns') });
@@ -177,7 +166,11 @@ export function DashboardPage() {
         <div>
           <h1 className="text-2xl font-bold text-ink-50 tracking-tight">Good {greeting()}, {firstName}.</h1>
           <p className="text-sm text-ink-400 mt-1.5">
-            {d.activeCampaignCount > 0 ? 'Your campaigns are running. Here\'s what\'s happening.' : 'Welcome to Revenue AI. Launch a campaign to get started.'}
+            {!outboundEnabled && d.campaigns.length > 0
+              ? 'LinkedIn outbound is disabled. Your campaign configuration remains saved.'
+              : d.activeCampaignCount > 0
+                ? 'Your campaigns are running. Here\'s what\'s happening.'
+                : 'Welcome to Revenue AI. Launch a campaign to get started.'}
           </p>
         </div>
         <div className="flex items-center gap-2 shrink-0">

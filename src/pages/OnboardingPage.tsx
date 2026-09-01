@@ -919,8 +919,6 @@ export function OnboardingPage() {
                   <PlanRow label="Channel" value="LinkedIn" />
                   <PlanRow label="Connections" value={[
                     linkedinConnected ? 'LinkedIn' : null,
-                    gmailConnected ? 'Gmail' : null,
-                    calendarConnected ? 'Calendar' : null,
                   ].filter(Boolean).join(', ') || 'None connected'} />
                 </div>
 

@@ -10,11 +10,10 @@ import { PageHeader } from '@/components/ui/PageHeader';
 import { Spinner } from '@/components/ui/Spinner';
 import { useWorkspace } from '@/contexts/WorkspaceContext';
 import { useAuth } from '@/contexts/AuthContext';
-import { useGoogleConnection } from '@/hooks/useGoogleAuth';
 import { useICP } from '@/hooks/useICPIntelligence';
 import { useLinkedInAccounts } from '@/hooks/useLinkedInBrowser';
 import { supabase } from '@/lib/supabase';
-import { GOOGLE_SCOPES } from '@/types/google-auth';
+import { isLinkedInOutboundEnabled } from '@/lib/linkedinExecutionMode';
 import type { FullICP } from '@/types/icp-intelligence';
 import { fetchCampaignMetrics } from '@/services/campaign-reporting';
 import { fetchCampaignProspects } from '@/services/campaign-prospects';
@@ -43,7 +42,6 @@ export function CampaignsPage() {
   const { user } = useAuth();
   const icps = useICP();
   const accounts = useLinkedInAccounts();
-  const google = useGoogleConnection();
   const queryClient = useQueryClient();
   const [step, setStep] = useState(0);
   const [name, setName] = useState('');
@@ -73,8 +71,7 @@ export function CampaignsPage() {
   const connectedAccounts = (accounts.data ?? []).filter((a) => a.connection_state === 'connected' && ['healthy', 'degraded'].includes(a.health_status) && a.profile_url);
   const selectedIcp = (icps.data ?? []).find((i) => i.id === icpId);
   const selectedAccount = connectedAccounts.find((a) => a.id === accountId);
-  const scopes = new Set(google.data?.token?.scope?.split(' ').filter(Boolean) ?? []);
-  const calendarConnected = google.data?.account?.status === 'connected' && !google.data.needsReconnect && (scopes.has(GOOGLE_SCOPES.CALENDAR) || scopes.has(GOOGLE_SCOPES.CALENDAR_EVENTS));
+  const outboundEnabled = isLinkedInOutboundEnabled();
   const scheduleValid = days.length > 0 && startTime < endTime && isIanaTimezone(outreachTimezone);
   const canContinue = [name.trim().length > 1, !!selectedIcp, !!selectedAccount, strategy.trim().length > 20, dailyLimit >= 1 && dailyLimit <= 20 && scheduleValid, true][step];
   const nextWindow = useMemo(() => nextCampaignSendingWindow(days, startTime, endTime, outreachTimezone), [days, startTime, endTime, outreachTimezone]);
@@ -142,6 +139,10 @@ export function CampaignsPage() {
 
   const payload = useMemo(() => (selectedIcp ? mapIcp(selectedIcp) : null), [selectedIcp]);
   async function launch() {
+    if (!outboundEnabled) {
+      toast.info('LinkedIn outbound is globally disabled. Campaign configuration remains saved.');
+      return;
+    }
     if (!workspace || !payload || !selectedAccount) return;
     setLaunching(true);
     try {
@@ -201,6 +202,10 @@ export function CampaignsPage() {
 
   async function changeCampaignPause(campaignId: string, paused: boolean) {
     if (!workspace) return;
+    if (!outboundEnabled && !paused) {
+      toast.info('LinkedIn outbound is globally disabled. The saved campaign remains ready.');
+      return;
+    }
     try {
       const { data, error } = await supabase.functions.invoke('linkedin-v1-pipeline', { body: { action: paused ? 'pause_campaign' : 'resume_campaign', workspace_id: workspace.id, campaign_id: campaignId } });
       if (error) throw new Error(await edgeFunctionError(error));
@@ -261,7 +266,7 @@ export function CampaignsPage() {
     }
   }
 
-  const initialBootstrapLoading = (icps.isLoading && !icps.data) || (accounts.isLoading && !accounts.data) || (google.isLoading && !google.data);
+  const initialBootstrapLoading = (icps.isLoading && !icps.data) || (accounts.isLoading && !accounts.data);
   if (initialBootstrapLoading)
     return (
       <div className="flex justify-center py-24">
@@ -341,12 +346,7 @@ export function CampaignsPage() {
               <Review label="Sending schedule" value={`${dailyLimit}/day · ${days.map((d) => SENDING_DAYS.find(([value]) => value === d)?.[1]).join(', ')} · ${startTime}–${endTime} · ${outreachTimezone}`} />
               <Review label="Next outreach window" value={nextWindow ? formatCampaignWindow(nextWindow.toISOString(), outreachTimezone) : 'Invalid schedule'} />
             </div>
-            <div className="flex items-center gap-2">
-              <Badge tone={calendarConnected ? 'success' : 'neutral'} dot>
-                {calendarConnected ? 'Calendar connected' : 'Calendar optional'}
-              </Badge>
-            </div>
-            {!calendarConnected && <p className="text-sm text-ink-500">LinkedIn outreach can launch now. Connect Calendar before enabling automatic meeting booking.</p>}
+            {!outboundEnabled && <p className="rounded-lg border border-warning-500/20 bg-warning-500/5 p-3 text-sm text-warning-300">LinkedIn outbound is globally disabled. Your campaign will be saved without executing outreach.</p>}
           </div>
         )}
         <div className="mt-8 flex justify-between">
@@ -360,7 +360,7 @@ export function CampaignsPage() {
               <ChevronRight className="h-4 w-4" />
             </Button>
           ) : (
-            <Button loading={launching} onClick={launch}>
+            <Button loading={launching} disabled={!outboundEnabled} onClick={launch}>
               <Rocket className="h-4 w-4" />
               Launch Campaign
             </Button>
@@ -380,7 +380,7 @@ export function CampaignsPage() {
               const [campaignStart, campaignEnd] = parseCampaignHours(c.operating_hours);
               const campaignTimezone = normalizeIanaTimezone(String(c.outreach_timezone ?? 'UTC'));
               const campaignNextWindow = nextCampaignSendingWindow(campaignDays, campaignStart, campaignEnd, campaignTimezone);
-              const derivedStatus = c.status === 'paused' ? 'Paused' : ['failed', 'action_required', 'blocked_prerequisite'].includes(String(c.status)) ? 'Needs Attention' : campaignNextWindow && campaignNextWindow.getTime() > Date.now() + 5000 ? 'Waiting for sending window' : 'Running';
+              const derivedStatus = !outboundEnabled ? 'Outbound Disabled' : c.status === 'ready' ? 'Ready' : c.status === 'paused' ? 'Paused' : ['failed', 'action_required', 'blocked_prerequisite'].includes(String(c.status)) ? 'Needs Attention' : campaignNextWindow && campaignNextWindow.getTime() > Date.now() + 5000 ? 'Waiting for sending window' : 'Running';
               return (
                 <Card key={id} className="p-4">
                   <div className="flex items-start justify-between gap-3">
@@ -394,7 +394,7 @@ export function CampaignsPage() {
                         {expandedCampaign === id ? 'Hide prospects' : 'View prospects'}
                       </Button>
                       <Button type="button" variant="ghost" size="sm" onClick={() => setScheduleDraft({ campaignId: id, days: [...campaignDays], start: campaignStart, end: campaignEnd, timezone: campaignTimezone })}>Schedule / Edit</Button>
-                      {c.status === 'paused' ? <Button variant="ghost" size="sm" onClick={() => void changeCampaignPause(id, false)}><Play className="h-4 w-4" />Resume</Button> : !['failed', 'completed'].includes(String(c.status)) ? <Button variant="ghost" size="sm" onClick={() => void changeCampaignPause(id, true)}><Pause className="h-4 w-4" />Pause</Button> : null}
+                      {outboundEnabled && (c.status === 'paused' ? <Button variant="ghost" size="sm" onClick={() => void changeCampaignPause(id, false)}><Play className="h-4 w-4" />Resume</Button> : !['failed', 'completed', 'ready'].includes(String(c.status)) ? <Button variant="ghost" size="sm" onClick={() => void changeCampaignPause(id, true)}><Pause className="h-4 w-4" />Pause</Button> : null)}
                       <Badge tone={derivedStatus === 'Running' ? 'success' : derivedStatus === 'Needs Attention' ? 'warning' : 'neutral'} dot>
                         {derivedStatus}
                       </Badge>
