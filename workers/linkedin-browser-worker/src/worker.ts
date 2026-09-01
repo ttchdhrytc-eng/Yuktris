@@ -17,6 +17,7 @@ import { failureOutcomeForStage, type WriteInteractionStage } from './write-inte
 import type { ElementHandle, Locator, Page } from 'playwright';
 import { isProcessUniqueWorkerId, runtimeWorkerId } from './worker-identity.js';
 import { TaskOwnershipLifecycle } from './task-ownership.js';
+import { LinkedInExecutionGate, resolveLinkedInExecutionGate } from './execution-mode.js';
 
 const INTERACTIVE_AUTH_TIMEOUT_MS = interactiveAuthTimeoutMs();
 const TEST_CONNECTION_TIMEOUT = parseInt(process.env.TEST_CONNECTION_TIMEOUT_MS || '120000', 10);
@@ -34,6 +35,7 @@ export class Worker {
   private region: string;
   private encryptionSecret: string;
   private credentialEncryptionSecret: string;
+  private executionGate: LinkedInExecutionGate;
   private queue: Queue;
   private linkedin: LinkedInBrowser;
   private linkedinContexts: LinkedInContextService;
@@ -95,8 +97,7 @@ export class Worker {
     if (!supabaseUrl || !serviceKey) throw new Error('Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY');
     if (!encKey) throw new Error('Missing LINKEDIN_SESSION_ENCRYPTION_KEY — generate with: openssl rand -base64 32');
 
-    const executionMode = process.env.LINKEDIN_EXECUTION_MODE || 'cloud_persistent_agent';
-    if (executionMode !== 'cloud_persistent_agent') throw new Error('LINKEDIN_EXECUTION_MODE must be cloud_persistent_agent');
+    this.executionGate = resolveLinkedInExecutionGate(process.env.LINKEDIN_EXECUTION_MODE);
     if (credentialKey && credentialKey.length < 32) throw new Error('Invalid LINKEDIN_CREDENTIAL_ENCRYPTION_KEY');
     this.client = createClient(supabaseUrl, serviceKey, {
       auth: {
@@ -125,15 +126,17 @@ export class Worker {
 
   getHealth(): {
     workerId: string;
-    browserbase: boolean;
-    running: boolean;
-    currentTask: string | null;
+      browserbase: boolean;
+      running: boolean;
+      currentTask: string | null;
+      outboundEnabled: boolean;
   } {
     return {
       workerId: this.workerId,
       browserbase: browserbase.isConfigured(),
       running: this.running,
       currentTask: this.currentTaskId,
+      outboundEnabled: this.executionGate.outboundEnabled,
     };
   }
 
@@ -157,6 +160,8 @@ export class Worker {
       HEARTBEAT_INTERVAL: HEARTBEAT_INTERVAL,
       INTERACTIVE_AUTH_TIMEOUT_MS,
       INTERACTIVE_BROWSER_SESSION_TIMEOUT_MS,
+      LINKEDIN_OUTBOUND_ENABLED: this.executionGate.outboundEnabled,
+      LINKEDIN_EXECUTION_GATE_REASON: this.executionGate.reason,
     });
 
     // Auto-detect browser provider (Fix 4): use Browserbase if configured, else local Chromium
@@ -250,6 +255,7 @@ export class Worker {
       worker_region: this.region,
       browser_provider: browserbase.isConfigured() ? 'browserbase' : 'local-chromium',
       capabilities: ['linkedin_connect', 'linkedin_test_connection', 'linkedin_action'],
+      outbound_enabled: this.executionGate.outboundEnabled,
     };
 
     const { error } = await this.client.rpc('register_browser_worker', {
@@ -297,6 +303,7 @@ export class Worker {
           last_heartbeat: now,
           current_task: this.currentTaskId,
           browser_provider: browserbase.isConfigured() ? 'browserbase' : 'local-chromium',
+          outbound_enabled: this.executionGate.outboundEnabled,
         },
       });
     } catch (err) {
@@ -353,6 +360,15 @@ export class Worker {
               error: this.sanitizeError(error),
             });
           });
+        }
+        if (!this.executionGate.outboundEnabled) {
+          if (pollCount === 1 || pollCount % 20 === 0)
+            logger.info('Global LinkedIn outbound gate disabled; queue work remains unclaimed', {
+              worker_id: this.workerId,
+              reason: this.executionGate.reason,
+            });
+          await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL));
+          continue;
         }
         logger.info(`Poll #${pollCount}: calling claimNext()`, {
           worker_id: this.workerId,
