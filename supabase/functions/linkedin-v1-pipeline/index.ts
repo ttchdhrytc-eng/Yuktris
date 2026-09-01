@@ -142,51 +142,6 @@ Deno.serve(async (req: Request) => {
       });
     }
 
-    if (action === "discover_and_map_pilot_prospects") {
-      if (!internalService) throw pipelineError("service_role_required", "Pilot discovery is an internal staging operation", 403);
-      if (!Deno.env.get("SUPABASE_URL")?.includes("vdiqfiuqckaxdjkadinu")) throw pipelineError("staging_only", "Pilot discovery is disabled outside staging", 403);
-      const campaignId = requireString(body.campaign_id, "campaign_id");
-      const maxProspects = clampNumber(body.max_prospects, 2, 12, 8);
-      const { data: campaign, error: campaignError } = await admin.from("customer_campaigns")
-        .select("id,icp").eq("id", campaignId).eq("workspace_id", workspaceId).maybeSingle();
-      if (campaignError || !campaign) throw pipelineError("campaign_not_found", "Campaign was not found in this workspace", 404);
-      const icp = (campaign.icp ?? {}) as ICP;
-      if (!icp.name?.trim() || !icp.industry?.trim() || !icp.companySize?.trim() || !icp.jobTitles?.length) {
-        throw pipelineError("meaningful_icp_required", "Campaign discovery requires a complete configured ICP", 409);
-      }
-      const prospects = await discoverVerifiedProspects(icp, maxProspects);
-      const mapped: Json[] = [];
-      for (const prospect of prospects) {
-        const normalized = normalizeLinkedInProfile(prospect.linkedinUrl);
-        if (!normalized) continue;
-        const { data: existingContact } = await admin.from("contacts").select("id")
-          .eq("workspace_id", workspaceId).eq("normalized_linkedin_url", normalized).maybeSingle();
-        if (existingContact) {
-          const { data: existingMapping } = await admin.from("customer_campaign_contacts").select("id")
-            .eq("workspace_id", workspaceId).eq("customer_campaign_id", campaignId)
-            .eq("contact_id", existingContact.id).maybeSingle();
-          if (existingMapping) continue;
-        }
-        const company = await findOrCreateCompany(admin, workspaceId, prospect);
-        const contact = await findOrCreateContact(admin, workspaceId, company.id, { ...prospect, linkedinUrl: normalized });
-        const { data: mapping, error: mappingError } = await admin.from("customer_campaign_contacts").insert({
-          workspace_id: workspaceId, customer_campaign_id: campaignId, contact_id: contact.id,
-          source: "campaign_discovery", discovered_at: new Date().toISOString(),
-        }).select("id").single();
-        if (mappingError) throw pipelineError("campaign_association_failed", mappingError.message, 409);
-        mapped.push({
-          name: `${prospect.contactFirstName} ${prospect.contactLastName}`, company: prospect.companyName,
-          title: prospect.contactTitle, linkedin_url: normalized, evidence: prospect.evidence.slice(0, 600),
-          confidence_score: prospect.confidenceScore, contact_id: contact.id, mapping_id: mapping.id,
-        });
-      }
-      return json({
-        status: "mapped", campaign_id: campaignId, prospects_discovered: prospects.length,
-        prospects_mapped: mapped.length, prospects: mapped, execution_jobs_created: 0,
-        sequences_created: 0, browser_queues_created: 0, write_performed: false,
-      });
-    }
-
     if (action === "initialize") {
       const icp = (body.icp ?? {}) as ICP;
       const selectedAccountId = optionalString(body.linkedin_account_id);
@@ -239,20 +194,6 @@ Deno.serve(async (req: Request) => {
         missing_requirements: [...new Set(missing)],
         message,
       });
-    }
-
-    if (action === "check_acceptance_eligibility") {
-      const campaignId = requireString(body.campaign_id, "campaign_id");
-      const contactId = requireString(body.contact_id, "contact_id");
-      const { data: campaign } = await admin.from("customer_campaigns").select("linkedin_account_id").eq("id", campaignId).eq("workspace_id", workspaceId).maybeSingle();
-      const { data: contact } = await admin.from("contacts").select("linkedin_url").eq("id", contactId).eq("workspace_id", workspaceId).maybeSingle();
-      const target = contact?.linkedin_url ? normalizeLinkedInProfile(contact.linkedin_url) : null;
-      let eligible = false;
-      if (campaign && target) {
-        const { data: allowed } = await admin.from("linkedin_safe_write_targets").select("id").eq("workspace_id", workspaceId).eq("linkedin_account_id", campaign.linkedin_account_id).eq("project_ref", "vdiqfiuqckaxdjkadinu").eq("target_identifier", target).eq("enabled", true).contains("allowed_action_types", ["connection_request"]).maybeSingle();
-        eligible = Boolean(allowed);
-      }
-      return json({ eligible, normalized_linkedin_url: target });
     }
 
     if (action === "schedule_preview") {
@@ -321,120 +262,6 @@ Deno.serve(async (req: Request) => {
       }, { onConflict: "customer_campaign_id,prospect_id" });
       if (mappingError) throw pipelineError("campaign_association_failed", mappingError.message, 409);
       return json({ status: "associated", campaign_id: campaignId, prospect_id: prospect.id, contact_id: contactId, job_created: false, write_performed: false });
-    }
-
-    if (action === "start_controlled_acceptance_generation") {
-      if (internalService || !userId) throw pipelineError("controlled_acceptance_human_initiation_required", "A signed-in staging administrator must explicitly start a generation", 403);
-      if (!Deno.env.get("SUPABASE_URL")?.includes("vdiqfiuqckaxdjkadinu")) throw pipelineError("staging_only", "Controlled acceptance generations are disabled outside staging", 403);
-      const campaignId = requireString(body.campaign_id, "campaign_id");
-      const contactId = requireString(body.contact_id, "contact_id");
-      const { data: campaign } = await admin.from("customer_campaigns").select("linkedin_account_id").eq("id", campaignId).eq("workspace_id", workspaceId).maybeSingle();
-      const { data: contact } = await admin.from("contacts").select("linkedin_url").eq("id", contactId).eq("workspace_id", workspaceId).maybeSingle();
-      if (!campaign?.linkedin_account_id || !contact?.linkedin_url) throw pipelineError("controlled_acceptance_scope_mismatch", "Campaign, account, and prospect must be associated", 409);
-      const target = normalizeLinkedInProfile(contact.linkedin_url);
-      const { data, error } = await admin.rpc("start_controlled_acceptance_generation", {
-        p_workspace_id: workspaceId, p_account_id: campaign.linkedin_account_id, p_campaign_id: campaignId,
-        p_contact_id: contactId, p_target: target, p_created_by: userId,
-      });
-      if (error) throw pipelineError("controlled_acceptance_generation_rejected", error.message, 409);
-      return json(data as Json);
-    }
-
-    if (action === "advance_controlled_acceptance_generation") {
-      if (internalService || !userId) throw pipelineError("controlled_acceptance_human_initiation_required", "A signed-in staging administrator must explicitly continue a generation", 403);
-      if (!Deno.env.get("SUPABASE_URL")?.includes("vdiqfiuqckaxdjkadinu")) throw pipelineError("staging_only", "Controlled acceptance generations are disabled outside staging", 403);
-      const generationId = requireString(body.generation_id, "generation_id");
-      const { data: member } = await admin.from("workspace_members").select("role,status").eq("workspace_id", workspaceId).eq("user_id", userId).maybeSingle();
-      if (!member || member.status !== "active" || !["owner", "admin"].includes(member.role)) throw pipelineError("controlled_acceptance_admin_required", "Only an active staging owner or administrator may continue a generation", 403);
-      const { data: generation } = await admin.from("controlled_acceptance_generations")
-        .select("id,workspace_id,campaign_id,contact_id,linkedin_account_id,target_identifier,status,relationship_queue_id,write_job_id")
-        .eq("id", generationId).eq("workspace_id", workspaceId).maybeSingle();
-      if (!generation) throw pipelineError("controlled_acceptance_generation_not_found", "Generation was not found in this workspace", 404);
-      if (generation.status !== "relationship_check_pending") {
-        return json({ generation_id: generation.id, status: generation.status, write_job_id: generation.write_job_id, reused: true, write_performed: false });
-      }
-      const [{ data: campaign }, { data: contact }, { data: association }, { data: account }, { data: probe }] = await Promise.all([
-        admin.from("customer_campaigns").select("id,linkedin_account_id").eq("id", generation.campaign_id).eq("workspace_id", workspaceId).maybeSingle(),
-        admin.from("contacts").select("id,linkedin_url").eq("id", generation.contact_id).eq("workspace_id", workspaceId).maybeSingle(),
-        admin.from("customer_campaign_contacts").select("id").eq("customer_campaign_id", generation.campaign_id).eq("contact_id", generation.contact_id).eq("workspace_id", workspaceId).maybeSingle(),
-        admin.from("linkedin_accounts").select("id,profile_url,expected_profile_url").eq("id", generation.linkedin_account_id).eq("workspace_id", workspaceId).maybeSingle(),
-        admin.from("browser_execution_queue").select("id,status,result").eq("id", generation.relationship_queue_id).eq("workspace_id", workspaceId).maybeSingle(),
-      ]);
-      const exactTarget = "https://www.linkedin.com/in/tarun-chaudhary";
-      const exactSender = "https://www.linkedin.com/in/tarun-chaudhary06";
-      const canonicalContact = contact?.linkedin_url ? normalizeLinkedInProfile(contact.linkedin_url) : null;
-      if (!campaign || campaign.linkedin_account_id !== generation.linkedin_account_id || !contact || !association || canonicalContact !== exactTarget || normalizeLinkedInProfile(generation.target_identifier) !== exactTarget) {
-        throw pipelineError("controlled_acceptance_scope_mismatch", "Generation campaign, account, canonical contact, and exact target must remain associated", 409);
-      }
-      if (!account || normalizeLinkedInProfile(account.profile_url) !== exactSender || normalizeLinkedInProfile(account.expected_profile_url) !== exactSender) {
-        throw pipelineError("controlled_acceptance_sender_mismatch", "The expected authenticated staging sender is not bound to this generation", 409);
-      }
-      if (!probe || probe.status !== "completed" || probe.result?.result_code !== "success" || probe.result?.relationship_classification !== "eligible_for_connection_request" || probe.result?.connect_available !== true) {
-        throw pipelineError("controlled_acceptance_probe_not_eligible", "The persisted read-only relationship probe is not completed and eligible", 409);
-      }
-      const { data: allowed } = await admin.from("linkedin_safe_write_targets").select("id")
-        .eq("workspace_id", workspaceId).eq("linkedin_account_id", generation.linkedin_account_id)
-        .eq("project_ref", "vdiqfiuqckaxdjkadinu").eq("target_identifier", exactTarget).eq("enabled", true)
-        .contains("allowed_action_types", ["connection_request"]).maybeSingle();
-      if (!allowed) throw pipelineError("unsafe_target", "The exact staging target is not currently allowlisted for one connection request", 409);
-      const { data: windowValidation, error: windowError } = await admin.rpc("campaign_window_validation", { p_campaign_id: generation.campaign_id, p_not_before: new Date().toISOString() });
-      if (windowError || !windowValidation?.valid) throw pipelineError("invalid_campaign_schedule", "The campaign does not have a valid customer sending window", 409);
-      const { data, error } = await admin.rpc("advance_controlled_acceptance_generation", { p_generation_id: generationId, p_actor: userId });
-      if (error) throw pipelineError("controlled_acceptance_generation_rejected", error.message, 409);
-      return json(data as Json);
-    }
-
-    if (action === "prepare_controlled_acceptance") {
-      if (internalService || !userId) throw pipelineError("controlled_acceptance_human_initiation_required", "A signed-in workspace member must explicitly initiate this attempt", 403);
-      const campaignId = requireString(body.campaign_id, "campaign_id");
-      const contactId = requireString(body.contact_id, "contact_id");
-      const { data: campaign, error: campaignError } = await admin.from("customer_campaigns").select("id,linkedin_account_id,outreach_timezone,operating_days,operating_hours").eq("id", campaignId).eq("workspace_id", workspaceId).maybeSingle();
-      if (campaignError || !campaign) throw pipelineError("campaign_not_found", "Campaign was not found in this workspace", 404);
-      if (!campaign.outreach_timezone) throw pipelineError("outreach_timezone_required", "Configure outreach timezone before preparing acceptance", 409);
-      const { data: contact, error: contactError } = await admin.from("contacts").select("id,company_id,linkedin_url").eq("id", contactId).eq("workspace_id", workspaceId).maybeSingle();
-      if (contactError || !contact?.linkedin_url) throw pipelineError("acceptance_contact_required", "Select a workspace prospect with a LinkedIn profile", 409);
-      const { data: association } = await admin.from("customer_campaign_contacts").select("id").eq("customer_campaign_id", campaignId).eq("contact_id", contactId).eq("workspace_id", workspaceId).maybeSingle();
-      if (!association) throw pipelineError("campaign_prospect_required", "Associate this workspace prospect with the campaign before preparing acceptance", 409);
-      const target = normalizeLinkedInProfile(contact.linkedin_url);
-      const { data: allowed } = await admin.from("linkedin_safe_write_targets").select("id").eq("workspace_id", workspaceId).eq("linkedin_account_id", campaign.linkedin_account_id).eq("project_ref", "vdiqfiuqckaxdjkadinu").eq("target_identifier", target).eq("enabled", true).contains("allowed_action_types", ["connection_request"]).maybeSingle();
-      if (!allowed) throw pipelineError("unsafe_target", "The selected prospect is not authorized for the staging acceptance write", 409);
-      const { data: eligibility, error: eligibilityError } = await admin.rpc("controlled_acceptance_eligibility", { p_workspace_id: workspaceId });
-      if (eligibilityError) throw pipelineError("acceptance_eligibility_failed", "Controlled acceptance eligibility could not be verified", 500);
-      if (!eligibility?.eligible) throw pipelineError(String(eligibility?.code ?? "controlled_acceptance_ineligible"), "This workspace is not eligible for another controlled acceptance attempt", 409);
-      const { data: windowValidation, error: windowError } = await admin.rpc("campaign_window_validation", { p_campaign_id: campaignId, p_not_before: new Date().toISOString() });
-      if (windowError || !windowValidation?.valid) throw pipelineError("invalid_campaign_schedule", "Choose at least one sending day, valid hours, and an IANA timezone", 409);
-      const scheduledAt = windowValidation.scheduled_at;
-      const { data: job, error: jobError } = await admin
-        .from("linkedin_execution_jobs")
-        .insert({
-          workspace_id: workspaceId,
-          linkedin_account_id: campaign.linkedin_account_id,
-          company_id: contact.company_id,
-          contact_id: contact.id,
-          action_type: "connection_request",
-          status: "scheduled",
-          scheduled_at: scheduledAt,
-          priority: 1,
-          sequence_step: -1,
-          action_payload: {
-            source_campaign_id: campaignId,
-            profile_url: target,
-            acceptance_test_mode: true,
-            human_initiated: true,
-            human_initiated_by: userId,
-          },
-        })
-        .select("id,status,scheduled_at")
-        .single();
-      if (jobError) throw pipelineError("acceptance_preparation_failed", `Controlled acceptance could not be prepared: ${jobError.message}`, 500);
-      return json({
-        status: "prepared",
-        job_id: job.id,
-        job_status: job.status,
-        scheduled_at: job.scheduled_at,
-        exactly_one_write_cap: true,
-        write_performed: false,
-      });
     }
 
     if (action === "launch") {

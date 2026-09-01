@@ -220,17 +220,17 @@ test('V1 discovery requires company and role evidence and reports bridge failure
 });
 test('V1 discovery preview is explicitly non-persistent and creates no execution jobs', () => {
   const previewStart = linkedinV1Pipeline.indexOf('if (action === "preview_discovery")');
-  const pilotDiscoveryStart = linkedinV1Pipeline.indexOf('if (action === "discover_and_map_pilot_prospects")');
-  const preview = linkedinV1Pipeline.slice(previewStart, pilotDiscoveryStart);
-  assert.ok(previewStart > 0 && previewStart < pilotDiscoveryStart);
+  const initializeStart = linkedinV1Pipeline.indexOf('if (action === "initialize")');
+  const preview = linkedinV1Pipeline.slice(previewStart, initializeStart);
+  assert.ok(previewStart > 0 && previewStart < initializeStart);
   assert.match(preview, /persisted: false/);
   assert.match(preview, /execution_jobs_created: 0/);
   assert.doesNotMatch(preview, /\.insert\(|\.update\(|\.from\("linkedin_execution_jobs"\)/);
 });
 test('onboarding initialization persists configuration without discovery or execution jobs', () => {
   const initializeStart = linkedinV1Pipeline.indexOf('if (action === "initialize")');
-  const launchStart = linkedinV1Pipeline.indexOf('if (action === "prepare_controlled_acceptance")');
-  const initialize = linkedinV1Pipeline.slice(initializeStart, launchStart);
+  const schedulePreviewStart = linkedinV1Pipeline.indexOf('if (action === "schedule_preview")');
+  const initialize = linkedinV1Pipeline.slice(initializeStart, schedulePreviewStart);
   assert.match(initialize, /blocked_prerequisite/);
   assert.match(initialize, /missing_requirements/);
   assert.doesNotMatch(initialize, /discoverVerifiedProspects|linkedin_execution_jobs|linkedin-job-runner/);
