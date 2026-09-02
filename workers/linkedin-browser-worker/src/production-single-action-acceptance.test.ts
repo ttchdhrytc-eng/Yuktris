@@ -7,6 +7,7 @@ import { productionAcceptanceAuthorizationId } from './production-acceptance.js'
 const root = resolve(process.cwd(), '../..');
 const migration = readFileSync(resolve(root, 'supabase/migrations/20260901170000_production_single_action_acceptance_gate.sql'), 'utf8');
 const targetOnce = readFileSync(resolve(root, 'supabase/migrations/20260901171000_production_acceptance_target_once.sql'), 'utf8');
+const expectedName = readFileSync(resolve(root, 'supabase/migrations/20260902090000_production_acceptance_expected_display_name.sql'), 'utf8');
 const worker = readFileSync(resolve(root, 'workers/linkedin-browser-worker/src/worker.ts'), 'utf8');
 const queue = readFileSync(resolve(root, 'workers/linkedin-browser-worker/src/queue.ts'), 'utf8');
 const safety = readFileSync(resolve(root, 'workers/linkedin-browser-worker/src/linkedin-execution-safety.ts'), 'utf8');
@@ -52,4 +53,29 @@ test('normal preflight remains separate and acceptance finalization reuses ambig
   assert.match(safety, /finalize_production_linkedin_acceptance_write/);
   assert.match(migration, /PERFORM public\.finalize_linkedin_write_outcome/);
   assert.match(migration, /'outcome_unknown'[\s\S]*interaction_crossed/);
+});
+
+test('production acceptance binds and verifies expected display name before Connect', () => {
+  assert.match(expectedName, /ADD COLUMN expected_display_name text/);
+  assert.match(expectedName, /expected_display_name_required/);
+  assert.match(expectedName, /'expected_display_name',a\.expected_display_name/);
+  assert.match(expectedName, /action_params->>'expected_display_name'\) IS NOT DISTINCT FROM a\.expected_display_name/);
+  const identityCheck = worker.indexOf('verifyLinkedInDisplayName(params.expected_display_name, displayedName)');
+  const connectClick = worker.indexOf('await connectBtn.click()');
+  assert.ok(identityCheck >= 0 && connectClick > identityCheck, 'identity validation must precede Connect');
+  assert.match(worker, /displayedNameCandidates\.length === 1/);
+  assert.match(worker, /result_code: 'target_identity_denied'[\s\S]*retry_allowed: false[\s\S]*interaction_crossed: false/);
+});
+
+test('canonical URL and displayed identity are independent mandatory checks', () => {
+  assert.match(worker, /presentedTarget !== authorizedTarget/);
+  assert.match(worker, /verifyLinkedInDisplayName\(params\.expected_display_name, displayedName\)/);
+});
+
+test('terminal identity denial cannot create retry or replacement work', () => {
+  assert.match(expectedName, /max_retries,\s*max_infrastructure_retries[\s\S]*'pending',0,0/);
+  assert.doesNotMatch(expectedName, /retry_count\s*=|INSERT[\s\S]*replacement/i);
+  assert.match(worker, /target_identity_denied[\s\S]*retry_allowed: false/);
+  assert.match(worker, /retryAllowed = !interactionCrossed && result\.data\?\.retry_allowed !== false/);
+  assert.match(worker, /this\.queue\.fail\([\s\S]*retryAllowed, outcome\)/);
 });

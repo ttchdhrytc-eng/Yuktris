@@ -19,6 +19,7 @@ import { isProcessUniqueWorkerId, runtimeWorkerId } from './worker-identity.js';
 import { TaskOwnershipLifecycle } from './task-ownership.js';
 import { LinkedInExecutionGate, resolveLinkedInExecutionGate } from './execution-mode.js';
 import { productionAcceptanceAuthorizationId } from './production-acceptance.js';
+import { verifyLinkedInDisplayName } from './linkedin-profile-identity.js';
 
 const INTERACTIVE_AUTH_TIMEOUT_MS = interactiveAuthTimeoutMs();
 const TEST_CONNECTION_TIMEOUT = parseInt(process.env.TEST_CONNECTION_TIMEOUT_MS || '120000', 10);
@@ -1925,6 +1926,9 @@ export class Worker {
         case 'connection_request': {
           const url = params.profile_url as string;
           const note = params.note as string | undefined;
+          const productionAcceptanceId = typeof params.production_acceptance_authorization_id === 'string'
+            ? params.production_acceptance_authorization_id
+            : null;
           if (!url) throw new Error('profile_url required');
           const readiness = await waitForLinkedInProfileReady(page, url);
           if (!readiness.ready || !readiness.targetMatched) {
@@ -1940,7 +1944,41 @@ export class Worker {
             };
             break;
           }
-          await recordWriteStage('profile_verified', false, { authorized_target: authorizedTarget, presented_target: presentedTarget });
+          let verifiedDisplayName: string | null = null;
+          if (productionAcceptanceId) {
+            const displayedNameCandidates = await page.locator(
+              'main h1, .pv-text-details__left-panel h1, [data-view-name*="profile-top"] h1, .scaffold-layout__main h1',
+            ).evaluateAll((elements) => Array.from(new Set(elements.filter((element) => {
+              const node = element as HTMLElement;
+              const rect = node.getBoundingClientRect();
+              const style = getComputedStyle(node);
+              return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
+            }).map((element) => element.textContent?.replace(/\s+/g, ' ').trim()).filter((value): value is string => !!value))));
+            const displayedName = displayedNameCandidates.length === 1 ? displayedNameCandidates[0] : null;
+            const identity = verifyLinkedInDisplayName(params.expected_display_name, displayedName);
+            if (!identity.allowed) {
+              result = {
+                success: false,
+                error: 'Displayed LinkedIn identity does not exactly match the production acceptance authorization',
+                data: {
+                  result_code: 'target_identity_denied',
+                  identity_code: identity.code,
+                  write_verified: false,
+                  retry_allowed: false,
+                  interaction_crossed: false,
+                  displayed_name_candidate_count: displayedNameCandidates.length,
+                },
+              };
+              break;
+            }
+            verifiedDisplayName = identity.actual;
+          }
+          await recordWriteStage('profile_verified', false, {
+            authorized_target: authorizedTarget,
+            presented_target: presentedTarget,
+            expected_display_name_verified: productionAcceptanceId ? true : undefined,
+            displayed_name: verifiedDisplayName,
+          });
           const readProfileState = async () => page.evaluate(() => {
             const visible = (element: Element) => { const n=element as HTMLElement,r=n.getBoundingClientRect(),s=getComputedStyle(n); return r.width>0&&r.height>0&&s.display!=='none'&&s.visibility!=='hidden'; };
             const label = (element: Element) => [element.getAttribute('aria-label'),element.getAttribute('title'),element.textContent].filter(Boolean).join(' ').replace(/\s+/g,' ').trim().toLowerCase();
@@ -2550,11 +2588,12 @@ export class Worker {
           action: item.action_type,
         });
       } else {
+        const retryAllowed = !interactionCrossed && result.data?.retry_allowed !== false;
         const explicitUnknown = result.data?.result_code === 'outcome_unknown';
         const outcome = interactionCrossed || explicitUnknown
           ? { ...(result.data ?? {}), result_code: 'outcome_unknown', write_verified: false, retry_allowed: false, interaction_crossed: true, interaction_stage: interactionStage }
-          : { ...(result.data ?? {}), result_code: result.data?.result_code ?? 'failed', write_verified: false, retry_allowed: true, interaction_crossed: false, interaction_stage: interactionStage };
-        await this.queue.fail(item.id, result.error || 'Automation action failed', Date.now() - startTime, !interactionCrossed, outcome);
+          : { ...(result.data ?? {}), result_code: result.data?.result_code ?? 'failed', write_verified: false, retry_allowed: retryAllowed, interaction_crossed: false, interaction_stage: interactionStage };
+        await this.queue.fail(item.id, result.error || 'Automation action failed', Date.now() - startTime, retryAllowed, outcome);
         logger.warn('linkedin_job_failed', {
           queue_item_id: item.id,
           workspace_id: item.workspace_id,
