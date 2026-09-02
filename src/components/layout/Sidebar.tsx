@@ -143,15 +143,10 @@ export function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
           <div className="absolute -top-4 -right-4 h-16 w-16 rounded-full bg-gold-500/10 blur-2xl" />
           <div className="flex items-center gap-2 mb-1">
             <Zap className="h-4 w-4 text-gold-400" />
-            <p className="text-sm font-semibold text-ink-50">Upgrade to Growth</p>
+            <p className="text-sm font-semibold text-ink-50">Growth plan</p>
           </div>
-          <p className="text-xs text-ink-400 leading-relaxed mb-3">Unlock unlimited campaigns and prospects.</p>
-          <button
-            onClick={() => { onNavigate?.(); window.location.assign('/app/settings'); }}
-            className="w-full rounded-xl bg-gradient-to-r from-gold-400 to-gold-300 hover:from-gold-300 hover:to-neon-400 text-maroon-950 text-sm font-semibold py-2 transition-all duration-300 btn-gold-glow hover:shadow-gold-lg active:scale-[0.97]"
-          >
-            Upgrade
-          </button>
+          <p className="text-xs text-ink-400 leading-relaxed mb-3">Plan changes are handled through manual provisioning in V1.</p>
+          <div className="w-full rounded-xl border border-gold-500/20 bg-gold-500/5 py-2 text-center text-sm font-semibold text-gold-300">Coming Soon</div>
         </div>
       </div>
     </aside>

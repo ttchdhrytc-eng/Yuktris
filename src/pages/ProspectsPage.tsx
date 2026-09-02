@@ -25,17 +25,18 @@ export function ProspectsPage() {
     first_name: '', last_name: '', title: '', email: '', linkedin_url: '', phone: '', company_id: '',
   });
 
-  const { data: companies } = useQuery({
+  const { data: companies, isError: companiesError } = useQuery({
     queryKey: ['companies', workspace?.id],
     enabled: !!workspace?.id,
     queryFn: async () => {
       if (!workspace) return [];
-      const { data } = await supabase.from('companies').select('*').eq('workspace_id', workspace.id);
+      const { data, error } = await supabase.from('companies').select('*').eq('workspace_id', workspace.id);
+      if (error) throw error;
       return (data ?? []) as Company[];
     },
   });
 
-  const { data: prospects, isLoading } = useQuery({
+  const { data: prospects, isLoading, isError: prospectsError } = useQuery({
     queryKey: ['prospects', workspace?.id, search, statusFilter],
     enabled: !!workspace?.id,
     queryFn: async () => {
@@ -46,11 +47,12 @@ export function ProspectsPage() {
         .eq('workspace_id', workspace.id);
       if (search) q = q.or(`first_name.ilike.%${search}%,last_name.ilike.%${search}%,email.ilike.%${search}%`);
       if (statusFilter) q = q.eq('status', statusFilter);
-      const { data } = await q.order('created_at', { ascending: false });
+      const { data, error } = await q.order('created_at', { ascending: false });
+      if (error) throw error;
       return (data ?? []) as Prospect[];
     },
   });
-  const { data: campaignProspects, isLoading: campaignProspectsLoading } = useQuery({
+  const { data: campaignProspects, isLoading: campaignProspectsLoading, isError: campaignProspectsError } = useQuery({
     queryKey: ['campaign-prospects', workspace?.id], enabled: !!workspace?.id,
     queryFn: () => fetchCampaignProspects(workspace!.id),
   });
@@ -82,7 +84,8 @@ export function ProspectsPage() {
 
   const deleteMutation = useMutation({
     mutationFn: async (id: string) => {
-      const { error } = await supabase.from('prospects').delete().eq('id', id);
+      if (!workspace) throw new Error('No workspace');
+      const { error } = await supabase.from('prospects').delete().eq('workspace_id', workspace.id).eq('id', id);
       if (error) throw error;
     },
     onSuccess: () => {
@@ -93,7 +96,8 @@ export function ProspectsPage() {
   });
 
   const updateStatus = async (id: string, status: ProspectStatus) => {
-    const { error } = await supabase.from('prospects').update({ status }).eq('id', id);
+    if (!workspace) return;
+    const { error } = await supabase.from('prospects').update({ status }).eq('workspace_id', workspace.id).eq('id', id);
     if (error) {
       toast.error(error.message);
     } else {
@@ -122,6 +126,8 @@ export function ProspectsPage() {
           </Button>
         }
       />
+
+      {(companiesError || prospectsError || campaignProspectsError) && <Card className="mb-4 border-error-500/30 p-4 text-sm text-error-300">Prospect data could not be loaded. Refresh this page; no prospect was added or changed.</Card>}
 
       <div className="flex flex-col sm:flex-row gap-3 mb-4">
         <div className="relative flex-1 max-w-sm">

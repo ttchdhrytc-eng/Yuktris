@@ -1,6 +1,6 @@
 import { Component, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { AlertTriangle, CalendarClock, ChevronLeft, ChevronRight, Pause, Play, Rocket, Save } from 'lucide-react';
+import { AlertTriangle, CalendarClock, ChevronLeft, ChevronRight, Pause, Play, Plus, Rocket, Save } from 'lucide-react';
 import { toast } from 'sonner';
 import { Badge } from '@/components/ui/Badge';
 import { Button } from '@/components/ui/Button';
@@ -63,6 +63,7 @@ export function CampaignsPage() {
   const [scheduleDraft, setScheduleDraft] = useState<ScheduleDraft | null>(() => restoredUi.scheduleDraft);
   const [savingSchedule, setSavingSchedule] = useState(false);
   const initializationKey = useRef(crypto.randomUUID());
+  const campaignBuilderRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     writeCampaignUiState(workspace?.id, { expandedCampaign, scheduleDraft });
@@ -83,7 +84,7 @@ export function CampaignsPage() {
     enabled: !!workspace,
     queryFn: async () => {
       const { data, error } = await supabase.from('customer_campaigns').select('*').eq('workspace_id', workspace!.id).order('created_at', { ascending: false });
-      if (error && error.code !== '42P01') throw error;
+      if (error) throw error;
       const ids = (data ?? []).map((c) => c.id);
       if (!ids.length) return { campaigns: data ?? [], metrics: {} };
       return {
@@ -275,7 +276,9 @@ export function CampaignsPage() {
     );
   return (
     <div className="space-y-8">
-      <PageHeader title="Campaigns" description="Create and launch a safe LinkedIn outreach campaign." />
+      <PageHeader title="Campaigns" description="Create and launch a safe LinkedIn outreach campaign." actions={<Button onClick={() => { setStep(0); campaignBuilderRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }}><Plus className="h-4 w-4" />Create Campaign</Button>} />
+      {(accounts.isError || icps.isError) && <Reason text="Campaign prerequisites could not be loaded. Refresh this page; no campaign was launched." />}
+      <div ref={campaignBuilderRef}>
       <Card className="p-6">
         <div className="mb-8 grid grid-cols-2 gap-2 md:grid-cols-6">
           {STEPS.map((label, i) => (
@@ -367,7 +370,12 @@ export function CampaignsPage() {
           )}
         </div>
       </Card>
-      {(existing.data?.campaigns.length ?? 0) > 0 && (
+      </div>
+      {existing.isLoading && !existing.data ? <div className="flex justify-center py-12"><Spinner /></div> : existing.isError ? (
+        <Reason text="Campaigns could not be loaded. Refresh this page; no campaign was created or launched." />
+      ) : (existing.data?.campaigns.length ?? 0) === 0 ? (
+        <Card className="p-6 text-center"><h2 className="text-base font-semibold text-ink-100">No campaigns yet</h2><p className="mt-2 text-sm text-ink-400">Create a LinkedIn campaign, configure its prospects and sending schedule, then review it before launch.</p><Button className="mt-4" onClick={() => { setStep(0); campaignBuilderRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }}><Plus className="h-4 w-4" />Create Campaign</Button></Card>
+      ) : (
         <section>
           <h2 className="mb-3 text-base font-semibold text-ink-100">Your campaigns</h2>
           {campaignProspects.isError && <Reason text="Campaign prospect identities could not be loaded. Retry this page; no outreach was started." />}
