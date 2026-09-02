@@ -9,7 +9,7 @@ import { ContextLeaseOwner, ContextRecord, LinkedInContextService, persistentCon
 import { interactiveAuthTimeoutMs, interactiveBrowserSessionTimeoutMs } from './interactive-auth-config.js';
 import { normalizeLinkedInAction, validateSalesNavigatorPayload } from './linkedin-agent-contract.js';
 import { CloudAgentStartupError, cloudAgentStartupTimeoutMs, withinStartupDeadline } from './startup-deadline.js';
-import { finalizeLinkedInWrite, LINKEDIN_WRITE_ACTIONS, normalizeLinkedInTarget, preflightLinkedInWrite } from './linkedin-execution-safety.js';
+import { finalizeLinkedInWrite, LINKEDIN_WRITE_ACTIONS, normalizeLinkedInTarget, preflightLinkedInWrite, validateDeterministicLinkedInWrite } from './linkedin-execution-safety.js';
 import { classifyConnectionProfileState, classifyPostClickOutcome, isNoNoteConfirmCandidate, NO_NOTE_CONFIRM_LABELS } from './connection-dialog.js';
 import { classifyRelationshipProbe, type RelationshipProbeEvidence } from './relationship-probe.js';
 import { waitForLinkedInProfileReady } from './linkedin-profile-readiness.js';
@@ -732,7 +732,6 @@ export class Worker {
       await this.queue.fail(item.id, 'Missing account_id', Date.now() - startTime, false);
       return;
     }
-
     const logPersistentFastPath = (stage: string, at = Date.now()): void =>
       logger.info('LinkedIn persistent fast-path latency', {
         queue_item_id: item.id,
@@ -1528,7 +1527,6 @@ export class Worker {
 
     const sessionData = loaded?.session;
     const sessionId = loaded?.sessionId;
-    const intendedIdentity = await this.loadIntendedIdentity(accountId, item.workspace_id);
     const params = item.action_params ?? {};
     const productionAcceptanceId = typeof params.production_acceptance_authorization_id === 'string'
       ? params.production_acceptance_authorization_id
@@ -1548,6 +1546,21 @@ export class Worker {
         return;
       }
     }
+    if (LINKEDIN_WRITE_ACTIONS.has(item.action_type)) {
+      const deterministic = await validateDeterministicLinkedInWrite(this.client, item);
+      logger.info('linkedin_deterministic_write_validation', {
+        queue_item_id: item.id,
+        workspace_id: item.workspace_id,
+        account_id: accountId,
+        action: item.action_type,
+        result: deterministic.code,
+      });
+      if (!deterministic.allowed) {
+        await this.queue.fail(item.id, `LinkedIn deterministic write denied: ${deterministic.code}`, Date.now() - startTime, false);
+        return;
+      }
+    }
+    const intendedIdentity = await this.loadIntendedIdentity(accountId, item.workspace_id);
     let result: {
       success: boolean;
       data?: Record<string, unknown>;

@@ -17,6 +17,30 @@ export interface WritePreflightResult {
   already_done?: boolean;
 }
 
+export async function validateDeterministicLinkedInWrite(
+  client: SupabaseClient,
+  item: QueueItem,
+): Promise<WritePreflightResult> {
+  const target = targetForWrite(item.action_type, item.action_params ?? {});
+  if (!item.account_id || !target || !item.idempotency_key) return { allowed: false, code: 'invalid_request' };
+  const authorizationId = typeof item.action_params.production_acceptance_authorization_id === 'string'
+    ? item.action_params.production_acceptance_authorization_id
+    : null;
+  const { data, error } = await client.rpc('validate_linkedin_write_deterministic_eligibility', {
+    p_task_id: item.id,
+    p_attempt_id: item.attempt_id,
+    p_workspace_id: item.workspace_id,
+    p_account_id: item.account_id,
+    p_action_type: item.action_type,
+    p_target: target,
+    p_idempotency_key: item.idempotency_key,
+    p_project_ref: projectRef(),
+    p_authorization_id: authorizationId,
+  });
+  if (error) throw new Error(`Deterministic LinkedIn write validation failed: ${error.message}`);
+  return data as WritePreflightResult;
+}
+
 export function normalizeLinkedInTarget(value: unknown): string | null {
   if (typeof value !== 'string' || !value.trim()) return null;
   const raw = value.trim();
