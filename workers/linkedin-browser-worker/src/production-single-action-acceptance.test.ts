@@ -60,16 +60,16 @@ test('production acceptance binds and verifies expected display name before Conn
   assert.match(expectedName, /expected_display_name_required/);
   assert.match(expectedName, /'expected_display_name',a\.expected_display_name/);
   assert.match(expectedName, /action_params->>'expected_display_name'\) IS NOT DISTINCT FROM a\.expected_display_name/);
-  const identityCheck = worker.indexOf('verifyLinkedInDisplayName(params.expected_display_name, displayedName)');
+  const identityCheck = worker.indexOf('extractLinkedInDisplayedName(page)');
   const connectClick = worker.indexOf('await connectBtn.click()');
   assert.ok(identityCheck >= 0 && connectClick > identityCheck, 'identity validation must precede Connect');
-  assert.match(worker, /displayedNameCandidates\.length === 1/);
+  assert.match(worker, /extractedName\.status === 'found'/);
   assert.match(worker, /result_code: 'target_identity_denied'[\s\S]*retry_allowed: false[\s\S]*interaction_crossed: false/);
 });
 
 test('canonical URL and displayed identity are independent mandatory checks', () => {
   assert.match(worker, /presentedTarget !== authorizedTarget/);
-  assert.match(worker, /verifyLinkedInDisplayName\(params\.expected_display_name, displayedName\)/);
+  assert.match(worker, /verifyLinkedInDisplayName\(params\.expected_display_name, extractedName\.name\)/);
 });
 
 test('terminal identity denial cannot create retry or replacement work', () => {

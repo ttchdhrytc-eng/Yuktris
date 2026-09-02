@@ -20,6 +20,7 @@ import { TaskOwnershipLifecycle } from './task-ownership.js';
 import { LinkedInExecutionGate, resolveLinkedInExecutionGate } from './execution-mode.js';
 import { productionAcceptanceAuthorizationId } from './production-acceptance.js';
 import { verifyLinkedInDisplayName } from './linkedin-profile-identity.js';
+import { extractLinkedInDisplayedName } from './linkedin-profile-displayed-name.js';
 import { productionAcceptanceScheduleCandidate } from './production-acceptance-schedule.js';
 
 const INTERACTIVE_AUTH_TIMEOUT_MS = interactiveAuthTimeoutMs();
@@ -2003,16 +2004,10 @@ export class Worker {
           }
           let verifiedDisplayName: string | null = null;
           if (productionAcceptanceId) {
-            const displayedNameCandidates = await page.locator(
-              'main h1, .pv-text-details__left-panel h1, [data-view-name*="profile-top"] h1, .scaffold-layout__main h1',
-            ).evaluateAll((elements) => Array.from(new Set(elements.filter((element) => {
-              const node = element as HTMLElement;
-              const rect = node.getBoundingClientRect();
-              const style = getComputedStyle(node);
-              return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
-            }).map((element) => element.textContent?.replace(/\s+/g, ' ').trim()).filter((value): value is string => !!value))));
-            const displayedName = displayedNameCandidates.length === 1 ? displayedNameCandidates[0] : null;
-            const identity = verifyLinkedInDisplayName(params.expected_display_name, displayedName);
+            const extractedName = await extractLinkedInDisplayedName(page);
+            const identity = extractedName.status === 'found'
+              ? verifyLinkedInDisplayName(params.expected_display_name, extractedName.name)
+              : { allowed: false as const, code: extractedName.status === 'ambiguous' ? 'displayed_name_ambiguous' : 'displayed_name_missing' };
             if (!identity.allowed) {
               result = {
                 success: false,
@@ -2023,7 +2018,8 @@ export class Worker {
                   write_verified: false,
                   retry_allowed: false,
                   interaction_crossed: false,
-                  displayed_name_candidate_count: displayedNameCandidates.length,
+                  displayed_name_candidate_count: extractedName.candidateCount,
+                  displayed_name_sources: extractedName.corroboratingSources,
                 },
               };
               break;
