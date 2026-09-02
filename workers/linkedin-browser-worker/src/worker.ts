@@ -20,6 +20,7 @@ import { TaskOwnershipLifecycle } from './task-ownership.js';
 import { LinkedInExecutionGate, resolveLinkedInExecutionGate } from './execution-mode.js';
 import { productionAcceptanceAuthorizationId } from './production-acceptance.js';
 import { verifyLinkedInDisplayName } from './linkedin-profile-identity.js';
+import { productionAcceptanceScheduleCandidate } from './production-acceptance-schedule.js';
 
 const INTERACTIVE_AUTH_TIMEOUT_MS = interactiveAuthTimeoutMs();
 const TEST_CONNECTION_TIMEOUT = parseInt(process.env.TEST_CONNECTION_TIMEOUT_MS || '120000', 10);
@@ -1425,18 +1426,42 @@ export class Worker {
     }
 
     if (LINKEDIN_WRITE_ACTIONS.has(item.action_type)) {
-      const jobId = typeof item.action_params?.job_id === 'string' ? item.action_params.job_id : null;
-      if (!jobId) {
-        await this.queue.fail(item.id, 'Campaign schedule missing', Date.now() - startTime, false);
-        return;
+      const acceptanceCandidate = productionAcceptanceScheduleCandidate(
+        item,
+        this.acceptanceAuthorizationId,
+        this.executionGate.outboundEnabled,
+      );
+      let scheduleExempt = false;
+      if (acceptanceCandidate) {
+        const { data: attestation, error: attestationError } = await this.client.rpc(
+          'validate_production_acceptance_schedule_exemption',
+          {
+            p_task_id: item.id,
+            p_attempt_id: item.attempt_id,
+            p_worker_id: this.workerId,
+            p_authorization_id: acceptanceCandidate,
+          },
+        );
+        if (attestationError) throw new Error(`Production acceptance schedule attestation failed: ${this.sanitizeError(attestationError)}`);
+        scheduleExempt = attestation?.allowed === true;
+        if (!scheduleExempt) {
+          await this.queue.fail(item.id, `Production acceptance schedule exemption denied: ${attestation?.code ?? 'binding_unknown'}`, Date.now() - startTime, false);
+          return;
+        }
       }
-      const { data: scheduleGate, error: scheduleError } = await this.client.rpc('campaign_outreach_preflight', {
-        p_workspace_id: item.workspace_id,
-        p_job_id: jobId,
-      });
-      if (scheduleError) throw new Error(`Campaign schedule validation failed: ${this.sanitizeError(scheduleError)}`);
-      if (!scheduleGate?.allowed) {
-        if (scheduleGate?.code === 'campaign_paused') {
+      if (!scheduleExempt) {
+        const jobId = typeof item.action_params?.job_id === 'string' ? item.action_params.job_id : null;
+        if (!jobId) {
+          await this.queue.fail(item.id, 'Campaign schedule missing', Date.now() - startTime, false);
+          return;
+        }
+        const { data: scheduleGate, error: scheduleError } = await this.client.rpc('campaign_outreach_preflight', {
+          p_workspace_id: item.workspace_id,
+          p_job_id: jobId,
+        });
+        if (scheduleError) throw new Error(`Campaign schedule validation failed: ${this.sanitizeError(scheduleError)}`);
+        if (!scheduleGate?.allowed) {
+          if (scheduleGate?.code === 'campaign_paused') {
           await this.client
             .from('browser_execution_queue')
             .update({
@@ -1452,7 +1477,7 @@ export class Worker {
             .eq('id', item.id)
             .eq('attempt_id', item.attempt_id);
           logger.info('linkedin_write_deferred_campaign_paused', { queue_item_id: item.id });
-        } else if (scheduleGate?.code === 'outside_sending_window' && scheduleGate?.scheduled_at) {
+          } else if (scheduleGate?.code === 'outside_sending_window' && scheduleGate?.scheduled_at) {
           await this.client
             .from('browser_execution_queue')
             .update({
@@ -1470,10 +1495,11 @@ export class Worker {
             queue_item_id: item.id,
             scheduled_at: scheduleGate.scheduled_at,
           });
-        } else {
-          await this.queue.fail(item.id, `LinkedIn write denied: ${scheduleGate?.code ?? 'campaign_schedule_required'}`, Date.now() - startTime, false);
+          } else {
+            await this.queue.fail(item.id, `LinkedIn write denied: ${scheduleGate?.code ?? 'campaign_schedule_required'}`, Date.now() - startTime, false);
+          }
+          return;
         }
-        return;
       }
     }
 
