@@ -188,6 +188,19 @@ export class Queue {
     if (data !== true) throw new Error('Browser attempt correlation ownership lost');
   }
 
+  async advanceAcceptanceBoundary(itemId: string, authorizationId: string, boundaryName: string): Promise<void> {
+    const attemptId = this.requireAttempt(itemId);
+    const { data, error } = await this.client.rpc('advance_production_acceptance_execution_boundary', {
+      p_task_id: itemId,
+      p_attempt_id: attemptId,
+      p_worker_id: this.workerId,
+      p_authorization_id: authorizationId,
+      p_boundary_name: boundaryName,
+    });
+    if (error) throw error;
+    if (!data?.recorded) throw new Error('Acceptance execution boundary ownership lost');
+  }
+
   async recordWriteStage(itemId: string, stage: string, interactionCrossed: boolean, evidence: Record<string, unknown> = {}): Promise<void> {
     const attemptId = this.requireAttempt(itemId);
     const { data, error } = await this.client.rpc('record_linkedin_write_interaction_stage', {

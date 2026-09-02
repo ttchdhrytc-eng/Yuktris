@@ -1530,6 +1530,9 @@ export class Worker {
     const sessionId = loaded?.sessionId;
     const intendedIdentity = await this.loadIntendedIdentity(accountId, item.workspace_id);
     const params = item.action_params ?? {};
+    const productionAcceptanceId = typeof params.production_acceptance_authorization_id === 'string'
+      ? params.production_acceptance_authorization_id
+      : null;
     if (item.action_type === 'follow_up_message' && params.contact_id) {
       const { data: priorReply, error: replyCheckError } = await this.client
         .from('linkedin_inbound_replies')
@@ -1555,6 +1558,9 @@ export class Worker {
     let interactionCrossed = false;
     const recordWriteStage = async (stage: WriteInteractionStage, crossed = interactionCrossed, evidence: Record<string, unknown> = {}) => {
       if (!LINKEDIN_WRITE_ACTIONS.has(item.action_type)) return;
+      if (crossed && !interactionCrossed && productionAcceptanceId) {
+        await this.queue.advanceAcceptanceBoundary(item.id, productionAcceptanceId, 'interaction_boundary_crossed');
+      }
       // Set the in-memory boundary first so an RPC/network exception while durably
       // recording a pre-click intent still fails closed in this worker attempt.
       interactionStage = stage;
@@ -1571,8 +1577,14 @@ export class Worker {
       });
       let persistentContext: ContextRecord | null = null;
       let persistentSessionId: string | null = null;
+      if (productionAcceptanceId) {
+        await this.queue.advanceAcceptanceBoundary(item.id, productionAcceptanceId, 'browserbase_acquisition_started');
+      }
       if (usePersistentContext) {
         persistentContext = await this.openPersistentContextForTask(item);
+        if (productionAcceptanceId) {
+          await this.queue.advanceAcceptanceBoundary(item.id, productionAcceptanceId, 'browserbase_acquired');
+        }
         persistentSessionId = this.linkedin.getSessionId();
         await this.queue.recordBrowserCorrelation(item.id, persistentSessionId, persistentContext.id);
         const binding = await this.linkedinContexts.verifiedIdentityBinding(persistentContext);
@@ -1622,6 +1634,9 @@ export class Worker {
       } else {
         await this.linkedin.launch(undefined);
         await this.linkedin.newContext();
+        if (productionAcceptanceId) {
+          await this.queue.advanceAcceptanceBoundary(item.id, productionAcceptanceId, 'browserbase_acquired');
+        }
         await this.queue.recordBrowserCorrelation(item.id, this.linkedin.getSessionId(), null);
         const restored = await this.linkedin.restoreSession(sessionData!);
         if (!restored) {
@@ -1654,6 +1669,9 @@ export class Worker {
       }
 
       const page = this.linkedin.getPage();
+      if (productionAcceptanceId) {
+        await this.queue.advanceAcceptanceBoundary(item.id, productionAcceptanceId, 'live_pre_interaction');
+      }
       if (LINKEDIN_WRITE_ACTIONS.has(item.action_type)) {
         const preflight = await preflightLinkedInWrite(this.client, item);
         logger.info('linkedin_write_preflight', {
