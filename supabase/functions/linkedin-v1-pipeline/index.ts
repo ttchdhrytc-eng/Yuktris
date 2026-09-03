@@ -606,7 +606,7 @@ async function discoverVerifiedProspects(icp: ICP, maxProspects: number, diagnos
         if (seenLinkedIn.has(normalized)) { diagnostics.rejectedByDedupe += 1; return false; }
         const evidence = `${r.title} ${r.content}`;
         const sourcedHeadline = parseLinkedInTitle(r.title, "").title;
-        const accepted = Boolean(sourcedHeadline) && hasEvidenceToken(evidence, companyName, ["the", "group", "solutions", "services", "technologies", "technology", "consulting"]) && hasEvidenceToken(sourcedHeadline, role, ["head", "of", "and", "the", "manager", "lead"]);
+        const accepted = Boolean(sourcedHeadline) && hasEvidenceToken(evidence, companyName, ["the", "group", "solutions", "services", "technologies", "technology", "consulting"]) && matchesIntendedRole(sourcedHeadline, [role]);
         if (!accepted) diagnostics.rejectedByEvidence += 1;
         return accepted;
       }).sort((a, b) => Number(b.score ?? 0) - Number(a.score ?? 0));
@@ -661,7 +661,7 @@ async function discoverVerifiedProspects(icp: ICP, maxProspects: number, diagnos
         const parsed = parseLinkedInTitle(person.title, "");
         const companyName = companyFromPersonEvidence(person.title);
         if (!parsed.firstName || !parsed.lastName || !parsed.title || !companyName) { diagnostics.rejectedByIdentityParsing += 1; continue; }
-        if (!roles.some((role) => hasEvidenceToken(parsed.title, role, ["head", "of", "and", "the", "manager", "lead"])) || !isDecisionMakerTitle(parsed.title)) { diagnostics.rejectedByEvidence += 1; continue; }
+        if (!matchesIntendedRole(parsed.title, roles) || !isDecisionMakerTitle(parsed.title)) { diagnostics.rejectedByEvidence += 1; continue; }
 
         diagnostics.searchQueries += 1;
         const officialResults = await tavilySearch(tavilyKey, `\"${companyName}\" official company website`, 5);
@@ -731,7 +731,15 @@ function sameCompanyEvidence(left: string, right: string): boolean {
 }
 
 function isDecisionMakerTitle(title: string): boolean {
-  return /\b(owner|founder|co-founder|chief|ceo|president|principal|partner|vice president|vp|director|head)\b/i.test(title);
+  return /\b(owner|founder|co-founder|chief|ceo|president|principal|partner|vice president|vp|director|head|manager)\b/i.test(title);
+}
+
+function matchesIntendedRole(title: string, roles: string[]): boolean {
+  const normalizedTitle = title.toLowerCase().replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
+  return roles.some((role) => role.split(/\s*(?:\/|,|\bor\b)\s*/i).some((variant) => {
+    const tokens = normalizedEvidenceTokens(variant, ["of", "and", "the"]);
+    return tokens.length > 0 && tokens.every((token) => normalizedTitle.split(" ").includes(token));
+  }));
 }
 
 function matchesGeographyEvidence(evidence: string, geography: string[]): boolean {

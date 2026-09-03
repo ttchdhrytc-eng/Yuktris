@@ -47,6 +47,7 @@ test('launch revalidates only canonical prospects explicitly reviewed from sourc
   assert.match(pipeline, /browser_execution_queue/);
   assert.match(pipeline, /sameCompanyEvidence/);
   assert.match(pipeline, /isDecisionMakerTitle/);
+  assert.match(pipeline, /matchesIntendedRole/);
 });
 
 test('Prospect reads and mutations remain scoped to the authenticated workspace', () => {
