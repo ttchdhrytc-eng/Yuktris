@@ -617,10 +617,11 @@ async function discoverVerifiedProspects(icp: ICP, maxProspects: number, diagnos
       const parsed = parseLinkedInTitle(match.title, "");
       const sourcedCompany = companyFromPersonEvidence(match.title);
       if (!parsed.firstName || !parsed.lastName || !parsed.title || !sourcedCompany) { diagnostics.rejectedByIdentityParsing += 1; continue; }
-      if (!isDecisionMakerTitle(parsed.title) || !sameCompanyEvidence(sourcedCompany, companyName) || !matchesGeographyEvidence(`${candidate.title} ${candidate.content ?? ""} ${websiteText}`, icp.geography ?? [])) {
+      if (!isDecisionMakerTitle(parsed.title) || !sameCompanyEvidence(sourcedCompany, companyName)) {
         diagnostics.rejectedByEvidence += 1;
         continue;
       }
+      const geographyBoost = matchesGeographyEvidence(`${candidate.title} ${candidate.content ?? ""} ${websiteText}`, icp.geography ?? []) ? 0.05 : 0;
       seenLinkedIn.add(linkedinUrl);
       prospects.push({
         companyName,
@@ -633,7 +634,7 @@ async function discoverVerifiedProspects(icp: ICP, maxProspects: number, diagnos
         evidence: `${match.title}. ${match.content ?? ""}`,
         companyFit: `${companyName} has an official source matching the selected ${icp.subIndustry || icp.industry || "company"} ICP.`,
         personFit: `${parsed.firstName} ${parsed.lastName} is source-identified as ${parsed.title} at ${sourcedCompany}.`,
-        confidenceScore: Math.max(0.5, Math.min(0.99, 0.45 + Number(candidate.score ?? 0) * 0.2 + Number(match.score ?? 0) * 0.35)),
+        confidenceScore: Math.max(0.5, Math.min(0.99, 0.45 + Number(candidate.score ?? 0) * 0.2 + Number(match.score ?? 0) * 0.35 + geographyBoost)),
       });
       break;
     }
@@ -670,7 +671,7 @@ async function discoverVerifiedProspects(icp: ICP, maxProspects: number, diagnos
         const companyWebsite = rootWebsite(official.url);
         const companyDescription = await jinaRead(companyWebsite).then((value) => { diagnostics.companyResearchSucceeded += 1; return value; }).catch(() => { diagnostics.companyResearchFailed += 1; return official.content ?? ""; });
         if (!matchesIcpCompanyEvidence(`${official.title} ${official.content ?? ""} ${companyDescription}`, icp)) { diagnostics.rejectedByEvidence += 1; continue; }
-        if (!matchesGeographyEvidence(`${official.title} ${official.content ?? ""} ${companyDescription}`, icp.geography ?? [])) { diagnostics.rejectedByEvidence += 1; continue; }
+        const geographyBoost = matchesGeographyEvidence(`${official.title} ${official.content ?? ""} ${companyDescription}`, icp.geography ?? []) ? 0.05 : 0;
         seenLinkedIn.add(linkedinUrl);
         prospects.push({
           companyName,
@@ -683,7 +684,7 @@ async function discoverVerifiedProspects(icp: ICP, maxProspects: number, diagnos
           evidence: `${person.title}. ${person.content ?? ""}`,
           companyFit: `${companyName} has an official source matching the selected ${icp.subIndustry || icp.industry || "company"} ICP.`,
           personFit: `${parsed.firstName} ${parsed.lastName} is source-identified as ${parsed.title} at ${companyName}.`,
-          confidenceScore: Math.max(0.5, Math.min(0.99, 0.5 + Number(person.score ?? 0) * 0.35 + Number(official.score ?? 0) * 0.15)),
+          confidenceScore: Math.max(0.5, Math.min(0.99, 0.5 + Number(person.score ?? 0) * 0.35 + Number(official.score ?? 0) * 0.15 + geographyBoost)),
         });
       }
     }
