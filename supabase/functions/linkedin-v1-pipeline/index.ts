@@ -747,7 +747,7 @@ async function processReplenishment(admin: any, workspaceId: string, jobId: stri
     await admin.from("prospect_replenishment_jobs").update({ status: "completed", completed_at: new Date().toISOString(), lease_owner: null, lease_expires_at: null, result_metadata: { persisted, ready_count: finalReady, diagnostics }, updated_at: new Date().toISOString() }).eq("id", jobId);
     await admin.from("icps").update({ prospecting_status: (finalReady ?? 0) >= config.minimum_ready_inventory ? "up_to_date" : "queued", next_refresh_at: next, last_discovery_completed_at: new Date().toISOString(), discovery_consecutive_failures: 0, discovery_error: null }).eq("id", icpId);
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Discovery failed";
+    const message = error instanceof Error ? `${error.name}: ${error.message}` : typeof error === "string" ? error : JSON.stringify(error) || "Discovery failed";
     const { data: job } = await admin.from("prospect_replenishment_jobs").select("attempt_count,max_attempts").eq("id", jobId).single();
     const retry = (job?.attempt_count ?? 1) < (job?.max_attempts ?? 3);
     const delayMinutes = Math.min(360, 15 * 2 ** Math.max(0, (job?.attempt_count ?? 1) - 1));
