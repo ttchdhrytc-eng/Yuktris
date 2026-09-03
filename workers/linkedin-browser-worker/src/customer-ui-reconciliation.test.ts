@@ -82,6 +82,7 @@ test('discovery expands recall through bounded diverse waves without weakening e
   assert.match(pipeline, /searchQueries: 6/);
   assert.match(pipeline, /canonicalCandidates: 18/);
   assert.match(pipeline, /deepResearchCandidates: 7/);
+  assert.match(pipeline, /perWaveDeepResearchLimit = \[3, 2, 2\]/);
   assert.match(pipeline, /buildDiscoveryWaves/);
   assert.match(pipeline, /discoveryRoleVariants/);
   assert.match(pipeline, /discoveryVerticalVariants/);
@@ -90,6 +91,7 @@ test('discovery expands recall through bounded diverse waves without weakening e
   assert.match(pipeline, /evaluatedCanonical/);
   assert.match(pipeline, /rejectedSemanticKeys/);
   assert.match(pipeline, /diversifyProspects/);
+  assert.match(pipeline, /isOfficialCompanyCandidateUrl/);
   assert.match(pipeline, /wavesStarted/);
   assert.match(pipeline, /deadlineRemainingMs/);
 });

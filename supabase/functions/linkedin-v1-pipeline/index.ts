@@ -633,7 +633,7 @@ async function discoverVerifiedProspects(icp: ICP, maxProspects: number, diagnos
       const results = await tavilySearch(tavilyKey, `\"${companyName}\" official company website`, 5, diagnostics, signal)
         .catch((error) => { if (signal?.aborted) throw error; reject(diagnostics, "provider_timeout"); return []; });
       diagnostics.providerResults += results.length;
-      const official = results.find((result) => isUsableCompanyUrl(result.url) && hasEvidenceToken(`${result.title} ${result.content} ${new URL(result.url).hostname}`, companyName, ["the", "group", "solutions", "services", "technologies", "technology", "consulting"]));
+      const official = results.find((result) => isOfficialCompanyCandidateUrl(result.url, companyName) && hasEvidenceToken(`${result.title} ${result.content} ${new URL(result.url).hostname}`, companyName, ["the", "group", "solutions", "services", "technologies", "technology", "consulting"]));
       if (!official || !withinBudget()) return null;
       const website = rootWebsite(official.url);
       const domainKey = `domain:${new URL(website).hostname.toLowerCase().replace(/^www\./, "")}`;
@@ -699,7 +699,8 @@ async function discoverVerifiedProspects(icp: ICP, maxProspects: number, diagnos
     diagnostics.qualificationStages.historical_safe = (diagnostics.qualificationStages.historical_safe ?? 0) + safeCanonical.size;
     const candidates = newCanonical.map((url) => evidenceByCanonical.get(url)!).filter(Boolean).sort((a, b) => Number(b.score ?? 0) - Number(a.score ?? 0));
     const eligibleBefore = prospects.length;
-    for (const person of candidates) {
+    const perWaveDeepResearchLimit = [3, 2, 2][waveIndex] ?? 2;
+    for (const person of candidates.slice(0, perWaveDeepResearchLimit)) {
         if (prospects.length >= maxProspects || !withinBudget() || deepResearchRemaining <= 0) break;
         const linkedinUrl = normalizeLinkedInProfile(person.url);
         if (!linkedinUrl) continue;
@@ -1199,6 +1200,16 @@ function cleanCompanyName(title: string, host: string): string | null {
         .includes(normalizedHost);
     });
   return candidate ? candidate.split(":")[0].trim() : null;
+}
+function isOfficialCompanyCandidateUrl(value: string, companyName: string): boolean {
+  if (!isUsableCompanyUrl(value)) return false;
+  try {
+    const host = new URL(value).hostname.toLowerCase().replace(/^www\./, "").split(".")[0].replace(/[^a-z0-9]/g, "");
+    const tokens = normalizedEvidenceTokens(companyName, ["the", "group", "solutions", "services", "technologies", "technology", "consulting", "inc", "llc", "ltd"]);
+    const compact = tokens.join("");
+    const acronym = tokens.map((token) => token[0]).join("");
+    return tokens.some((token) => token.length >= 3 && host.includes(token)) || (compact.length >= 4 && host.includes(compact)) || (acronym.length >= 3 && host === acronym);
+  } catch { return false; }
 }
 
 async function readOfficialCompanyEvidence(
