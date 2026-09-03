@@ -724,6 +724,11 @@ async function processReplenishment(admin: any, workspaceId: string, jobId: stri
     const deadline = setTimeout(() => controller.abort("internal_deadline_reached"), diagnostics.internalDeadlineMs);
     let discovered: Prospect[] = [];
     try { discovered = await discoverVerifiedProspects(icp, Math.min(config.replenishment_batch_size, 5), diagnostics, controller.signal, admin, workspaceId, String(claim.account_id)); }
+    catch (error) {
+      if (!controller.signal.aborted) throw error;
+      reject(diagnostics, "internal_deadline_reached");
+      diagnostics.terminatedBy = "internal_deadline_reached";
+    }
     finally { clearTimeout(deadline); }
     const safe = await excludeHistoricallyUnsafeProspects(admin, workspaceId, String(claim.account_id), discovered, diagnostics);
     let persisted = 0;
