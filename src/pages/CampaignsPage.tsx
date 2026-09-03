@@ -64,6 +64,7 @@ export function CampaignsPage() {
   const [scheduleDraft, setScheduleDraft] = useState<ScheduleDraft | null>(() => restoredUi.scheduleDraft);
   const [savingSchedule, setSavingSchedule] = useState(false);
   const [discoveryPreview, setDiscoveryPreview] = useState<DiscoveryPreview[]>([]);
+  const [selectedProspectUrls, setSelectedProspectUrls] = useState<Set<string>>(new Set());
   const [discovering, setDiscovering] = useState(false);
   const [discoveryError, setDiscoveryError] = useState<string | null>(null);
   const initializationKey = useRef(crypto.randomUUID());
@@ -80,7 +81,7 @@ export function CampaignsPage() {
     setOutreachTimezone(resolveNewCampaignTimezone(persisted, Intl.DateTimeFormat().resolvedOptions().timeZone));
   }, [workspace?.id]);
 
-  useEffect(() => { setDiscoveryPreview([]); setDiscoveryError(null); }, [icpId]);
+  useEffect(() => { setDiscoveryPreview([]); setSelectedProspectUrls(new Set()); setDiscoveryError(null); }, [icpId]);
 
   const updateNewCampaignTimezone = (value: string) => {
     const timezone = normalizeIanaTimezone(value);
@@ -168,11 +169,13 @@ export function CampaignsPage() {
       const prospects = Array.isArray(data?.prospects) ? data.prospects as DiscoveryPreview[] : [];
       if (!prospects.length) throw new Error('No source-verified LinkedIn prospects were found. Adjust the ICP and try again.');
       setDiscoveryPreview(prospects);
+      setSelectedProspectUrls(new Set());
       toast.success(`${prospects.length} source-verified prospects found. Review them before launch.`);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Prospect discovery failed';
       setDiscoveryError(message);
       setDiscoveryPreview([]);
+      setSelectedProspectUrls(new Set());
     } finally { setDiscovering(false); }
   }
   async function launch() {
@@ -199,7 +202,7 @@ export function CampaignsPage() {
           },
           icp: payload,
           max_prospects: Math.min(dailyLimit, 5),
-          reviewed_linkedin_urls: discoveryPreview.map((prospect) => prospect.linkedin_url),
+          reviewed_linkedin_urls: [...selectedProspectUrls],
           require_calendar: false,
           require_gmail: false,
         },
@@ -214,6 +217,7 @@ export function CampaignsPage() {
       setIcpId('');
       setAccountId('');
       setDiscoveryPreview([]);
+      setSelectedProspectUrls(new Set());
       setDiscoveryError(null);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Campaign could not be launched');
@@ -392,7 +396,7 @@ export function CampaignsPage() {
             <div className="rounded-xl border border-gold-500/15 p-4">
               <div className="flex flex-wrap items-center justify-between gap-3"><div><p className="text-sm font-medium text-ink-100">AI prospect discovery</p><p className="mt-1 text-xs text-ink-500">Find real, source-backed LinkedIn prospects matching this ICP. Nothing is queued until you explicitly launch.</p></div><Button type="button" variant="secondary" loading={discovering} onClick={() => void findProspects()}>Find Prospects with AI</Button></div>
               {discoveryError && <Reason text={discoveryError} />}
-              {discoveryPreview.length > 0 && <div className="mt-4 space-y-2"><p className="text-xs font-medium text-success-400">{discoveryPreview.length} verified prospects found</p>{discoveryPreview.map((prospect) => <div key={prospect.linkedin_url} className="rounded-lg bg-maroon-900/50 p-3"><div className="flex items-start justify-between gap-3"><div><p className="text-sm font-medium text-ink-100">{prospect.contact_name}</p><p className="text-xs text-ink-500">{prospect.contact_title} · {prospect.company_name}</p></div><Badge tone="neutral">{Math.round(prospect.confidence_score * 100)}% fit</Badge></div><p className="mt-2 text-xs text-ink-400">{prospect.evidence}</p><p className="mt-1 text-xs text-brand-400">Source: {prospect.company_website} · canonical LinkedIn profile verified</p></div>)}</div>}
+              {discoveryPreview.length > 0 && <div className="mt-4 space-y-2"><p className="text-xs font-medium text-success-400">{discoveryPreview.length} verified prospects found · {selectedProspectUrls.size} selected</p>{discoveryPreview.map((prospect) => { const selected = selectedProspectUrls.has(prospect.linkedin_url); return <label key={prospect.linkedin_url} className="block cursor-pointer rounded-lg bg-maroon-900/50 p-3"><div className="flex items-start gap-3"><input type="checkbox" checked={selected} onChange={() => setSelectedProspectUrls((current) => { const next = new Set(current); if (next.has(prospect.linkedin_url)) next.delete(prospect.linkedin_url); else next.add(prospect.linkedin_url); return next; })} className="mt-1 h-4 w-4 accent-gold-500" aria-label={`Include ${prospect.contact_name}`} /><div className="min-w-0 flex-1"><div className="flex items-start justify-between gap-3"><div><p className="text-sm font-medium text-ink-100">{prospect.contact_name}</p><p className="text-xs text-ink-500">{prospect.contact_title} · {prospect.company_name}</p></div><Badge tone="neutral">{Math.round(prospect.confidence_score * 100)}% fit</Badge></div><p className="mt-2 text-xs text-ink-400">{prospect.evidence}</p><p className="mt-1 break-all text-xs text-brand-400">LinkedIn: {prospect.linkedin_url}</p><p className="mt-1 break-all text-xs text-brand-400">Source: {prospect.company_website} · Tavily search + official-site research</p></div></div></label>; })}</div>}
             </div>
           </div>
         )}
@@ -407,7 +411,7 @@ export function CampaignsPage() {
               <ChevronRight className="h-4 w-4" />
             </Button>
           ) : (
-            <Button loading={launching} disabled={!outboundEnabled || discoveryPreview.length === 0} onClick={launch}>
+            <Button loading={launching} disabled={!outboundEnabled || selectedProspectUrls.size === 0 || !selectedAccount || !isIanaTimezone(outreachTimezone) || days.length === 0 || !nextWindow} onClick={launch}>
               <Rocket className="h-4 w-4" />
               Launch Campaign
             </Button>

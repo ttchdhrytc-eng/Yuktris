@@ -24,8 +24,11 @@ test('Campaigns has an explicit create path, truthful query errors, and schedule
   assert.match(campaigns, /Review & Launch/);
   assert.match(campaigns, /Find Prospects with AI/);
   assert.match(campaigns, /preview_discovery/);
-  assert.match(campaigns, /discoveryPreview\.length === 0/);
-  assert.match(campaigns, /reviewed_linkedin_urls: discoveryPreview\.map/);
+  assert.match(campaigns, /selectedProspectUrls\.size === 0/);
+  assert.match(campaigns, /reviewed_linkedin_urls: \[\.\.\.selectedProspectUrls\]/);
+  assert.match(campaigns, /type="checkbox"/);
+  assert.match(campaigns, /LinkedIn: \{prospect\.linkedin_url\}/);
+  assert.doesNotMatch(campaigns, /Calendar connected/);
 });
 
 test('launch revalidates only canonical prospects explicitly reviewed from source-backed discovery', () => {
