@@ -737,8 +737,8 @@ function isDecisionMakerTitle(title: string): boolean {
 function matchesIntendedRole(title: string, roles: string[]): boolean {
   const normalizedTitle = title.toLowerCase().replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
   return roles.some((role) => role.split(/\s*(?:\/|,|\bor\b)\s*/i).some((variant) => {
-    const tokens = normalizedEvidenceTokens(variant, ["of", "and", "the"]);
-    return tokens.length > 0 && tokens.every((token) => normalizedTitle.split(" ").includes(token));
+    const tokens = normalizedEvidenceTokens(variant, ["of", "and", "the", "head", "manager", "director", "chief", "officer", "vice", "president", "vp", "owner", "founder", "principal", "partner"]);
+    return tokens.length > 0 && tokens.every((token) => normalizedTitle.split(" ").includes(token)) && isDecisionMakerTitle(title);
   }));
 }
 
