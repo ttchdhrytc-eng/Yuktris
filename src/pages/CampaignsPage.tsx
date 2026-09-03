@@ -166,7 +166,7 @@ export function CampaignsPage() {
     try {
       const { data, error } = await Promise.race([
         supabase.functions.invoke('linkedin-v1-pipeline', { body: { action: 'preview_discovery', workspace_id: workspace.id, linkedin_account_id: selectedAccount?.id, icp: payload, max_prospects: Math.min(dailyLimit, 5) } }),
-        new Promise<never>((_, reject) => window.setTimeout(() => reject(new Error("Prospect discovery couldn't complete. No outreach was started. Please try again.")), 47_000)),
+        new Promise<never>((_, reject) => window.setTimeout(() => reject(new Error("Prospect discovery couldn't complete within the current search window. No outreach was started. Please try again.")), 43_000)),
       ]);
       if (error) throw new Error(await edgeFunctionError(error));
       const prospects = Array.isArray(data?.prospects) ? data.prospects as DiscoveryPreview[] : [];
