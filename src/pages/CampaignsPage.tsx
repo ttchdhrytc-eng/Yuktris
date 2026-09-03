@@ -25,7 +25,7 @@ const SENDING_DAYS = CAMPAIGN_SENDING_DAYS;
 const WEEKDAYS = CAMPAIGN_WEEKDAYS;
 const TIMEZONE_SUGGESTIONS = ['Asia/Kolkata', 'America/New_York', 'Europe/London', 'America/Los_Angeles', 'Asia/Singapore', 'Australia/Sydney', 'UTC'];
 type ScheduleDraft = PersistedScheduleDraft;
-type DiscoveryPreview = { company_name: string; company_website: string; contact_name: string; contact_title: string; linkedin_url: string; evidence: string; company_fit: string; person_fit: string; confidence_score: number };
+type DiscoveryPreview = { company_name: string; company_website: string; contact_name: string; contact_title: string; linkedin_url: string; evidence: string; company_fit: string; person_fit: string; location: string | null; source_confidence: number; confidence_score: number };
 type AcceptanceGeneration = {
   id: string;
   campaign_id: string;

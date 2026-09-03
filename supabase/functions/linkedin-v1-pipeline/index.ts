@@ -33,9 +33,10 @@ type DiscoveryDiagnostics = {
   rejectedByDedupe: number;
   finalCandidates: number;
   historicalExcluded: number;
+  rejectionFunnel: Record<string, number>;
 };
 
-const newDiscoveryDiagnostics = (): DiscoveryDiagnostics => ({ searchQueries: 0, providerResults: 0, companyCandidates: 0, companyResearchSucceeded: 0, companyResearchFailed: 0, personResults: 0, canonicalProfileUrls: 0, rejectedByEvidence: 0, rejectedByIdentityParsing: 0, rejectedByDedupe: 0, finalCandidates: 0, historicalExcluded: 0 });
+const newDiscoveryDiagnostics = (): DiscoveryDiagnostics => ({ searchQueries: 0, providerResults: 0, companyCandidates: 0, companyResearchSucceeded: 0, companyResearchFailed: 0, personResults: 0, canonicalProfileUrls: 0, rejectedByEvidence: 0, rejectedByIdentityParsing: 0, rejectedByDedupe: 0, finalCandidates: 0, historicalExcluded: 0, rejectionFunnel: {} });
 
 type Prospect = {
   companyName: string;
@@ -49,6 +50,8 @@ type Prospect = {
   confidenceScore: number;
   companyFit: string;
   personFit: string;
+  location: string | null;
+  sourceConfidence: number;
 };
 
 Deno.serve(async (req: Request) => {
@@ -166,6 +169,8 @@ Deno.serve(async (req: Request) => {
           evidence: prospect.evidence.slice(0, 600),
           company_fit: prospect.companyFit,
           person_fit: prospect.personFit,
+          location: prospect.location,
+          source_confidence: prospect.sourceConfidence,
           confidence_score: prospect.confidenceScore,
         })),
       });
@@ -585,6 +590,7 @@ async function discoverVerifiedProspects(icp: ICP, maxProspects: number, diagnos
 
   const prospects: Prospect[] = [];
   const seenLinkedIn = new Set<string>();
+  let aiExtractionBudget = 8;
   for (const candidate of companyCandidates) {
     if (prospects.length >= maxProspects) break;
     const rootUrl = rootWebsite(candidate.url);
@@ -614,13 +620,18 @@ async function discoverVerifiedProspects(icp: ICP, maxProspects: number, diagnos
       if (!match) continue;
       const linkedinUrl = normalizeLinkedInProfile(match.url);
       if (!linkedinUrl) continue;
-      const parsed = parseLinkedInTitle(match.title, "");
-      const sourcedCompany = companyFromPersonEvidence(match.title);
-      if (!parsed.firstName || !parsed.lastName || !parsed.title || !sourcedCompany) { diagnostics.rejectedByIdentityParsing += 1; continue; }
+      let extracted = deterministicPersonEvidence(match.title, match.content ?? "");
+      if ((!extracted || !extracted.company) && aiExtractionBudget-- > 0) extracted = await groundedPersonExtraction(match, roles);
+      if (!extracted?.firstName || !extracted.lastName) { reject(diagnostics, "missing_person_name"); continue; }
+      if (!extracted.title) { reject(diagnostics, "missing_current_title"); continue; }
+      if (!extracted.company) { reject(diagnostics, "missing_current_company"); continue; }
+      const parsed = { firstName: extracted.firstName, lastName: extracted.lastName, title: extracted.title };
+      const sourcedCompany = extracted.company;
       if (!isDecisionMakerTitle(parsed.title) || !sameCompanyEvidence(sourcedCompany, companyName)) {
-        diagnostics.rejectedByEvidence += 1;
+        reject(diagnostics, !isDecisionMakerTitle(parsed.title) ? "insufficient_seniority" : "company_person_binding_failure");
         continue;
       }
+      if (!matchesIntendedRole(parsed.title, roles)) { reject(diagnostics, "title_role_mismatch"); continue; }
       const geographyBoost = matchesGeographyEvidence(`${candidate.title} ${candidate.content ?? ""} ${websiteText}`, icp.geography ?? []) ? 0.05 : 0;
       seenLinkedIn.add(linkedinUrl);
       prospects.push({
@@ -634,6 +645,8 @@ async function discoverVerifiedProspects(icp: ICP, maxProspects: number, diagnos
         evidence: `${match.title}. ${match.content ?? ""}`,
         companyFit: `${companyName} has an official source matching the selected ${icp.subIndustry || icp.industry || "company"} ICP.`,
         personFit: `${parsed.firstName} ${parsed.lastName} is source-identified as ${parsed.title} at ${sourcedCompany}.`,
+        location: extracted.location,
+        sourceConfidence: extracted.confidence,
         confidenceScore: Math.max(0.5, Math.min(0.99, 0.45 + Number(candidate.score ?? 0) * 0.2 + Number(match.score ?? 0) * 0.35 + geographyBoost)),
       });
       break;
@@ -658,9 +671,13 @@ async function discoverVerifiedProspects(icp: ICP, maxProspects: number, diagnos
         if (!linkedinUrl) continue;
         diagnostics.canonicalProfileUrls += 1;
         if (seenLinkedIn.has(linkedinUrl)) { diagnostics.rejectedByDedupe += 1; continue; }
-        const parsed = parseLinkedInTitle(person.title, "");
-        const companyName = companyFromPersonEvidence(person.title);
-        if (!parsed.firstName || !parsed.lastName || !parsed.title || !companyName) { diagnostics.rejectedByIdentityParsing += 1; continue; }
+        let extracted = deterministicPersonEvidence(person.title, person.content ?? "");
+        if ((!extracted || !extracted.company) && aiExtractionBudget-- > 0) extracted = await groundedPersonExtraction(person, roles);
+        if (!extracted?.firstName || !extracted.lastName) { reject(diagnostics, "missing_person_name"); continue; }
+        if (!extracted.title) { reject(diagnostics, "missing_current_title"); continue; }
+        if (!extracted.company) { reject(diagnostics, "missing_current_company"); continue; }
+        const parsed = { firstName: extracted.firstName, lastName: extracted.lastName, title: extracted.title };
+        const companyName = extracted.company;
         if (!matchesIntendedRole(parsed.title, roles) || !isDecisionMakerTitle(parsed.title)) { diagnostics.rejectedByEvidence += 1; continue; }
 
         diagnostics.searchQueries += 1;
@@ -684,6 +701,8 @@ async function discoverVerifiedProspects(icp: ICP, maxProspects: number, diagnos
           evidence: `${person.title}. ${person.content ?? ""}`,
           companyFit: `${companyName} has an official source matching the selected ${icp.subIndustry || icp.industry || "company"} ICP.`,
           personFit: `${parsed.firstName} ${parsed.lastName} is source-identified as ${parsed.title} at ${companyName}.`,
+          location: extracted.location,
+          sourceConfidence: extracted.confidence,
           confidenceScore: Math.max(0.5, Math.min(0.99, 0.5 + Number(person.score ?? 0) * 0.35 + Number(official.score ?? 0) * 0.15 + geographyBoost)),
         });
       }
@@ -708,6 +727,35 @@ function hasEvidenceToken(evidence: string, expected: string, stopWords: string[
   const haystack = evidence.toLowerCase();
   const tokens = expected.toLowerCase().split(/[^a-z0-9]+/).filter((token) => token.length >= 3 && !stopWords.includes(token));
   return tokens.length > 0 && tokens.some((token) => haystack.includes(token));
+}
+
+function reject(diagnostics: DiscoveryDiagnostics, reason: string): void {
+  diagnostics.rejectionFunnel[reason] = (diagnostics.rejectionFunnel[reason] ?? 0) + 1;
+}
+
+type PersonEvidence = { firstName: string; lastName: string; title: string; company: string; location: string | null; confidence: number };
+function deterministicPersonEvidence(title: string, content: string): PersonEvidence | null {
+  const parsed = parseLinkedInTitle(title, "");
+  const evidence = `${title} ${content.slice(0, 700)}`;
+  const company = companyFromPersonEvidence(title) ?? companyFromPersonEvidence(content.slice(0, 500));
+  const location = evidence.match(/(?:Location|based in)[:\s]+([A-Z][A-Za-z .'-]+(?:,\s*[A-Z][A-Za-z .'-]+)?)/i)?.[1]?.trim() ?? null;
+  return parsed.firstName && parsed.lastName ? { ...parsed, company: company ?? "", location, confidence: company && parsed.title ? 0.9 : 0.55 } : null;
+}
+
+async function groundedPersonExtraction(result: { title: string; url: string; content: string }, roles: string[]): Promise<PersonEvidence | null> {
+  const key = Deno.env.get("OPENAI_API_KEY");
+  if (!key) return null;
+  const response = await fetch("https://api.openai.com/v1/chat/completions", { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` }, body: JSON.stringify({ model: Deno.env.get("OPENAI_OUTREACH_MODEL") ?? "gpt-4.1-mini", temperature: 0, response_format: { type: "json_object" }, messages: [{ role: "system", content: "Extract only explicitly supported CURRENT person employment facts from supplied search evidence. Never use outside knowledge or infer missing facts. Return JSON {sufficient,first_name,last_name,current_title,current_company,location,supporting_quote,confidence}. If current employment is not explicit, sufficient=false." }, { role: "user", content: JSON.stringify({ canonical_linkedin_url: normalizeLinkedInProfile(result.url), result_title: result.title, result_snippet: result.content.slice(0, 1200), allowed_role_criteria: roles }) }] }) });
+  if (!response.ok) return null;
+  try {
+    const value = JSON.parse((await response.json()).choices?.[0]?.message?.content ?? "{}");
+    if (value.sufficient !== true || Number(value.confidence) < 0.8) return null;
+    const fields = [value.first_name, value.last_name, value.current_title, value.current_company];
+    if (!fields.every((field) => typeof field === "string" && field.trim())) return null;
+    const supplied = `${result.title} ${result.content}`.toLowerCase();
+    if (!fields.every((field) => normalizedEvidenceTokens(String(field)).some((token) => supplied.includes(token)))) return null;
+    return { firstName: value.first_name.trim(), lastName: value.last_name.trim(), title: value.current_title.trim(), company: value.current_company.trim(), location: typeof value.location === "string" ? value.location.trim() || null : null, confidence: Math.min(0.99, Number(value.confidence)) };
+  } catch { return null; }
 }
 
 function matchesIcpCompanyEvidence(evidence: string, icp: ICP): boolean {
