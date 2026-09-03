@@ -590,7 +590,10 @@ async function discoverVerifiedProspects(icp: ICP, maxProspects: number, diagnos
 
   const prospects: Prospect[] = [];
   const seenLinkedIn = new Set<string>();
-  let aiExtractionBudget = 8;
+  // Keep preview comfortably below the Edge request deadline. Deterministic
+  // extraction remains primary; only the two strongest unresolved results may
+  // use the grounded model fallback.
+  let aiExtractionBudget = 2;
   for (const candidate of companyCandidates) {
     if (prospects.length >= maxProspects) break;
     const rootUrl = rootWebsite(candidate.url);
