@@ -128,6 +128,7 @@ Deno.serve(async (req: Request) => {
       const prospects = await discoverVerifiedProspects(icp, maxProspects);
       return json({
         status: "preview",
+        source_provider: "Tavily search + Jina Reader",
         persisted: false,
         execution_jobs_created: 0,
         prospects: prospects.map((prospect) => ({
@@ -319,9 +320,17 @@ Deno.serve(async (req: Request) => {
         if (windowError || !windowValidation?.valid) throw pipelineError("invalid_campaign_schedule", "Choose at least one sending day, valid hours, and an IANA timezone", 409);
       }
 
-      const prospects = await discoverVerifiedProspects(icp, maxProspects);
+      const reviewedTargets = Array.isArray(body.reviewed_linkedin_urls)
+        ? [...new Set(body.reviewed_linkedin_urls.map((value: unknown) => typeof value === "string" ? normalizeLinkedInProfile(value) : null).filter((value): value is string => Boolean(value)))]
+        : [];
+      if (reviewedTargets.length === 0) {
+        throw pipelineError("reviewed_prospects_required", "Review source-verified prospects before launching the campaign", 409);
+      }
+      const reviewedTargetSet = new Set(reviewedTargets);
+      const prospects = (await discoverVerifiedProspects(icp, maxProspects))
+        .filter((prospect) => reviewedTargetSet.has(prospect.linkedinUrl));
       if (prospects.length === 0) {
-        throw new Error("No verifiable LinkedIn decision makers were discovered for the selected ICP");
+        throw pipelineError("reviewed_prospects_not_revalidated", "The reviewed prospects could not be revalidated from current source evidence. Discover and review again before launch", 409);
       }
 
       const createdJobs: string[] = [];

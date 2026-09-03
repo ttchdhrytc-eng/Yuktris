@@ -22,6 +22,18 @@ test('Campaigns has an explicit create path, truthful query errors, and schedule
   assert.match(campaigns, /No campaigns yet/);
   assert.match(campaigns, /operating_days:[\s\S]*operating_hours:[\s\S]*outreach_timezone:/);
   assert.match(campaigns, /Review & Launch/);
+  assert.match(campaigns, /Find Prospects with AI/);
+  assert.match(campaigns, /preview_discovery/);
+  assert.match(campaigns, /discoveryPreview\.length === 0/);
+  assert.match(campaigns, /reviewed_linkedin_urls: discoveryPreview\.map/);
+});
+
+test('launch revalidates only canonical prospects explicitly reviewed from source-backed discovery', () => {
+  const pipeline = readFileSync(resolve(root, 'supabase/functions/linkedin-v1-pipeline/index.ts'), 'utf8');
+  assert.match(pipeline, /reviewed_prospects_required/);
+  assert.match(pipeline, /reviewedTargetSet\.has\(prospect\.linkedinUrl\)/);
+  assert.match(pipeline, /reviewed_prospects_not_revalidated/);
+  assert.match(pipeline, /source_provider: "Tavily search \+ Jina Reader"/);
 });
 
 test('Prospect reads and mutations remain scoped to the authenticated workspace', () => {

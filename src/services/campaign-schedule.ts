@@ -12,6 +12,16 @@ export function normalizeIanaTimezone(value: string): string {
   return TIMEZONE_ALIASES[trimmed] ?? trimmed;
 }
 
+export function detectBrowserIanaTimezone(resolved = Intl.DateTimeFormat().resolvedOptions().timeZone): string {
+  const timezone = normalizeIanaTimezone(resolved || '');
+  return isIanaTimezone(timezone) ? timezone : 'UTC';
+}
+
+export function resolveNewCampaignTimezone(persisted: string | null | undefined, detected: string): string {
+  const saved = normalizeIanaTimezone(persisted ?? '');
+  return isIanaTimezone(saved) ? saved : detectBrowserIanaTimezone(detected);
+}
+
 export function isIanaTimezone(value: string): boolean {
   try {
     new Intl.DateTimeFormat('en-US', { timeZone: normalizeIanaTimezone(value) }).format();

@@ -9,18 +9,20 @@ export type PersistedScheduleDraft = {
 export type CampaignUiState = {
   expandedCampaign: string | null;
   scheduleDraft: PersistedScheduleDraft | null;
+  newCampaignTimezone: string | null;
 };
 
 const storageKey = (workspaceId: string) => `yuktris:campaigns-ui:${workspaceId}`;
 
 export function readCampaignUiState(workspaceId?: string): CampaignUiState {
-  const fallback = { expandedCampaign: null, scheduleDraft: null };
+  const fallback = { expandedCampaign: null, scheduleDraft: null, newCampaignTimezone: null };
   if (!workspaceId || typeof sessionStorage === 'undefined') return fallback;
   try {
     const value = JSON.parse(sessionStorage.getItem(storageKey(workspaceId)) ?? 'null') as Partial<CampaignUiState> | null;
     return {
       expandedCampaign: typeof value?.expandedCampaign === 'string' ? value.expandedCampaign : null,
       scheduleDraft: validScheduleDraft(value?.scheduleDraft) ? value.scheduleDraft : null,
+      newCampaignTimezone: typeof value?.newCampaignTimezone === 'string' ? value.newCampaignTimezone : null,
     };
   } catch {
     return fallback;

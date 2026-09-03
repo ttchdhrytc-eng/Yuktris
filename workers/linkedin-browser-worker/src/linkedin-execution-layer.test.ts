@@ -410,7 +410,7 @@ test('Campaigns transient expansion and schedule editor state survive remount', 
   assert.match(campaignUiState, /sessionStorage\.setItem/);
   assert.match(campaignUiState, /yuktris:campaigns-ui:\$\{workspaceId\}/);
   assert.match(campaignsPage, /readCampaignUiState\(workspace\?\.id\)/);
-  assert.match(campaignsPage, /writeCampaignUiState\(workspace\?\.id, \{ expandedCampaign, scheduleDraft \}\)/);
+  assert.match(campaignsPage, /writeCampaignUiState\(workspace\?\.id, \{ \.\.\.current, expandedCampaign, scheduleDraft \}\)/);
 });
 test('persisted controlled generation restores after refresh without creating another', () => {
   assert.match(campaignsPage, /controlled_acceptance_generations/);

@@ -17,7 +17,7 @@ import { isLinkedInOutboundEnabled } from '@/lib/linkedinExecutionMode';
 import type { FullICP } from '@/types/icp-intelligence';
 import { fetchCampaignMetrics } from '@/services/campaign-reporting';
 import { fetchCampaignProspects } from '@/services/campaign-prospects';
-import { CAMPAIGN_SENDING_DAYS, CAMPAIGN_WEEKDAYS, formatCampaignWindow, isIanaTimezone, nextCampaignSendingWindow, normalizeIanaTimezone, parseCampaignDays, parseCampaignHours } from '@/services/campaign-schedule';
+import { CAMPAIGN_SENDING_DAYS, CAMPAIGN_WEEKDAYS, detectBrowserIanaTimezone, formatCampaignWindow, isIanaTimezone, nextCampaignSendingWindow, normalizeIanaTimezone, parseCampaignDays, parseCampaignHours, resolveNewCampaignTimezone } from '@/services/campaign-schedule';
 import { readCampaignUiState, writeCampaignUiState, type PersistedScheduleDraft } from '@/services/campaign-ui-state';
 
 const STEPS = ['Campaign', 'ICP', 'LinkedIn account', 'Outreach', 'Limits & Schedule', 'Review & Launch'];
@@ -25,6 +25,7 @@ const SENDING_DAYS = CAMPAIGN_SENDING_DAYS;
 const WEEKDAYS = CAMPAIGN_WEEKDAYS;
 const TIMEZONE_SUGGESTIONS = ['Asia/Kolkata', 'America/New_York', 'Europe/London', 'America/Los_Angeles', 'Asia/Singapore', 'Australia/Sydney', 'UTC'];
 type ScheduleDraft = PersistedScheduleDraft;
+type DiscoveryPreview = { company_name: string; company_website: string; contact_name: string; contact_title: string; linkedin_url: string; evidence: string; confidence_score: number };
 type AcceptanceGeneration = {
   id: string;
   campaign_id: string;
@@ -52,7 +53,7 @@ export function CampaignsPage() {
   const [days, setDays] = useState<string[]>(WEEKDAYS);
   const [startTime, setStartTime] = useState('09:00');
   const [endTime, setEndTime] = useState('17:00');
-  const [outreachTimezone, setOutreachTimezone] = useState(() => normalizeIanaTimezone(Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'));
+  const [outreachTimezone, setOutreachTimezone] = useState(() => detectBrowserIanaTimezone());
   const [launching, setLaunching] = useState(false);
   const restoredUi = useMemo(() => readCampaignUiState(workspace?.id), [workspace?.id]);
   const [expandedCampaign, setExpandedCampaign] = useState<string | null>(() => restoredUi.expandedCampaign);
@@ -62,12 +63,30 @@ export function CampaignsPage() {
   const [preparingAcceptance, setPreparingAcceptance] = useState(false);
   const [scheduleDraft, setScheduleDraft] = useState<ScheduleDraft | null>(() => restoredUi.scheduleDraft);
   const [savingSchedule, setSavingSchedule] = useState(false);
+  const [discoveryPreview, setDiscoveryPreview] = useState<DiscoveryPreview[]>([]);
+  const [discovering, setDiscovering] = useState(false);
+  const [discoveryError, setDiscoveryError] = useState<string | null>(null);
   const initializationKey = useRef(crypto.randomUUID());
   const campaignBuilderRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    writeCampaignUiState(workspace?.id, { expandedCampaign, scheduleDraft });
+    const current = readCampaignUiState(workspace?.id);
+    writeCampaignUiState(workspace?.id, { ...current, expandedCampaign, scheduleDraft });
   }, [workspace?.id, expandedCampaign, scheduleDraft]);
+
+  useEffect(() => {
+    if (!workspace?.id) return;
+    const persisted = readCampaignUiState(workspace.id).newCampaignTimezone;
+    setOutreachTimezone(resolveNewCampaignTimezone(persisted, Intl.DateTimeFormat().resolvedOptions().timeZone));
+  }, [workspace?.id]);
+
+  useEffect(() => { setDiscoveryPreview([]); setDiscoveryError(null); }, [icpId]);
+
+  const updateNewCampaignTimezone = (value: string) => {
+    const timezone = normalizeIanaTimezone(value);
+    setOutreachTimezone(timezone);
+    if (workspace?.id) writeCampaignUiState(workspace.id, { ...readCampaignUiState(workspace.id), newCampaignTimezone: timezone });
+  };
 
   const connectedAccounts = (accounts.data ?? []).filter((a) => a.connection_state === 'connected' && ['healthy', 'degraded'].includes(a.health_status) && a.profile_url);
   const selectedIcp = (icps.data ?? []).find((i) => i.id === icpId);
@@ -139,6 +158,23 @@ export function CampaignsPage() {
     acceptanceGenerations.data?.find((generation) => generation.campaign_id === campaignId && generation.contact_id === contactId) ?? null;
 
   const payload = useMemo(() => (selectedIcp ? mapIcp(selectedIcp) : null), [selectedIcp]);
+  async function findProspects() {
+    if (!workspace || !payload || discovering) return;
+    setDiscovering(true);
+    setDiscoveryError(null);
+    try {
+      const { data, error } = await supabase.functions.invoke('linkedin-v1-pipeline', { body: { action: 'preview_discovery', workspace_id: workspace.id, icp: payload, max_prospects: Math.min(dailyLimit, 5) } });
+      if (error) throw new Error(await edgeFunctionError(error));
+      const prospects = Array.isArray(data?.prospects) ? data.prospects as DiscoveryPreview[] : [];
+      if (!prospects.length) throw new Error('No source-verified LinkedIn prospects were found. Adjust the ICP and try again.');
+      setDiscoveryPreview(prospects);
+      toast.success(`${prospects.length} source-verified prospects found. Review them before launch.`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Prospect discovery failed';
+      setDiscoveryError(message);
+      setDiscoveryPreview([]);
+    } finally { setDiscovering(false); }
+  }
   async function launch() {
     if (!outboundEnabled) {
       toast.info('LinkedIn outbound is globally disabled. Campaign configuration remains saved.');
@@ -163,6 +199,7 @@ export function CampaignsPage() {
           },
           icp: payload,
           max_prospects: Math.min(dailyLimit, 5),
+          reviewed_linkedin_urls: discoveryPreview.map((prospect) => prospect.linkedin_url),
           require_calendar: false,
           require_gmail: false,
         },
@@ -176,6 +213,8 @@ export function CampaignsPage() {
       setName('');
       setIcpId('');
       setAccountId('');
+      setDiscoveryPreview([]);
+      setDiscoveryError(null);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Campaign could not be launched');
     } finally {
@@ -334,7 +373,7 @@ export function CampaignsPage() {
             <Field label="Daily connection limit">
               <Input type="number" min={1} max={20} value={dailyLimit} onChange={(e) => setDailyLimit(Number(e.target.value))} />
             </Field>
-            <ScheduleEditor days={days} start={startTime} end={endTime} timezone={outreachTimezone} onDays={setDays} onStart={setStartTime} onEnd={setEndTime} onTimezone={setOutreachTimezone} />
+            <ScheduleEditor days={days} start={startTime} end={endTime} timezone={outreachTimezone} onDays={setDays} onStart={setStartTime} onEnd={setEndTime} onTimezone={updateNewCampaignTimezone} />
             {nextWindow && <div className="rounded-lg border border-brand-500/20 bg-brand-500/5 p-3 text-sm text-ink-200"><CalendarClock className="mr-2 inline h-4 w-4" />Next outreach window: {formatCampaignWindow(nextWindow.toISOString(), outreachTimezone)}</div>}
           </div>
         )}
@@ -350,6 +389,11 @@ export function CampaignsPage() {
               <Review label="Next outreach window" value={nextWindow ? formatCampaignWindow(nextWindow.toISOString(), outreachTimezone) : 'Invalid schedule'} />
             </div>
             {!outboundEnabled && <p className="rounded-lg border border-warning-500/20 bg-warning-500/5 p-3 text-sm text-warning-300">LinkedIn outbound is globally disabled. Your campaign will be saved without executing outreach.</p>}
+            <div className="rounded-xl border border-gold-500/15 p-4">
+              <div className="flex flex-wrap items-center justify-between gap-3"><div><p className="text-sm font-medium text-ink-100">AI prospect discovery</p><p className="mt-1 text-xs text-ink-500">Find real, source-backed LinkedIn prospects matching this ICP. Nothing is queued until you explicitly launch.</p></div><Button type="button" variant="secondary" loading={discovering} onClick={() => void findProspects()}>Find Prospects with AI</Button></div>
+              {discoveryError && <Reason text={discoveryError} />}
+              {discoveryPreview.length > 0 && <div className="mt-4 space-y-2"><p className="text-xs font-medium text-success-400">{discoveryPreview.length} verified prospects found</p>{discoveryPreview.map((prospect) => <div key={prospect.linkedin_url} className="rounded-lg bg-maroon-900/50 p-3"><div className="flex items-start justify-between gap-3"><div><p className="text-sm font-medium text-ink-100">{prospect.contact_name}</p><p className="text-xs text-ink-500">{prospect.contact_title} · {prospect.company_name}</p></div><Badge tone="neutral">{Math.round(prospect.confidence_score * 100)}% fit</Badge></div><p className="mt-2 text-xs text-ink-400">{prospect.evidence}</p><p className="mt-1 text-xs text-brand-400">Source: {prospect.company_website} · canonical LinkedIn profile verified</p></div>)}</div>}
+            </div>
           </div>
         )}
         <div className="mt-8 flex justify-between">
@@ -363,7 +407,7 @@ export function CampaignsPage() {
               <ChevronRight className="h-4 w-4" />
             </Button>
           ) : (
-            <Button loading={launching} disabled={!outboundEnabled} onClick={launch}>
+            <Button loading={launching} disabled={!outboundEnabled || discoveryPreview.length === 0} onClick={launch}>
               <Rocket className="h-4 w-4" />
               Launch Campaign
             </Button>
