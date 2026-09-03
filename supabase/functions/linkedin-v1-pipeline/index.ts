@@ -159,7 +159,14 @@ Deno.serve(async (req: Request) => {
       const accountId = requireString(body.linkedin_account_id, "linkedin_account_id");
       const maxProspects = clampNumber(body.max_prospects, 1, 5, 3);
       const diagnostics = newDiscoveryDiagnostics();
-      const discovered = await discoverVerifiedProspects(icp, maxProspects, diagnostics);
+      const discovered = await Promise.race([
+        discoverVerifiedProspects(icp, maxProspects, diagnostics),
+        new Promise<Prospect[]>((resolve) => setTimeout(() => {
+          reject(diagnostics, "internal_deadline_reached");
+          diagnostics.timingsMs.total = diagnostics.internalDeadlineMs;
+          resolve([]);
+        }, diagnostics.internalDeadlineMs)),
+      ]);
       const historyStarted = Date.now();
       const prospects = await excludeHistoricallyUnsafeProspects(admin, workspaceId, accountId, discovered, diagnostics);
       diagnostics.timingsMs.historical_exclusion = Date.now() - historyStarted;
@@ -849,7 +856,9 @@ async function excludeHistoricallyUnsafeProspects(
     checked(admin.from("linkedin_write_audit").select("id,target_identifier,execution_result").eq("workspace_id", workspaceId).eq("linkedin_account_id", accountId), "write audit"),
     checked(admin.from("browser_execution_queue").select("id,action_type,action_params,status,result,interaction_crossed").eq("workspace_id", workspaceId).eq("account_id", accountId), "browser queue"),
     checked(admin.from("controlled_acceptance_generations").select("id,target_identifier,status").eq("workspace_id", workspaceId).eq("linkedin_account_id", accountId), "acceptance generation"),
-    checked(admin.from("linkedin_production_acceptance_authorizations").select("id,canonical_target_url,status").eq("workspace_id", workspaceId).eq("linkedin_account_id", accountId), "production acceptance authorization"),
+    Deno.env.get("SUPABASE_URL")?.includes("aljpmtuekghwzrnuwkat")
+      ? checked(admin.from("linkedin_production_acceptance_authorizations").select("id,canonical_target_url,status").eq("workspace_id", workspaceId).eq("linkedin_account_id", accountId), "production acceptance authorization")
+      : Promise.resolve([]),
   ]);
   const contactTargets = new Map<string, string>();
   for (const contact of contacts) {
