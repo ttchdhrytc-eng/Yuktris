@@ -617,7 +617,7 @@ async function discoverVerifiedProspects(icp: ICP, maxProspects: number, diagnos
       const parsed = parseLinkedInTitle(match.title, "");
       const sourcedCompany = companyFromPersonEvidence(match.title);
       if (!parsed.firstName || !parsed.lastName || !parsed.title || !sourcedCompany) { diagnostics.rejectedByIdentityParsing += 1; continue; }
-      if (!isDecisionMakerTitle(parsed.title) || !sameCompanyEvidence(sourcedCompany, companyName) || !matchesGeographyEvidence(`${match.title} ${(match.content ?? "").slice(0, 600)}`, icp.geography ?? [])) {
+      if (!isDecisionMakerTitle(parsed.title) || !sameCompanyEvidence(sourcedCompany, companyName) || !matchesGeographyEvidence(`${candidate.title} ${candidate.content ?? ""} ${websiteText}`, icp.geography ?? [])) {
         diagnostics.rejectedByEvidence += 1;
         continue;
       }
@@ -660,7 +660,7 @@ async function discoverVerifiedProspects(icp: ICP, maxProspects: number, diagnos
         const parsed = parseLinkedInTitle(person.title, "");
         const companyName = companyFromPersonEvidence(person.title);
         if (!parsed.firstName || !parsed.lastName || !parsed.title || !companyName) { diagnostics.rejectedByIdentityParsing += 1; continue; }
-        if (!roles.some((role) => hasEvidenceToken(parsed.title, role, ["head", "of", "and", "the", "manager", "lead"])) || !isDecisionMakerTitle(parsed.title) || !matchesGeographyEvidence(`${person.title} ${(person.content ?? "").slice(0, 600)}`, icp.geography ?? [])) { diagnostics.rejectedByEvidence += 1; continue; }
+        if (!roles.some((role) => hasEvidenceToken(parsed.title, role, ["head", "of", "and", "the", "manager", "lead"])) || !isDecisionMakerTitle(parsed.title)) { diagnostics.rejectedByEvidence += 1; continue; }
 
         diagnostics.searchQueries += 1;
         const officialResults = await tavilySearch(tavilyKey, `\"${companyName}\" official company website`, 5);
@@ -670,6 +670,7 @@ async function discoverVerifiedProspects(icp: ICP, maxProspects: number, diagnos
         const companyWebsite = rootWebsite(official.url);
         const companyDescription = await jinaRead(companyWebsite).then((value) => { diagnostics.companyResearchSucceeded += 1; return value; }).catch(() => { diagnostics.companyResearchFailed += 1; return official.content ?? ""; });
         if (!matchesIcpCompanyEvidence(`${official.title} ${official.content ?? ""} ${companyDescription}`, icp)) { diagnostics.rejectedByEvidence += 1; continue; }
+        if (!matchesGeographyEvidence(`${official.title} ${official.content ?? ""} ${companyDescription}`, icp.geography ?? [])) { diagnostics.rejectedByEvidence += 1; continue; }
         seenLinkedIn.add(linkedinUrl);
         prospects.push({
           companyName,
