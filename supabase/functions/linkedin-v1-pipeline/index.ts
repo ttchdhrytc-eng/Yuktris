@@ -32,9 +32,10 @@ type DiscoveryDiagnostics = {
   rejectedByIdentityParsing: number;
   rejectedByDedupe: number;
   finalCandidates: number;
+  historicalExcluded: number;
 };
 
-const newDiscoveryDiagnostics = (): DiscoveryDiagnostics => ({ searchQueries: 0, providerResults: 0, companyCandidates: 0, companyResearchSucceeded: 0, companyResearchFailed: 0, personResults: 0, canonicalProfileUrls: 0, rejectedByEvidence: 0, rejectedByIdentityParsing: 0, rejectedByDedupe: 0, finalCandidates: 0 });
+const newDiscoveryDiagnostics = (): DiscoveryDiagnostics => ({ searchQueries: 0, providerResults: 0, companyCandidates: 0, companyResearchSucceeded: 0, companyResearchFailed: 0, personResults: 0, canonicalProfileUrls: 0, rejectedByEvidence: 0, rejectedByIdentityParsing: 0, rejectedByDedupe: 0, finalCandidates: 0, historicalExcluded: 0 });
 
 type Prospect = {
   companyName: string;
@@ -46,6 +47,8 @@ type Prospect = {
   linkedinUrl: string;
   evidence: string;
   confidenceScore: number;
+  companyFit: string;
+  personFit: string;
 };
 
 Deno.serve(async (req: Request) => {
@@ -143,9 +146,10 @@ Deno.serve(async (req: Request) => {
 
     if (action === "preview_discovery") {
       const icp = (body.icp ?? {}) as ICP;
+      const accountId = requireString(body.linkedin_account_id, "linkedin_account_id");
       const maxProspects = clampNumber(body.max_prospects, 1, 5, 3);
       const diagnostics = newDiscoveryDiagnostics();
-      const prospects = await discoverVerifiedProspects(icp, maxProspects, diagnostics);
+      const prospects = await excludeHistoricallyUnsafeProspects(admin, workspaceId, accountId, await discoverVerifiedProspects(icp, maxProspects, diagnostics), diagnostics);
       return json({
         status: "preview",
         source_provider: "Tavily search + Jina Reader",
@@ -160,6 +164,8 @@ Deno.serve(async (req: Request) => {
           contact_title: prospect.contactTitle,
           linkedin_url: prospect.linkedinUrl,
           evidence: prospect.evidence.slice(0, 600),
+          company_fit: prospect.companyFit,
+          person_fit: prospect.personFit,
           confidence_score: prospect.confidenceScore,
         })),
       });
@@ -349,7 +355,8 @@ Deno.serve(async (req: Request) => {
         throw pipelineError("reviewed_prospects_required", "Review source-verified prospects before launching the campaign", 409);
       }
       const reviewedTargetSet = new Set(reviewedTargets);
-      const prospects = (await discoverVerifiedProspects(icp, maxProspects))
+      const safeProspects = await excludeHistoricallyUnsafeProspects(admin, workspaceId, account.id, await discoverVerifiedProspects(icp, maxProspects));
+      const prospects = safeProspects
         .filter((prospect) => reviewedTargetSet.has(prospect.linkedinUrl));
       if (prospects.length === 0) {
         throw pipelineError("reviewed_prospects_not_revalidated", "The reviewed prospects could not be revalidated from current source evidence. Discover and review again before launch", 409);
@@ -608,7 +615,12 @@ async function discoverVerifiedProspects(icp: ICP, maxProspects: number, diagnos
       const linkedinUrl = normalizeLinkedInProfile(match.url);
       if (!linkedinUrl) continue;
       const parsed = parseLinkedInTitle(match.title, "");
-      if (!parsed.firstName || !parsed.lastName || !parsed.title) { diagnostics.rejectedByIdentityParsing += 1; continue; }
+      const sourcedCompany = companyFromPersonEvidence(match.title);
+      if (!parsed.firstName || !parsed.lastName || !parsed.title || !sourcedCompany) { diagnostics.rejectedByIdentityParsing += 1; continue; }
+      if (!isDecisionMakerTitle(parsed.title) || !sameCompanyEvidence(sourcedCompany, companyName) || !matchesGeographyEvidence(`${match.title} ${(match.content ?? "").slice(0, 600)}`, icp.geography ?? [])) {
+        diagnostics.rejectedByEvidence += 1;
+        continue;
+      }
       seenLinkedIn.add(linkedinUrl);
       prospects.push({
         companyName,
@@ -619,6 +631,8 @@ async function discoverVerifiedProspects(icp: ICP, maxProspects: number, diagnos
         contactTitle: parsed.title,
         linkedinUrl,
         evidence: `${match.title}. ${match.content ?? ""}`,
+        companyFit: `${companyName} has an official source matching the selected ${icp.subIndustry || icp.industry || "company"} ICP.`,
+        personFit: `${parsed.firstName} ${parsed.lastName} is source-identified as ${parsed.title} at ${sourcedCompany}.`,
         confidenceScore: Math.max(0.5, Math.min(0.99, 0.45 + Number(candidate.score ?? 0) * 0.2 + Number(match.score ?? 0) * 0.35)),
       });
       break;
@@ -646,7 +660,7 @@ async function discoverVerifiedProspects(icp: ICP, maxProspects: number, diagnos
         const parsed = parseLinkedInTitle(person.title, "");
         const companyName = companyFromPersonEvidence(person.title);
         if (!parsed.firstName || !parsed.lastName || !parsed.title || !companyName) { diagnostics.rejectedByIdentityParsing += 1; continue; }
-        if (!roles.some((role) => hasEvidenceToken(parsed.title, role, ["head", "of", "and", "the", "manager", "lead"]))) { diagnostics.rejectedByEvidence += 1; continue; }
+        if (!roles.some((role) => hasEvidenceToken(parsed.title, role, ["head", "of", "and", "the", "manager", "lead"])) || !isDecisionMakerTitle(parsed.title) || !matchesGeographyEvidence(`${person.title} ${(person.content ?? "").slice(0, 600)}`, icp.geography ?? [])) { diagnostics.rejectedByEvidence += 1; continue; }
 
         diagnostics.searchQueries += 1;
         const officialResults = await tavilySearch(tavilyKey, `\"${companyName}\" official company website`, 5);
@@ -666,6 +680,8 @@ async function discoverVerifiedProspects(icp: ICP, maxProspects: number, diagnos
           contactTitle: parsed.title,
           linkedinUrl,
           evidence: `${person.title}. ${person.content ?? ""}`,
+          companyFit: `${companyName} has an official source matching the selected ${icp.subIndustry || icp.industry || "company"} ICP.`,
+          personFit: `${parsed.firstName} ${parsed.lastName} is source-identified as ${parsed.title} at ${companyName}.`,
           confidenceScore: Math.max(0.5, Math.min(0.99, 0.5 + Number(person.score ?? 0) * 0.35 + Number(official.score ?? 0) * 0.15)),
         });
       }
@@ -699,6 +715,84 @@ function matchesIcpCompanyEvidence(evidence: string, icp: ICP): boolean {
     .map((value) => value.toLowerCase().replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim())
     .filter((value) => value.split(" ").length >= 2);
   return phrases.some((phrase) => normalizedEvidence.includes(phrase));
+}
+
+function normalizedEvidenceTokens(value: string, stopWords: string[] = []): string[] {
+  return value.toLowerCase().split(/[^a-z0-9]+/).filter((token) => token.length >= 3 && !stopWords.includes(token));
+}
+
+function sameCompanyEvidence(left: string, right: string): boolean {
+  const stopWords = ["the", "group", "solutions", "services", "technologies", "technology", "consulting", "inc", "llc", "ltd"];
+  const leftTokens = normalizedEvidenceTokens(left, stopWords);
+  const rightTokens = new Set(normalizedEvidenceTokens(right, stopWords));
+  return leftTokens.length > 0 && leftTokens.some((token) => rightTokens.has(token));
+}
+
+function isDecisionMakerTitle(title: string): boolean {
+  return /\b(owner|founder|co-founder|chief|ceo|president|principal|partner|vice president|vp|director|head)\b/i.test(title);
+}
+
+function matchesGeographyEvidence(evidence: string, geography: string[]): boolean {
+  if (geography.length === 0) return true;
+  const normalized = ` ${evidence.toLowerCase().replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim()} `;
+  return geography.some((place) => {
+    const expected = place.toLowerCase().replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
+    if (!expected) return false;
+    if (normalized.includes(` ${expected} `)) return true;
+    if (["united states", "united states of america", "usa", "us"].includes(expected)) return /\b(united states|usa|u s|us)\b/.test(normalized);
+    return false;
+  });
+}
+
+async function excludeHistoricallyUnsafeProspects(
+  admin: any,
+  workspaceId: string,
+  accountId: string,
+  prospects: Prospect[],
+  diagnostics = newDiscoveryDiagnostics(),
+): Promise<Prospect[]> {
+  if (prospects.length === 0) return prospects;
+  const targets = new Set(prospects.map((prospect) => prospect.linkedinUrl));
+  const unsafe = new Set<string>();
+  const checked = async (query: PromiseLike<{ data: any; error: any }>, source: string): Promise<any[]> => {
+    const { data, error } = await query;
+    if (error) throw pipelineError("historical_exclusion_unavailable", `Could not verify ${source} history; discovery is blocked`, 503);
+    return Array.isArray(data) ? data : [];
+  };
+  const canonical = (value: unknown): string | null => typeof value === "string" ? normalizeLinkedInProfile(value) : null;
+  const [contacts, jobs, audits, queues, generations, authorizations] = await Promise.all([
+    checked(admin.from("contacts").select("id,normalized_linkedin_url,status").eq("workspace_id", workspaceId).in("normalized_linkedin_url", [...targets]), "contact"),
+    checked(admin.from("linkedin_execution_jobs").select("id,contact_id,action_payload,status").eq("workspace_id", workspaceId).eq("linkedin_account_id", accountId), "execution job"),
+    checked(admin.from("linkedin_write_audit").select("id,target_identifier,execution_result").eq("workspace_id", workspaceId).eq("linkedin_account_id", accountId), "write audit"),
+    checked(admin.from("browser_execution_queue").select("id,action_type,action_params,status,result,interaction_crossed").eq("workspace_id", workspaceId).eq("account_id", accountId), "browser queue"),
+    checked(admin.from("controlled_acceptance_generations").select("id,target_identifier,status").eq("workspace_id", workspaceId).eq("linkedin_account_id", accountId), "acceptance generation"),
+    checked(admin.from("linkedin_production_acceptance_authorizations").select("id,canonical_target_url,status").eq("workspace_id", workspaceId).eq("linkedin_account_id", accountId), "production acceptance authorization"),
+  ]);
+  const contactTargets = new Map<string, string>();
+  for (const contact of contacts) {
+    const target = canonical(contact.normalized_linkedin_url);
+    if (target) contactTargets.set(contact.id, target);
+    // A persisted contact represents a prior campaign reservation. Reusing it would
+    // bypass the canonical campaign/contact and lifetime-write uniqueness controls.
+    if (target) unsafe.add(target);
+  }
+  for (const job of jobs) {
+    const target = canonical(job.action_payload?.profile_url ?? job.action_payload?.target_identifier ?? job.action_payload?.linkedin_url) ?? contactTargets.get(job.contact_id);
+    if (target && targets.has(target)) unsafe.add(target);
+  }
+  for (const audit of audits) { const target = canonical(audit.target_identifier); if (target && targets.has(target)) unsafe.add(target); }
+  for (const queue of queues) {
+    const params = queue.action_params ?? {};
+    const target = canonical(params.profile_url ?? params.target_identifier ?? params.linkedin_url);
+    if (target && targets.has(target) && queue.action_type !== "linkedin_relationship_check") unsafe.add(target);
+  }
+  for (const generation of generations) { const target = canonical(generation.target_identifier); if (target && targets.has(target)) unsafe.add(target); }
+  for (const authorization of authorizations) {
+    const target = canonical(authorization.canonical_target_url);
+    if (target && targets.has(target) && !["expired", "revoked", "superseded"].includes(String(authorization.status))) unsafe.add(target);
+  }
+  diagnostics.historicalExcluded += unsafe.size;
+  return prospects.filter((prospect) => !unsafe.has(prospect.linkedinUrl));
 }
 
 function companyFromPersonEvidence(evidence: string): string | null {

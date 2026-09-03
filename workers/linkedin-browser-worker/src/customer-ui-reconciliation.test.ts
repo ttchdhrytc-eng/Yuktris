@@ -28,6 +28,8 @@ test('Campaigns has an explicit create path, truthful query errors, and schedule
   assert.match(campaigns, /reviewed_linkedin_urls: \[\.\.\.selectedProspectUrls\]/);
   assert.match(campaigns, /type="checkbox"/);
   assert.match(campaigns, /LinkedIn: \{prospect\.linkedin_url\}/);
+  assert.match(campaigns, /ICP fit:/);
+  assert.match(campaigns, /Why selected:/);
   assert.doesNotMatch(campaigns, /Calendar connected/);
 });
 
@@ -40,6 +42,11 @@ test('launch revalidates only canonical prospects explicitly reviewed from sourc
   assert.match(pipeline, /companyQueries/);
   assert.match(pipeline, /discoveryEmptyReason/);
   assert.match(pipeline, /diagnostics/);
+  assert.match(pipeline, /excludeHistoricallyUnsafeProspects/);
+  assert.match(pipeline, /linkedin_write_audit/);
+  assert.match(pipeline, /browser_execution_queue/);
+  assert.match(pipeline, /sameCompanyEvidence/);
+  assert.match(pipeline, /isDecisionMakerTitle/);
 });
 
 test('Prospect reads and mutations remain scoped to the authenticated workspace', () => {
