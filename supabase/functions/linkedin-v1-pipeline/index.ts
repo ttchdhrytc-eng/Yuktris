@@ -735,8 +735,18 @@ async function processReplenishment(admin: any, workspaceId: string, jobId: stri
     for (const prospect of safe) {
       const canonical = normalizeLinkedInProfile(prospect.linkedinUrl);
       if (!canonical) continue;
-      const { data: person, error: personError } = await admin.from("prospects").upsert({ workspace_id: workspaceId, linkedin_url: canonical, first_name: prospect.contactFirstName, last_name: prospect.contactLastName, title: prospect.contactTitle, company_name: prospect.companyName, company_website: prospect.companyWebsite, location: prospect.location, status: "new", identity_verified_at: new Date().toISOString(), updated_at: new Date().toISOString() }, { onConflict: "workspace_id,normalized_linkedin_url" }).select("id").single();
-      if (personError) throw personError;
+      const personFields = { linkedin_url: canonical, first_name: prospect.contactFirstName, last_name: prospect.contactLastName, title: prospect.contactTitle, company_name: prospect.companyName, company_website: prospect.companyWebsite, location: prospect.location, identity_verified_at: new Date().toISOString(), updated_at: new Date().toISOString() };
+      const { data: existingPerson, error: existingPersonError } = await admin.from("prospects").select("id").eq("workspace_id", workspaceId).eq("normalized_linkedin_url", canonical).maybeSingle();
+      if (existingPersonError) throw existingPersonError;
+      let person = existingPerson;
+      if (person) {
+        const { error: updateError } = await admin.from("prospects").update(personFields).eq("workspace_id", workspaceId).eq("id", person.id);
+        if (updateError) throw updateError;
+      } else {
+        const { data: insertedPerson, error: insertError } = await admin.from("prospects").insert({ workspace_id: workspaceId, ...personFields, status: "new" }).select("id").single();
+        if (insertError) throw insertError;
+        person = insertedPerson;
+      }
       const score = Math.max(0, Math.min(100, Math.round(prospect.confidenceScore * 100)));
       const { error: linkError } = await admin.from("icp_prospects").upsert({ workspace_id: workspaceId, icp_id: icpId, prospect_id: person.id, fit_score: score, fit_evidence: { company_fit: prospect.companyFit, person_fit: prospect.personFit }, provenance: { evidence: prospect.evidence.slice(0, 2000), official_company_url: prospect.companyWebsite, linkedin_url: canonical, source_confidence: prospect.sourceConfidence }, verification_status: "verified", intent_status: "unknown", intent_evidence: null, readiness: "ready", last_verified_at: new Date().toISOString(), updated_at: new Date().toISOString() }, { onConflict: "icp_id,prospect_id" });
       if (linkError) throw linkError;
