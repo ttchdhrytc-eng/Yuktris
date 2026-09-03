@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
-import { Users, Plus, Search, Trash2, Mail, Linkedin } from 'lucide-react';
+import { Users, Plus, Search, Trash2, Mail, Linkedin, Sparkles } from 'lucide-react';
 import { PageHeader } from '@/components/ui/PageHeader';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
@@ -55,6 +55,14 @@ export function ProspectsPage() {
   const { data: campaignProspects, isLoading: campaignProspectsLoading, isError: campaignProspectsError } = useQuery({
     queryKey: ['campaign-prospects', workspace?.id], enabled: !!workspace?.id,
     queryFn: () => fetchCampaignProspects(workspace!.id),
+  });
+  const inventory = useQuery({
+    queryKey: ['prospect-inventory', workspace?.id], enabled: !!workspace,
+    queryFn: async () => {
+      const { data, error } = await supabase.from('icp_prospects').select('id,fit_score,intent_status,readiness,verification_status,last_verified_at,icps(name),prospects(id,first_name,last_name,title,company_name,company_website,normalized_linkedin_url,status)').eq('workspace_id', workspace!.id).order('fit_score', { ascending: false });
+      if (error) throw error;
+      return data ?? [];
+    }, refetchInterval: 10_000,
   });
 
   const createMutation = useMutation({
@@ -118,7 +126,7 @@ export function ProspectsPage() {
     <div>
       <PageHeader
         title="Prospects"
-        description="Individual contacts in your outreach pipeline."
+        description="Real, verified prospects Yuktris discovers and maintains for your ICPs."
         actions={
           <Button onClick={() => setModalOpen(true)}>
             <Plus className="h-4 w-4" />
@@ -128,6 +136,16 @@ export function ProspectsPage() {
       />
 
       {(companiesError || prospectsError || campaignProspectsError) && <Card className="mb-4 border-error-500/30 p-4 text-sm text-error-300">Prospect data could not be loaded. Refresh this page; no prospect was added or changed.</Card>}
+
+      <div className="mb-5 grid grid-cols-2 gap-3 md:grid-cols-5">
+        <InventoryMetric label="Discovered" value={inventory.data?.length ?? 0} />
+        <InventoryMetric label="Verified" value={inventory.data?.filter((row) => row.verification_status === 'verified').length ?? 0} />
+        <InventoryMetric label="High fit" value={inventory.data?.filter((row) => row.fit_score >= 80 && row.verification_status === 'verified').length ?? 0} />
+        <InventoryMetric label="Intent evidenced" value={inventory.data?.filter((row) => row.intent_status === 'evidenced').length ?? 0} />
+        <InventoryMetric label="Ready" value={inventory.data?.filter((row) => row.readiness === 'ready' && row.verification_status === 'verified').length ?? 0} />
+      </div>
+
+      {(inventory.data?.length ?? 0) > 0 && <Card className="mb-5"><div className="border-b border-gold-500/10 px-4 py-3"><h2 className="flex items-center gap-2 text-sm font-semibold text-ink-100"><Sparkles className="h-4 w-4 text-gold-400" />Autonomous prospect inventory</h2><p className="text-xs text-ink-500">Fit and intent are tracked separately. Counts reflect persisted, source-verified records only.</p></div><div className="overflow-x-auto"><table className="w-full"><thead><tr className="border-b border-gold-500/10 text-left">{['Prospect','Company','ICP','Fit','Intent','Status'].map((label) => <th key={label} className="px-4 py-3 text-xs text-ink-500">{label}</th>)}</tr></thead><tbody>{inventory.data?.map((row: any) => <tr key={row.id} className="border-b border-gold-500/8 last:border-0"><td className="px-4 py-3"><p className="text-sm text-ink-100">{`${row.prospects?.first_name ?? ''} ${row.prospects?.last_name ?? ''}`.trim()}</p><p className="text-xs text-ink-500">{row.prospects?.title}</p></td><td className="px-4 py-3 text-sm text-ink-300">{row.prospects?.company_name}</td><td className="px-4 py-3 text-sm text-ink-300">{row.icps?.name}</td><td className="px-4 py-3 text-sm text-ink-300">{row.fit_score}%</td><td className="px-4 py-3 text-sm text-ink-300">{row.intent_status === 'evidenced' ? 'Evidenced' : 'No intent evidenced'}</td><td className="px-4 py-3 text-sm capitalize text-ink-300">{row.readiness}</td></tr>)}</tbody></table></div></Card>}
 
       <div className="flex flex-col sm:flex-row gap-3 mb-4">
         <div className="relative flex-1 max-w-sm">
@@ -279,4 +297,8 @@ export function ProspectsPage() {
       </Modal>
     </div>
   );
+}
+
+function InventoryMetric({ label, value }: { label: string; value: number }) {
+  return <Card className="p-3"><p className="text-xs text-ink-500">{label}</p><p className="mt-1 text-xl font-semibold text-ink-100">{value}</p></Card>;
 }

@@ -1,8 +1,8 @@
 import { NavLink } from 'react-router-dom';
 import {
   LayoutDashboard, Users, MessageSquare, Calendar,
-  Plug, Settings, Sparkles, ChevronDown, Rocket,
-  Zap,
+  Settings, Sparkles, ChevronDown, Rocket,
+  Zap, Target,
 } from 'lucide-react';
 import { useState } from 'react';
 import { cn } from '@/lib/utils';
@@ -26,11 +26,11 @@ const sections: { label: string; items: NavItem[] }[] = [
   {
     label: '',
     items: [
+      { to: '/app/prospects', label: 'Prospects', icon: Users },
       { to: '/app/campaigns', label: 'Campaigns', icon: Rocket },
-      { to: '/app/audience', label: 'ICP / Audience', icon: Users },
+      { to: '/app/audience', label: 'ICP & Offers', icon: Target },
       { to: '/app/inbox', label: 'Inbox', icon: MessageSquare },
       { to: '/app/meetings', label: 'Meetings', icon: Calendar },
-      { to: '/app/connections', label: 'Connections', icon: Plug },
     ],
   },
   {

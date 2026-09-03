@@ -31,6 +31,7 @@ const DashboardPage = lazy(() => import('@/pages/DashboardPage').then(m => ({ de
 const CampaignsPage = lazy(() => import('@/pages/CampaignsPage').then(m => ({ default: m.CampaignsPage })));
 const ConnectionsPage = lazy(() => import('@/pages/ConnectionsPage').then(m => ({ default: m.ConnectionsPage })));
 const ProspectsPage = lazy(() => import('@/pages/ProspectsPage').then(m => ({ default: m.ProspectsPage })));
+const ICPAndOffersPage = lazy(() => import('@/pages/ICPAndOffersPage').then(m => ({ default: m.ICPAndOffersPage })));
 const MeetingsPage = lazy(() => import('@/pages/MeetingsPage').then(m => ({ default: m.MeetingsPage })));
 const SettingsPage = lazy(() => import('@/pages/SettingsPage').then(m => ({ default: m.SettingsPage })));
 const BillingPage = lazy(() => import('@/pages/BillingPage').then(m => ({ default: m.BillingPage })));
@@ -109,7 +110,7 @@ export default function App() {
               {/* Protected app routes — new navigation */}
               <Route path="/app" element={<ProtectedApp><DashboardPage /></ProtectedApp>} />
               <Route path="/app/campaigns" element={<ProtectedApp><CampaignsPage /></ProtectedApp>} />
-              <Route path="/app/audience" element={<Navigate to="/app/prospects" replace />} />
+              <Route path="/app/audience" element={<ProtectedApp><ICPAndOffersPage /></ProtectedApp>} />
               <Route path="/app/prospects" element={<ProtectedApp><ProspectsPage /></ProtectedApp>} />
               <Route path="/app/inbox" element={<Navigate to="/app/conversations" replace />} />
               <Route path="/app/meetings" element={<ProtectedApp><MeetingsPage /></ProtectedApp>} />

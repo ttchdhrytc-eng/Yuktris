@@ -20,7 +20,7 @@ import { fetchCampaignProspects } from '@/services/campaign-prospects';
 import { CAMPAIGN_SENDING_DAYS, CAMPAIGN_WEEKDAYS, detectBrowserIanaTimezone, formatCampaignWindow, isIanaTimezone, nextCampaignSendingWindow, normalizeIanaTimezone, parseCampaignDays, parseCampaignHours, resolveNewCampaignTimezone } from '@/services/campaign-schedule';
 import { readCampaignUiState, writeCampaignUiState, type PersistedScheduleDraft } from '@/services/campaign-ui-state';
 
-const STEPS = ['Campaign', 'ICP', 'LinkedIn account', 'Outreach', 'Limits & Schedule', 'Review & Launch'];
+const STEPS = ['Goal & Audience', 'Outreach', 'Safety & Schedule', 'Review & Launch'];
 const SENDING_DAYS = CAMPAIGN_SENDING_DAYS;
 const WEEKDAYS = CAMPAIGN_WEEKDAYS;
 const TIMEZONE_SUGGESTIONS = ['Asia/Kolkata', 'America/New_York', 'Europe/London', 'America/Los_Angeles', 'Asia/Singapore', 'Australia/Sydney', 'UTC'];
@@ -68,6 +68,7 @@ export function CampaignsPage() {
   const [discovering, setDiscovering] = useState(false);
   const [discoveryError, setDiscoveryError] = useState<string | null>(null);
   const initializationKey = useRef(crypto.randomUUID());
+  const autoRequestedIcp = useRef(new Set<string>());
   const campaignBuilderRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -95,10 +96,19 @@ export function CampaignsPage() {
   const outboundEnabled = isLinkedInOutboundEnabled();
   const outboundUiStatus = linkedinOutboundUiStatus();
   const scheduleValid = days.length > 0 && startTime < endTime && isIanaTimezone(outreachTimezone);
-  const canContinue = [name.trim().length > 1, !!selectedIcp, !!selectedAccount, strategy.trim().length > 20, dailyLimit >= 1 && dailyLimit <= 20 && scheduleValid, true][step];
+  const canContinue = [name.trim().length > 1 && !!selectedIcp, strategy.trim().length > 20, !!selectedAccount && dailyLimit >= 1 && dailyLimit <= 20 && scheduleValid, true][step];
   const nextWindow = useMemo(() => nextCampaignSendingWindow(days, startTime, endTime, outreachTimezone), [days, startTime, endTime, outreachTimezone]);
   const mayManageAcceptance = import.meta.env.VITE_SUPABASE_URL?.includes('vdiqfiuqckaxdjkadinu') === true
     && members.some((member) => member.user_id === user?.id && member.status === 'active' && ['owner', 'admin'].includes(member.role));
+
+  useEffect(() => {
+    if (!workspace || !icpId || !selectedAccount || autoRequestedIcp.current.has(icpId)) return;
+    autoRequestedIcp.current.add(icpId);
+    void supabase.functions.invoke('linkedin-v1-pipeline', { body: { action: 'request_replenishment', workspace_id: workspace.id, icp_id: icpId, linkedin_account_id: selectedAccount.id, reason: 'inventory_below_threshold' } }).then(({ error }) => {
+      if (error) autoRequestedIcp.current.delete(icpId);
+      void queryClient.invalidateQueries({ queryKey: ['campaign-inventory', workspace.id, icpId] });
+    });
+  }, [workspace, icpId, selectedAccount, queryClient]);
 
   const existing = useQuery({
     queryKey: ['customer-campaigns', workspace?.id],
@@ -114,6 +124,14 @@ export function CampaignsPage() {
       };
     },
     placeholderData: (previous) => previous,
+  });
+  const inventory = useQuery({
+    queryKey: ['campaign-inventory', workspace?.id, icpId], enabled: !!workspace && !!icpId,
+    queryFn: async () => {
+      const { data, error } = await supabase.functions.invoke('linkedin-v1-pipeline', { body: { action: 'inventory_status', workspace_id: workspace!.id, icp_id: icpId } });
+      if (error) throw error;
+      return data?.inventory?.[0] ?? null;
+    }, refetchInterval: 10_000,
   });
   const campaignProspects = useQuery({
     queryKey: ['campaign-prospects', workspace?.id],
@@ -197,6 +215,8 @@ export function CampaignsPage() {
           linkedin_account_id: selectedAccount.id,
           campaign: {
             name,
+            icp_id: icpId,
+            targeting_mode: 'autonomous_pool',
             strategy,
             daily_limit: dailyLimit,
             operating_days: days.join(','),
@@ -206,7 +226,6 @@ export function CampaignsPage() {
           },
           icp: payload,
           max_prospects: Math.min(dailyLimit, 5),
-          reviewed_linkedin_urls: [...selectedProspectUrls],
           require_calendar: false,
           require_gmail: false,
         },
@@ -327,7 +346,7 @@ export function CampaignsPage() {
       {(accounts.isError || icps.isError) && <Reason text="Campaign prerequisites could not be loaded. Refresh this page; no campaign was launched." />}
       <div ref={campaignBuilderRef}>
       <Card className="p-6">
-        <div className="mb-8 grid grid-cols-2 gap-2 md:grid-cols-6">
+        <div className="mb-8 grid grid-cols-2 gap-2 md:grid-cols-4">
           {STEPS.map((label, i) => (
             <div key={label} className="flex items-center gap-2">
               <span className={`flex h-7 w-7 items-center justify-center rounded-full text-xs font-semibold ${i <= step ? 'bg-gold-500 text-maroon-950' : 'bg-maroon-900 text-ink-500'}`}>{i + 1}</span>
@@ -336,11 +355,12 @@ export function CampaignsPage() {
           ))}
         </div>
         {step === 0 && (
-          <Field label="Campaign name">
+          <div className="space-y-4"><Field label="Campaign name">
             <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="Q4 SaaS founders" />
           </Field>
+          <Field label="Use existing ICP"><Select value={icpId} onChange={(e) => setIcpId(e.target.value)}><option value="">Select an ICP</option>{(icps.data ?? []).map((i) => <option key={i.id} value={i.id}>{i.name}</option>)}</Select></Field><Button variant="secondary" onClick={() => location.assign('/app/audience')}>Create New ICP</Button></div>
         )}
-        {step === 1 && (
+        {false && (
           <div className="space-y-3">
             <Field label="Ideal customer profile">
               <Select value={icpId} onChange={(e) => setIcpId(e.target.value)}>
@@ -370,13 +390,13 @@ export function CampaignsPage() {
             {connectedAccounts.length === 0 && <Reason text="Connect or re-authenticate LinkedIn before launching." />}
           </Field>
         )}
-        {step === 3 && (
+        {step === 1 && (
           <Field label="Message strategy">
             <Textarea className="min-h-40" value={strategy} onChange={(e) => setStrategy(e.target.value)} />
             <p className="mt-2 text-xs text-ink-500">Yuktris generates prospect-specific copy from this strategy. You can review the direction here.</p>
           </Field>
         )}
-        {step === 4 && (
+        {step === 2 && (
           <div className="space-y-5">
             <Field label="Daily connection limit">
               <Input type="number" min={1} max={20} value={dailyLimit} onChange={(e) => setDailyLimit(Number(e.target.value))} />
@@ -385,13 +405,16 @@ export function CampaignsPage() {
             {nextWindow && <div className="rounded-lg border border-brand-500/20 bg-brand-500/5 p-3 text-sm text-ink-200"><CalendarClock className="mr-2 inline h-4 w-4" />Next outreach window: {formatCampaignWindow(nextWindow.toISOString(), outreachTimezone)}</div>}
           </div>
         )}
-        {step === 5 && (
+        {step === 3 && (
           <div className="space-y-4">
             <div className="grid gap-3 md:grid-cols-2">
               <Review label="Campaign" value={name} />
               <Review label="ICP" value={selectedIcp?.name ?? ''} />
               <Review label="LinkedIn account" value={selectedAccount?.profile_name ?? selectedAccount?.account_name ?? ''} />
-              <Review label="Estimated target pool" value={`Up to ${Math.min(dailyLimit, 5)} verified prospects in the initial run`} />
+              <Review label="Verified prospects" value={String(inventory.data?.counts?.verified ?? 0)} />
+              <Review label="High-fit prospects" value={String(inventory.data?.counts?.high_fit ?? 0)} />
+              <Review label="Ready prospects" value={String(inventory.data?.counts?.ready ?? 0)} />
+              <Review label="Discovery state" value={inventory.data?.prospecting_status?.replaceAll('_', ' ') ?? 'Building audience'} />
               <Review label="Message strategy" value={strategy} />
               <Review label="Sending schedule" value={`${dailyLimit}/day · ${days.map((d) => SENDING_DAYS.find(([value]) => value === d)?.[1]).join(', ')} · ${startTime}–${endTime} · ${outreachTimezone}`} />
               <Review label="Next outreach window" value={nextWindow ? formatCampaignWindow(nextWindow.toISOString(), outreachTimezone) : 'Invalid schedule'} />
@@ -399,11 +422,7 @@ export function CampaignsPage() {
             {outboundUiStatus === 'staging_disabled' && <p className="rounded-lg border border-warning-500/20 bg-warning-500/5 p-3 text-sm text-warning-300">Staging safety mode — LinkedIn outreach is disabled. You can test campaign setup and prospect discovery without sending anything.</p>}
             {outboundUiStatus === 'disabled' && <p className="rounded-lg border border-warning-500/20 bg-warning-500/5 p-3 text-sm text-warning-300">LinkedIn outreach is currently disabled. Your campaign will be saved without executing outreach.</p>}
             {outboundUiStatus === 'enabled' && <p className="rounded-lg border border-success-500/20 bg-success-500/5 p-3 text-sm text-success-300">LinkedIn outreach is enabled. No outreach starts until you explicitly launch this campaign.</p>}
-            <div className="rounded-xl border border-gold-500/15 p-4">
-              <div className="flex flex-wrap items-center justify-between gap-3"><div><p className="text-sm font-medium text-ink-100">AI prospect discovery</p><p className="mt-1 text-xs text-ink-500">Find real, source-backed LinkedIn prospects matching this ICP. Nothing is queued until you explicitly launch.</p></div><Button type="button" variant="secondary" loading={discovering} onClick={() => void findProspects()}>Find Prospects with AI</Button></div>
-              {discoveryError && <Reason text={discoveryError} />}
-              {discoveryPreview.length > 0 && <div className="mt-4 space-y-2"><p className="text-xs font-medium text-success-400">{discoveryPreview.length} verified prospects found · {selectedProspectUrls.size} selected</p>{discoveryPreview.length < Math.min(dailyLimit, 5) && <p className="text-xs text-ink-400">{discoveryPreview.length} high-confidence prospects matched this search. Yuktris excluded weaker candidates rather than lowering verification standards.</p>}{discoveryPreview.map((prospect) => { const selected = selectedProspectUrls.has(prospect.linkedin_url); return <label key={prospect.linkedin_url} className="block cursor-pointer rounded-lg bg-maroon-900/50 p-3"><div className="flex items-start gap-3"><input type="checkbox" checked={selected} onChange={() => setSelectedProspectUrls((current) => { const next = new Set(current); if (next.has(prospect.linkedin_url)) next.delete(prospect.linkedin_url); else next.add(prospect.linkedin_url); return next; })} className="mt-1 h-4 w-4 accent-gold-500" aria-label={`Include ${prospect.contact_name}`} /><div className="min-w-0 flex-1"><div className="flex items-start justify-between gap-3"><div><p className="text-sm font-medium text-ink-100">{prospect.contact_name}</p><p className="text-xs text-ink-500">{prospect.contact_title} · {prospect.company_name}</p></div><Badge tone="neutral">{Math.round(prospect.confidence_score * 100)}% fit</Badge></div><p className="mt-2 text-xs text-ink-300"><span className="font-medium">ICP fit:</span> {prospect.company_fit}</p><p className="mt-1 text-xs text-ink-400"><span className="font-medium">Why selected:</span> {prospect.person_fit}</p><p className="mt-1 break-all text-xs text-brand-400">LinkedIn: {prospect.linkedin_url}</p><p className="mt-1 break-all text-xs text-brand-400">Company source: {prospect.company_website}</p></div></div></label>; })}</div>}
-            </div>
+            <div className="rounded-xl border border-gold-500/15 p-4"><p className="text-sm font-medium text-ink-100">Autonomous prospect pool</p><p className="mt-1 text-xs text-ink-400">{(inventory.data?.counts?.ready ?? 0) > 0 ? `Yuktris will select only a bounded set of the ${inventory.data.counts.ready} ready prospects after explicit launch.` : 'Yuktris is building this audience. No outreach is queued while the pool is empty.'}</p></div>
           </div>
         )}
         <div className="mt-8 flex justify-between">
@@ -411,13 +430,13 @@ export function CampaignsPage() {
             <ChevronLeft className="h-4 w-4" />
             Back
           </Button>
-          {step < 5 ? (
+          {step < 3 ? (
             <Button disabled={!canContinue} onClick={() => setStep((s) => s + 1)}>
               Continue
               <ChevronRight className="h-4 w-4" />
             </Button>
           ) : (
-            <Button loading={launching} disabled={!outboundEnabled || selectedProspectUrls.size === 0 || !selectedAccount || !isIanaTimezone(outreachTimezone) || days.length === 0 || !nextWindow} onClick={launch}>
+            <Button loading={launching} disabled={!outboundEnabled || (inventory.data?.counts?.ready ?? 0) === 0 || !selectedAccount || !isIanaTimezone(outreachTimezone) || days.length === 0 || !nextWindow} onClick={launch}>
               <Rocket className="h-4 w-4" />
               Launch Campaign
             </Button>

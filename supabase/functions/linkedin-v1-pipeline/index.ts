@@ -1,6 +1,8 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { authorizeLinkedInWorkspace, authorizationStatus } from "../_shared/linkedinAuthorization.ts";
 
+declare const EdgeRuntime: { waitUntil(promise: Promise<unknown>): void } | undefined;
+
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
@@ -208,12 +210,56 @@ Deno.serve(async (req: Request) => {
       });
     }
 
+    if (action === "inventory_status") {
+      const icpId = optionalString(body.icp_id);
+      let query = admin.from("icps").select("id,name,offer_context,prospecting_status,minimum_ready_inventory,target_ready_inventory,replenishment_batch_size,next_refresh_at,last_discovery_started_at,last_discovery_completed_at,discovery_consecutive_failures,discovery_error").eq("workspace_id", workspaceId);
+      if (icpId) query = query.eq("id", icpId);
+      const { data: icps, error } = await query.order("created_at", { ascending: true });
+      if (error) throw pipelineError("inventory_status_failed", error.message, 500);
+      const states = [];
+      for (const icp of icps ?? []) {
+        const { data: links, error: linksError } = await admin.from("icp_prospects").select("fit_score,intent_status,readiness,verification_status").eq("workspace_id", workspaceId).eq("icp_id", icp.id);
+        if (linksError) throw pipelineError("inventory_status_failed", linksError.message, 500);
+        states.push({ ...icp, counts: inventoryCounts(links ?? []) });
+      }
+      return json({ status: "ok", inventory: states, write_performed: false });
+    }
+
+    if (action === "request_replenishment") {
+      const icpId = requireString(body.icp_id, "icp_id");
+      const reason = optionalString(body.reason) ?? "explicit_activation";
+      const { data: icp, error: icpError } = await admin.from("icps").select("id,prospecting_status").eq("workspace_id", workspaceId).eq("id", icpId).maybeSingle();
+      if (icpError || !icp) throw pipelineError("icp_not_found", "ICP was not found in this workspace", 404);
+      const requestedAccount = optionalString(body.linkedin_account_id);
+      let accountQuery = admin.from("linkedin_accounts").select("id,connection_state,health_status,profile_url,expected_profile_url").eq("workspace_id", workspaceId);
+      if (requestedAccount) accountQuery = accountQuery.eq("id", requestedAccount);
+      const { data: account, error: accountError } = await accountQuery.limit(1).maybeSingle();
+      const identityOk = Boolean(account?.profile_url && account?.expected_profile_url && normalizeLinkedInProfile(account.profile_url) === normalizeLinkedInProfile(account.expected_profile_url));
+      if (accountError || !account || account.connection_state !== "connected" || !["healthy", "degraded"].includes(account.health_status) || !identityOk) {
+        throw pipelineError("linkedin_account_not_ready", "A connected, identity-matched LinkedIn account is required for historical exclusion", 409);
+      }
+      const bucket = new Date(); bucket.setUTCMinutes(0, 0, 0);
+      const idempotencyKey = `${icpId}:${materialDiscoveryReason(reason)}:${bucket.toISOString()}`;
+      const { data: active } = await admin.from("prospect_replenishment_jobs").select("id,status").eq("workspace_id", workspaceId).eq("icp_id", icpId).in("status", ["queued","processing","cooldown"]).maybeSingle();
+      let job = active;
+      if (!job) {
+        const { data: inserted, error: insertError } = await admin.from("prospect_replenishment_jobs").insert({ workspace_id: workspaceId, icp_id: icpId, linkedin_account_id: account.id, idempotency_key: idempotencyKey, reason }).select("id,status").single();
+        if (insertError) throw pipelineError("replenishment_enqueue_failed", insertError.message, 409);
+        job = inserted;
+      }
+      await admin.from("icps").update({ prospecting_status: "queued", discovery_error: null, next_refresh_at: new Date().toISOString() }).eq("workspace_id", workspaceId).eq("id", icpId);
+      const task = processReplenishment(admin, workspaceId, job.id).catch((error) => console.error("[replenishment-failed]", { job_id: job.id, message: error instanceof Error ? error.message : "unknown" }));
+      if (typeof EdgeRuntime !== "undefined") EdgeRuntime.waitUntil(task); else await task;
+      return json({ status: "queued", job_id: job.id, duplicate_trigger_coalesced: Boolean(active), executable_jobs_created: 0, write_performed: false }, 202);
+    }
+
     if (action === "initialize") {
       const icp = (body.icp ?? {}) as ICP;
       const selectedAccountId = optionalString(body.linkedin_account_id);
       const campaignInput = (body.campaign ?? {}) as Json;
       const sourceCampaignId = optionalString(campaignInput.source_campaign_id);
       const initializationKey = optionalString(campaignInput.initialization_key);
+      const savedIcpId = optionalString(campaignInput.icp_id);
       const missing: string[] = [];
 
       if (!icp.name?.trim() || !icp.industry?.trim() || !icp.companySize?.trim() || !icp.jobTitles?.length || !icp.painPoints?.length) missing.push("meaningful_icp");
@@ -242,6 +288,8 @@ Deno.serve(async (req: Request) => {
         workspace_id: workspaceId,
         name: typeof campaignInput.name === "string" && campaignInput.name.trim() ? campaignInput.name.trim() : `${icp.name ?? "Campaign"} outreach`,
         icp,
+        icp_id: savedIcpId ?? null,
+        targeting_mode: campaignInput.targeting_mode === "autonomous_pool" ? "autonomous_pool" : "manual_review",
         linkedin_account_id: linkedin?.id ?? null,
         source_campaign_id: sourceCampaignId ?? null,
         initialization_key: initializationKey ?? null,
@@ -353,12 +401,17 @@ Deno.serve(async (req: Request) => {
 
       let customerCampaignId: string | null = null;
       const campaignInput = (body.campaign ?? {}) as Json;
+      const targetingMode = campaignInput.targeting_mode === "autonomous_pool" ? "autonomous_pool" : "manual_review";
+      const icpId = optionalString(campaignInput.icp_id);
       if (typeof campaignInput.name === "string" && campaignInput.name.trim()) {
         const initializationKey = optionalString(campaignInput.initialization_key);
         const campaignRow = {
           workspace_id: workspaceId,
           name: campaignInput.name.trim(),
           icp: icp,
+          icp_id: icpId ?? null,
+          targeting_mode: targetingMode,
+          pool_feed_limit: Math.min(maxProspects, clampNumber(campaignInput.daily_limit, 1, 20, 10)),
           linkedin_account_id: account.id,
           strategy: campaignInput.strategy ?? null,
           daily_limit: clampNumber(campaignInput.daily_limit, 1, 20, 10),
@@ -388,15 +441,26 @@ Deno.serve(async (req: Request) => {
       const reviewedTargets = Array.isArray(body.reviewed_linkedin_urls)
         ? [...new Set(body.reviewed_linkedin_urls.map((value: unknown) => typeof value === "string" ? normalizeLinkedInProfile(value) : null).filter((value): value is string => Boolean(value)))]
         : [];
-      if (reviewedTargets.length === 0) {
-        throw pipelineError("reviewed_prospects_required", "Review source-verified prospects before launching the campaign", 409);
+      let prospects: Prospect[] = [];
+      if (targetingMode === "autonomous_pool") {
+        if (!customerCampaignId || !icpId) throw pipelineError("autonomous_icp_required", "Autonomous campaigns require a saved ICP", 409);
+        const { data: reservations, error: reservationError } = await admin.rpc("reserve_autonomous_campaign_prospects", { p_workspace_id: workspaceId, p_campaign_id: customerCampaignId, p_limit: maxProspects });
+        if (reservationError) throw pipelineError("prospect_reservation_failed", reservationError.message, 409);
+        const prospectIds = (reservations ?? []).map((row: Json) => row.prospect_id).filter(Boolean);
+        if (prospectIds.length) {
+          const { data: rows, error: rowsError } = await admin.from("icp_prospects").select("prospect_id,fit_score,fit_evidence,provenance,prospects!inner(id,first_name,last_name,title,normalized_linkedin_url,company_name,company_website,location)").eq("workspace_id", workspaceId).eq("icp_id", icpId).in("prospect_id", prospectIds).eq("verification_status", "verified").eq("readiness", "ready");
+          if (rowsError) throw pipelineError("inventory_revalidation_failed", rowsError.message, 409);
+          const stored = (rows ?? []).map((row: any): Prospect => ({ companyName: row.prospects.company_name, companyWebsite: row.prospects.company_website, companyDescription: String(row.provenance?.evidence ?? ""), contactFirstName: row.prospects.first_name, contactLastName: row.prospects.last_name, contactTitle: row.prospects.title, linkedinUrl: row.prospects.normalized_linkedin_url, evidence: String(row.provenance?.evidence ?? ""), confidenceScore: Number(row.fit_score) / 100, companyFit: String(row.fit_evidence?.company_fit ?? "Verified ICP fit"), personFit: String(row.fit_evidence?.person_fit ?? "Verified role fit"), location: row.prospects.location, sourceConfidence: Number(row.provenance?.source_confidence ?? 0) }));
+          prospects = await excludeHistoricallyUnsafeProspects(admin, workspaceId, account.id, stored, newDiscoveryDiagnostics());
+        }
+      } else {
+        if (reviewedTargets.length === 0) throw pipelineError("reviewed_prospects_required", "Review source-verified prospects before launching the campaign", 409);
+        const reviewedTargetSet = new Set(reviewedTargets);
+        const safeProspects = await excludeHistoricallyUnsafeProspects(admin, workspaceId, account.id, await discoverVerifiedProspects(icp, maxProspects, newDiscoveryDiagnostics(), undefined, admin, workspaceId, account.id));
+        prospects = safeProspects.filter((prospect) => reviewedTargetSet.has(prospect.linkedinUrl));
       }
-      const reviewedTargetSet = new Set(reviewedTargets);
-      const safeProspects = await excludeHistoricallyUnsafeProspects(admin, workspaceId, account.id, await discoverVerifiedProspects(icp, maxProspects, newDiscoveryDiagnostics(), undefined, admin, workspaceId, account.id));
-      const prospects = safeProspects
-        .filter((prospect) => reviewedTargetSet.has(prospect.linkedinUrl));
       if (prospects.length === 0) {
-        throw pipelineError("reviewed_prospects_not_revalidated", "The reviewed prospects could not be revalidated from current source evidence. Discover and review again before launch", 409);
+        throw pipelineError("prospect_pool_not_ready", targetingMode === "autonomous_pool" ? "Yuktris is still building this audience. No outreach was created." : "The reviewed prospects could not be revalidated from current source evidence. Discover and review again before launch", 409);
       }
 
       const createdJobs: string[] = [];
@@ -519,6 +583,13 @@ Deno.serve(async (req: Request) => {
 
         createdJobs.push(job.id);
         createdContacts.push(contact.id);
+        if (targetingMode === "autonomous_pool" && customerCampaignId) {
+          const { data: inventoryPerson } = await admin.from("prospects").select("id").eq("workspace_id", workspaceId).eq("normalized_linkedin_url", prospect.linkedinUrl).maybeSingle();
+          if (inventoryPerson?.id) {
+            await admin.from("campaign_prospect_reservations").update({ status: "consumed", consumed_at: new Date().toISOString() }).eq("workspace_id", workspaceId).eq("campaign_id", customerCampaignId).eq("prospect_id", inventoryPerson.id).eq("status", "reserved");
+            await admin.from("icp_prospects").update({ readiness: "contacted", updated_at: new Date().toISOString() }).eq("workspace_id", workspaceId).eq("icp_id", icpId).eq("prospect_id", inventoryPerson.id);
+          }
+        }
       }
 
       // Initial jobs remain scheduled until their campaign window. The autonomous
@@ -597,6 +668,89 @@ Deno.serve(async (req: Request) => {
     );
   }
 });
+
+function inventoryCounts(rows: Array<{ fit_score: number; intent_status: string; readiness: string; verification_status: string }>) {
+  return {
+    discovered: rows.length,
+    verified: rows.filter((row) => row.verification_status === "verified").length,
+    high_fit: rows.filter((row) => row.verification_status === "verified" && row.fit_score >= 80).length,
+    intent: rows.filter((row) => row.intent_status === "evidenced").length,
+    ready: rows.filter((row) => row.verification_status === "verified" && row.readiness === "ready").length,
+  };
+}
+
+function materialDiscoveryReason(value: string): string {
+  return ["onboarding_confirmed", "icp_activated", "targeting_changed", "inventory_below_threshold", "scheduled_refresh"].includes(value) ? value : "explicit_activation";
+}
+
+async function loadCertifiedIcp(admin: any, workspaceId: string, icpId: string): Promise<ICP> {
+  const { data: icp, error } = await admin.from("icps").select("id,name,description,company_name,offer_context,icp_company_profile(industry,sub_industry,company_size,country,region),icp_decision_makers(job_title),icp_pain_points(pain_point),sales_navigator_filters(industry,company_size,location,keywords,titles)").eq("workspace_id", workspaceId).eq("id", icpId).maybeSingle();
+  if (error || !icp) throw pipelineError("icp_not_found", "ICP configuration could not be loaded", 404);
+  const company = Array.isArray(icp.icp_company_profile) ? icp.icp_company_profile[0] : icp.icp_company_profile;
+  const filters = Array.isArray(icp.sales_navigator_filters) ? icp.sales_navigator_filters[0] : icp.sales_navigator_filters;
+  return {
+    name: icp.name,
+    description: [icp.description, icp.offer_context?.offer, icp.offer_context?.value_proposition].filter(Boolean).join(" — "),
+    industry: company?.industry ?? filters?.industry?.[0] ?? "",
+    subIndustry: company?.sub_industry ?? "",
+    companySize: company?.company_size ?? filters?.company_size?.[0] ?? "",
+    jobTitles: [...new Set([...(icp.icp_decision_makers ?? []).map((row: Json) => row.job_title), ...(filters?.titles ?? [])].filter(Boolean))] as string[],
+    painPoints: (icp.icp_pain_points ?? []).map((row: Json) => row.pain_point).filter(Boolean) as string[],
+    geography: [...new Set([company?.country, company?.region, ...(filters?.location ?? [])].filter(Boolean))] as string[],
+    keywords: filters?.keywords ?? [],
+  };
+}
+
+async function processReplenishment(admin: any, workspaceId: string, jobId: string): Promise<void> {
+  const owner = `edge:${crypto.randomUUID()}`;
+  const { data: claim, error: claimError } = await admin.rpc("claim_prospect_replenishment", { p_job_id: jobId, p_workspace_id: workspaceId, p_lease_owner: owner });
+  if (claimError || !claim?.claimed) return;
+  const icpId = String(claim.icp_id);
+  try {
+    const { data: config, error: configError } = await admin.from("icps").select("minimum_ready_inventory,target_ready_inventory,replenishment_batch_size").eq("workspace_id", workspaceId).eq("id", icpId).single();
+    if (configError) throw configError;
+    const { count: readyCount, error: countError } = await admin.from("icp_prospects").select("id", { count: "exact", head: true }).eq("workspace_id", workspaceId).eq("icp_id", icpId).eq("verification_status", "verified").eq("readiness", "ready");
+    if (countError) throw countError;
+    if ((readyCount ?? 0) >= config.minimum_ready_inventory) {
+      const next = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+      await admin.from("prospect_replenishment_jobs").update({ status: "completed", completed_at: new Date().toISOString(), lease_owner: null, lease_expires_at: null, result_metadata: { skipped: "inventory_above_threshold", ready_count: readyCount }, updated_at: new Date().toISOString() }).eq("id", jobId);
+      await admin.from("icps").update({ prospecting_status: "up_to_date", next_refresh_at: next, last_discovery_completed_at: new Date().toISOString(), discovery_consecutive_failures: 0, discovery_error: null }).eq("id", icpId);
+      return;
+    }
+    await admin.from("icps").update({ prospecting_status: "refreshing", last_discovery_started_at: new Date().toISOString() }).eq("id", icpId);
+    const icp = await loadCertifiedIcp(admin, workspaceId, icpId);
+    const diagnostics = newDiscoveryDiagnostics();
+    const controller = new AbortController();
+    const deadline = setTimeout(() => controller.abort("internal_deadline_reached"), diagnostics.internalDeadlineMs);
+    let discovered: Prospect[] = [];
+    try { discovered = await discoverVerifiedProspects(icp, Math.min(config.replenishment_batch_size, 5), diagnostics, controller.signal, admin, workspaceId, String(claim.account_id)); }
+    finally { clearTimeout(deadline); }
+    const safe = await excludeHistoricallyUnsafeProspects(admin, workspaceId, String(claim.account_id), discovered, diagnostics);
+    let persisted = 0;
+    for (const prospect of safe) {
+      const canonical = normalizeLinkedInProfile(prospect.linkedinUrl);
+      if (!canonical) continue;
+      const { data: person, error: personError } = await admin.from("prospects").upsert({ workspace_id: workspaceId, linkedin_url: canonical, first_name: prospect.contactFirstName, last_name: prospect.contactLastName, title: prospect.contactTitle, company_name: prospect.companyName, company_website: prospect.companyWebsite, location: prospect.location, status: "new", identity_verified_at: new Date().toISOString(), updated_at: new Date().toISOString() }, { onConflict: "workspace_id,normalized_linkedin_url" }).select("id").single();
+      if (personError) throw personError;
+      const score = Math.max(0, Math.min(100, Math.round(prospect.confidenceScore * 100)));
+      const { error: linkError } = await admin.from("icp_prospects").upsert({ workspace_id: workspaceId, icp_id: icpId, prospect_id: person.id, fit_score: score, fit_evidence: { company_fit: prospect.companyFit, person_fit: prospect.personFit }, provenance: { evidence: prospect.evidence.slice(0, 2000), official_company_url: prospect.companyWebsite, linkedin_url: canonical, source_confidence: prospect.sourceConfidence }, verification_status: "verified", intent_status: "unknown", intent_evidence: null, readiness: "ready", last_verified_at: new Date().toISOString(), updated_at: new Date().toISOString() }, { onConflict: "icp_id,prospect_id" });
+      if (linkError) throw linkError;
+      persisted += 1;
+    }
+    const { count: finalReady } = await admin.from("icp_prospects").select("id", { count: "exact", head: true }).eq("workspace_id", workspaceId).eq("icp_id", icpId).eq("verification_status", "verified").eq("readiness", "ready");
+    const next = new Date(Date.now() + ((finalReady ?? 0) < config.minimum_ready_inventory ? 6 : 24) * 60 * 60 * 1000).toISOString();
+    await admin.from("prospect_replenishment_jobs").update({ status: "completed", completed_at: new Date().toISOString(), lease_owner: null, lease_expires_at: null, result_metadata: { persisted, ready_count: finalReady, diagnostics }, updated_at: new Date().toISOString() }).eq("id", jobId);
+    await admin.from("icps").update({ prospecting_status: (finalReady ?? 0) >= config.minimum_ready_inventory ? "up_to_date" : "queued", next_refresh_at: next, last_discovery_completed_at: new Date().toISOString(), discovery_consecutive_failures: 0, discovery_error: null }).eq("id", icpId);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Discovery failed";
+    const { data: job } = await admin.from("prospect_replenishment_jobs").select("attempt_count,max_attempts").eq("id", jobId).single();
+    const retry = (job?.attempt_count ?? 1) < (job?.max_attempts ?? 3);
+    const delayMinutes = Math.min(360, 15 * 2 ** Math.max(0, (job?.attempt_count ?? 1) - 1));
+    await admin.from("prospect_replenishment_jobs").update({ status: retry ? "cooldown" : "failed", next_attempt_at: new Date(Date.now() + delayMinutes * 60000).toISOString(), lease_owner: null, lease_expires_at: null, error_message: message.slice(0, 1000), completed_at: retry ? null : new Date().toISOString(), updated_at: new Date().toISOString() }).eq("id", jobId);
+    const { data: icp } = await admin.from("icps").select("discovery_consecutive_failures").eq("id", icpId).single();
+    await admin.from("icps").update({ prospecting_status: retry ? "queued" : "needs_attention", discovery_consecutive_failures: (icp?.discovery_consecutive_failures ?? 0) + 1, discovery_error: message.slice(0, 1000), next_refresh_at: new Date(Date.now() + delayMinutes * 60000).toISOString() }).eq("id", icpId);
+  }
+}
 
 async function discoverVerifiedProspects(icp: ICP, maxProspects: number, diagnostics = newDiscoveryDiagnostics(), signal?: AbortSignal, admin?: any, workspaceId?: string, accountId?: string): Promise<Prospect[]> {
   const startedAt = Date.now();
