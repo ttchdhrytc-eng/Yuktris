@@ -82,7 +82,11 @@ test('discovery expands recall through bounded diverse waves without weakening e
   assert.match(pipeline, /searchQueries: 6/);
   assert.match(pipeline, /canonicalCandidates: 18/);
   assert.match(pipeline, /deepResearchCandidates: 7/);
-  assert.match(pipeline, /perWaveDeepResearchLimit = \[3, 2, 2\]/);
+  assert.match(pipeline, /reservedForLaterWaves = \[4, 2, 0\]/);
+  assert.match(pipeline, /deepResearchBefore - deepResearchRemaining >= perWaveDeepResearchLimit/);
+  assert.match(pipeline, /unusedDeepResearchBudgetAfter/);
+  assert.match(pipeline, /cheapCandidateRank/);
+  assert.match(pipeline, /safeCanonical\.has\(candidate\.url\)/);
   assert.match(pipeline, /buildDiscoveryWaves/);
   assert.match(pipeline, /discoveryRoleVariants/);
   assert.match(pipeline, /discoveryVerticalVariants/);
@@ -94,6 +98,27 @@ test('discovery expands recall through bounded diverse waves without weakening e
   assert.match(pipeline, /isOfficialCompanyCandidateUrl/);
   assert.match(pipeline, /wavesStarted/);
   assert.match(pipeline, /deadlineRemainingMs/);
+});
+
+test('official provider evidence can survive Jina failure without weakening company authority', () => {
+  const pipeline = readFileSync(resolve(root, 'supabase/functions/linkedin-v1-pipeline/index.ts'), 'utf8');
+  assert.match(pipeline, /isOfficialCompanyCandidateUrl\(result\.url, companyName\)/);
+  assert.match(pipeline, /providerSnippet\.trim\(\)\.length >= 300 && matchesIcpCompanyEvidence\(providerSnippet, icp\)/);
+  assert.match(pipeline, /sameDomain\(providerUrl\)/);
+  assert.match(pipeline, /official_company_not_found/);
+  assert.match(pipeline, /internalDeadlineMs: 38000/);
+});
+
+test('outbound status copy is environment-aware and launch stays prerequisite-gated', () => {
+  const mode = read('src/lib/linkedinExecutionMode.ts');
+  assert.match(mode, /cloud_persistent_agent/);
+  assert.match(mode, /vdiqfiuqckaxdjkadinu/);
+  assert.match(mode, /staging_disabled/);
+  assert.match(campaigns, /Staging safety mode — LinkedIn outreach is disabled/);
+  assert.match(campaigns, /LinkedIn outreach is enabled\. No outreach starts until you explicitly launch this campaign/);
+  assert.doesNotMatch(campaigns, /LinkedIn outbound is globally disabled/);
+  assert.match(campaigns, /disabled=\{!outboundEnabled \|\| selectedProspectUrls\.size === 0/);
+  assert.doesNotMatch(mode, /ANON_KEY|SERVICE_ROLE|API_KEY/);
 });
 
 test('discovery interprets source evidence without weakening mandatory gates', () => {

@@ -13,7 +13,7 @@ import { useAuth } from '@/contexts/AuthContext';
 import { useICP } from '@/hooks/useICPIntelligence';
 import { useLinkedInAccounts } from '@/hooks/useLinkedInBrowser';
 import { supabase } from '@/lib/supabase';
-import { isLinkedInOutboundEnabled } from '@/lib/linkedinExecutionMode';
+import { isLinkedInOutboundEnabled, linkedinOutboundUiStatus } from '@/lib/linkedinExecutionMode';
 import type { FullICP } from '@/types/icp-intelligence';
 import { fetchCampaignMetrics } from '@/services/campaign-reporting';
 import { fetchCampaignProspects } from '@/services/campaign-prospects';
@@ -93,6 +93,7 @@ export function CampaignsPage() {
   const selectedIcp = (icps.data ?? []).find((i) => i.id === icpId);
   const selectedAccount = connectedAccounts.find((a) => a.id === accountId);
   const outboundEnabled = isLinkedInOutboundEnabled();
+  const outboundUiStatus = linkedinOutboundUiStatus();
   const scheduleValid = days.length > 0 && startTime < endTime && isIanaTimezone(outreachTimezone);
   const canContinue = [name.trim().length > 1, !!selectedIcp, !!selectedAccount, strategy.trim().length > 20, dailyLimit >= 1 && dailyLimit <= 20 && scheduleValid, true][step];
   const nextWindow = useMemo(() => nextCampaignSendingWindow(days, startTime, endTime, outreachTimezone), [days, startTime, endTime, outreachTimezone]);
@@ -183,7 +184,7 @@ export function CampaignsPage() {
   }
   async function launch() {
     if (!outboundEnabled) {
-      toast.info('LinkedIn outbound is globally disabled. Campaign configuration remains saved.');
+      toast.info(outboundUiStatus === 'staging_disabled' ? 'Staging safety mode — LinkedIn outreach is disabled. No outreach was started.' : 'LinkedIn outreach is currently disabled. Campaign configuration remains saved.');
       return;
     }
     if (!workspace || !payload || !selectedAccount) return;
@@ -250,7 +251,7 @@ export function CampaignsPage() {
   async function changeCampaignPause(campaignId: string, paused: boolean) {
     if (!workspace) return;
     if (!outboundEnabled && !paused) {
-      toast.info('LinkedIn outbound is globally disabled. The saved campaign remains ready.');
+      toast.info(outboundUiStatus === 'staging_disabled' ? 'Staging safety mode — LinkedIn outreach remains disabled.' : 'LinkedIn outreach is currently disabled. The saved campaign remains ready.');
       return;
     }
     try {
@@ -395,7 +396,9 @@ export function CampaignsPage() {
               <Review label="Sending schedule" value={`${dailyLimit}/day · ${days.map((d) => SENDING_DAYS.find(([value]) => value === d)?.[1]).join(', ')} · ${startTime}–${endTime} · ${outreachTimezone}`} />
               <Review label="Next outreach window" value={nextWindow ? formatCampaignWindow(nextWindow.toISOString(), outreachTimezone) : 'Invalid schedule'} />
             </div>
-            {!outboundEnabled && <p className="rounded-lg border border-warning-500/20 bg-warning-500/5 p-3 text-sm text-warning-300">LinkedIn outbound is globally disabled. Your campaign will be saved without executing outreach.</p>}
+            {outboundUiStatus === 'staging_disabled' && <p className="rounded-lg border border-warning-500/20 bg-warning-500/5 p-3 text-sm text-warning-300">Staging safety mode — LinkedIn outreach is disabled. You can test campaign setup and prospect discovery without sending anything.</p>}
+            {outboundUiStatus === 'disabled' && <p className="rounded-lg border border-warning-500/20 bg-warning-500/5 p-3 text-sm text-warning-300">LinkedIn outreach is currently disabled. Your campaign will be saved without executing outreach.</p>}
+            {outboundUiStatus === 'enabled' && <p className="rounded-lg border border-success-500/20 bg-success-500/5 p-3 text-sm text-success-300">LinkedIn outreach is enabled. No outreach starts until you explicitly launch this campaign.</p>}
             <div className="rounded-xl border border-gold-500/15 p-4">
               <div className="flex flex-wrap items-center justify-between gap-3"><div><p className="text-sm font-medium text-ink-100">AI prospect discovery</p><p className="mt-1 text-xs text-ink-500">Find real, source-backed LinkedIn prospects matching this ICP. Nothing is queued until you explicitly launch.</p></div><Button type="button" variant="secondary" loading={discovering} onClick={() => void findProspects()}>Find Prospects with AI</Button></div>
               {discoveryError && <Reason text={discoveryError} />}

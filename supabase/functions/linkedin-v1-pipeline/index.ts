@@ -48,7 +48,7 @@ type DiscoveryDiagnostics = {
   terminatedBy: string;
   wavesStarted: number;
   wavesCompleted: number;
-  waves: Array<{ wave: number; queries: number; providerResults: number; newCanonicalUrls: number; newEligibleCandidates: number; duplicateCandidates: number; deadlineRemainingMs: number }>;
+  waves: Array<{ wave: number; queries: string[]; providerResults: number; newCanonicalUrls: number; historicalExcluded: number; cheapRanked: number; deepResearchAttempted: number; newEligibleCandidates: number; duplicateCandidates: number; unusedDeepResearchBudgetAfter: number; deadlineRemainingMs: number }>;
   budgets: { maxWaves: number; searchQueries: number; tavily: number; jina: number; openai: number; canonicalCandidates: number; deepResearchCandidates: number };
 };
 
@@ -628,7 +628,7 @@ async function discoverVerifiedProspects(icp: ICP, maxProspects: number, diagnos
     if (existing) { diagnostics.companyCacheHits += 1; return existing; }
     companyCacheMisses.add(identityKey);
     const pending = (async (): Promise<CompanyResearch | null> => {
-      if (!withinBudget() || diagnostics.providerRequests.tavily >= diagnostics.budgets.tavily || diagnostics.providerRequests.jina >= diagnostics.budgets.jina) return null;
+      if (!withinBudget() || diagnostics.providerRequests.tavily >= diagnostics.budgets.tavily) return null;
       diagnostics.searchQueries += 1;
       const results = await tavilySearch(tavilyKey, `\"${companyName}\" official company website`, 5, diagnostics, signal)
         .catch((error) => { if (signal?.aborted) throw error; reject(diagnostics, "provider_timeout"); return []; });
@@ -665,7 +665,7 @@ async function discoverVerifiedProspects(icp: ICP, maxProspects: number, diagnos
     if (!waveQueries.length) { diagnostics.terminatedBy = "strategies_exhausted"; break; }
     waveQueries.forEach((query) => usedQueries.add(query));
     diagnostics.wavesStarted += 1;
-    const waveRecord = { wave: waveIndex + 1, queries: waveQueries.length, providerResults: 0, newCanonicalUrls: 0, newEligibleCandidates: 0, duplicateCandidates: 0, deadlineRemainingMs: 0 };
+    const waveRecord = { wave: waveIndex + 1, queries: waveQueries, providerResults: 0, newCanonicalUrls: 0, historicalExcluded: 0, cheapRanked: 0, deepResearchAttempted: 0, newEligibleCandidates: 0, duplicateCandidates: 0, unusedDeepResearchBudgetAfter: deepResearchRemaining, deadlineRemainingMs: 0 };
     diagnostics.waves.push(waveRecord);
     diagnostics.searchQueries += waveQueries.length;
     const waveResults = (await Promise.all(waveQueries.map((query) => tavilySearch(tavilyKey, query, 8, diagnostics, signal).catch((error) => { if (signal?.aborted) throw error; reject(diagnostics, "provider_timeout"); return []; })))).flat();
@@ -691,16 +691,26 @@ async function discoverVerifiedProspects(icp: ICP, maxProspects: number, diagnos
       const placeholders = newCanonical.map((linkedinUrl) => ({ companyName: "", companyWebsite: "", companyDescription: "", contactFirstName: "", contactLastName: "", contactTitle: "", linkedinUrl, evidence: "", confidenceScore: 0, companyFit: "", personFit: "", location: null, sourceConfidence: 0 }));
       safeCanonical = new Set((await excludeHistoricallyUnsafeProspects(admin, workspaceId, accountId, placeholders, diagnostics)).map((item) => item.linkedinUrl));
       diagnostics.timingsMs.historical_exclusion_ms = (diagnostics.timingsMs.historical_exclusion_ms ?? 0) + Date.now() - historyAt;
+      waveRecord.historicalExcluded = newCanonical.length - safeCanonical.size;
     }
     newCanonical.forEach((url) => evaluatedCanonical.add(url));
     diagnostics.rejectionFunnel.canonical_after_historical = (diagnostics.rejectionFunnel.canonical_after_historical ?? 0) + safeCanonical.size;
     diagnostics.qualificationStages.provider_linkedin_result = (diagnostics.qualificationStages.provider_linkedin_result ?? 0) + waveResults.length;
     diagnostics.qualificationStages.canonical_url = (diagnostics.qualificationStages.canonical_url ?? 0) + newCanonical.length;
     diagnostics.qualificationStages.historical_safe = (diagnostics.qualificationStages.historical_safe ?? 0) + safeCanonical.size;
-    const candidates = newCanonical.map((url) => evidenceByCanonical.get(url)!).filter(Boolean).sort((a, b) => Number(b.score ?? 0) - Number(a.score ?? 0));
+    const candidates = newCanonical
+      .map((url) => evidenceByCanonical.get(url)!)
+      .filter((candidate) => candidate && safeCanonical.has(candidate.url))
+      .map((candidate) => ({ candidate, rank: cheapCandidateRank(candidate, roles, geography) }))
+      .sort((a, b) => b.rank - a.rank)
+      .map(({ candidate }) => candidate);
+    waveRecord.cheapRanked = candidates.length;
     const eligibleBefore = prospects.length;
-    const perWaveDeepResearchLimit = [3, 2, 2][waveIndex] ?? 2;
-    for (const person of candidates.slice(0, perWaveDeepResearchLimit)) {
+    const reservedForLaterWaves = [4, 2, 0][waveIndex] ?? 0;
+    const perWaveDeepResearchLimit = Math.min(deepResearchRemaining, Math.max(0, deepResearchRemaining - reservedForLaterWaves));
+    const deepResearchBefore = deepResearchRemaining;
+    for (const person of candidates) {
+        if (deepResearchBefore - deepResearchRemaining >= perWaveDeepResearchLimit) break;
         if (prospects.length >= maxProspects || !withinBudget() || deepResearchRemaining <= 0) break;
         const linkedinUrl = normalizeLinkedInProfile(person.url);
         if (!linkedinUrl) continue;
@@ -751,6 +761,8 @@ async function discoverVerifiedProspects(icp: ICP, maxProspects: number, diagnos
         });
     }
     waveRecord.newEligibleCandidates = prospects.length - eligibleBefore;
+    waveRecord.deepResearchAttempted = deepResearchBefore - deepResearchRemaining;
+    waveRecord.unusedDeepResearchBudgetAfter = deepResearchRemaining;
     waveRecord.deadlineRemainingMs = Math.max(0, deadlineAt - Date.now());
     diagnostics.wavesCompleted += 1;
     if (prospects.length >= maxProspects) { diagnostics.terminatedBy = "requested_target_reached"; break; }
@@ -781,6 +793,18 @@ function discoveryRoleVariants(roles: string[]): string[] {
     if (/managing director/.test(normalized)) variants.push("Managing Director");
   }
   return [...new Set(variants.map((value) => value.trim()).filter(Boolean))];
+}
+
+function cheapCandidateRank(candidate: { title: string; content: string; score?: number }, roles: string[], geography: string[]): number {
+  const extracted = deterministicPersonEvidence(candidate.title, candidate.content ?? "");
+  let rank = Math.max(0, Math.min(1, Number(candidate.score ?? 0))) * 20;
+  if (extracted?.firstName && extracted.lastName) rank += 15;
+  if (extracted?.title) rank += 15;
+  if (extracted?.company) rank += 25;
+  if (extracted?.title && matchesIntendedRole(extracted.title, roles)) rank += 15;
+  if (extracted?.title && isDecisionMakerTitle(extracted.title)) rank += 10;
+  if (geography.length > 0 && matchesGeographyEvidence(`${candidate.title} ${candidate.content ?? ""}`, geography)) rank += 5;
+  return rank;
 }
 
 function discoveryVerticalVariants(icp: ICP): string[] {
@@ -1230,6 +1254,10 @@ async function readOfficialCompanyEvidence(
     if (!withinBudget()) return "";
     return jinaRead(url, diagnostics, signal).catch((error) => { if (signal?.aborted) throw error; return ""; });
   };
+  // A Tavily result on the verified company-controlled domain can itself be
+  // sufficient evidence. Avoid making discovery depend on Jina when that
+  // attributable evidence already proves the saved-ICP fit.
+  if (providerSnippet.trim().length >= 300 && matchesIcpCompanyEvidence(providerSnippet, icp)) return providerSnippet;
   const homepage = await read(rootUrl);
   const initial = [providerSnippet, homepage].filter(Boolean).join("\n");
   if (initial.length >= 300 && matchesIcpCompanyEvidence(initial, icp)) return initial;
