@@ -41,7 +41,7 @@ export function DashboardPage() {
 
       const [
         campaigns, prospects, meetings, messages, upcomingMeetings,
-        repliedProspects, proposals, customerCampaigns, canonicalCampaignMetrics,
+        repliedProspects, proposals, customerCampaigns, canonicalCampaignMetrics, inventoryRows,
       ] = await Promise.all([
         supabase.from('customer_campaigns').select('id, name, status, created_at').eq('workspace_id', wsId).order('created_at', { ascending: false }),
         supabase.from('contacts').select('id', { count: 'exact', head: true }).eq('workspace_id', wsId),
@@ -52,6 +52,7 @@ export function DashboardPage() {
         supabase.from('proposal_approvals').select('id, approval_status, approval_notes, created_at').eq('workspace_id', wsId).eq('approval_status', 'pending').order('created_at', { ascending: false }).limit(5),
         supabase.from('customer_campaigns').select('id,status').eq('workspace_id', wsId),
         fetchCampaignMetrics(wsId),
+        supabase.from('icp_prospects').select('verification_status,readiness').eq('workspace_id', wsId),
       ]);
 
       const sent = messages.data?.filter(m => m.direction === 'sent').length ?? 0;
@@ -84,7 +85,9 @@ export function DashboardPage() {
         campaignMetrics,
         metrics: {
           activeCampaigns: customerCampaigns.data?.filter(c => c.status === 'running').length ?? activeCampaigns.length,
-          prospectsDiscovered: canonicalTotals.prospects,
+          prospectsDiscovered: inventoryRows.data?.length ?? canonicalTotals.prospects,
+          prospectsVerified: inventoryRows.data?.filter(row => row.verification_status === 'verified').length ?? 0,
+          prospectsReady: inventoryRows.data?.filter(row => row.verification_status === 'verified' && row.readiness === 'ready').length ?? 0,
           prospectsContacted: Object.values(campaignMetrics).reduce((total, metric) => total + Number((metric as CampaignMetricSet & { prospects_contacted?: number }).prospects_contacted ?? 0), 0),
           connectionsSent: canonicalTotals.connectionsSent,
           connectionsAccepted: canonicalTotals.connectionsAccepted,
@@ -185,6 +188,8 @@ export function DashboardPage() {
       <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-5 gap-4">
         <SummaryCard label="Active Campaigns" value={formatNumber(d.metrics.activeCampaigns)} icon={Rocket} tone="brand" />
         <SummaryCard label="Prospects Discovered" value={formatNumber(d.metrics.prospectsDiscovered)} icon={Target} tone="gold" />
+        <SummaryCard label="Verified" value={formatNumber(d.metrics.prospectsVerified)} icon={CheckCircle2} tone="success" />
+        <SummaryCard label="Ready" value={formatNumber(d.metrics.prospectsReady)} icon={Users} tone="gold" />
         <SummaryCard label="Prospects Contacted" value={formatNumber(d.metrics.prospectsContacted)} icon={Users} tone="gold" />
         <SummaryCard label="Connections Sent" value={formatNumber(d.metrics.connectionsSent)} icon={Linkedin} tone="brand" />
         <SummaryCard label="Connections Accepted" value={formatNumber(d.metrics.connectionsAccepted)} icon={CheckCircle2} tone="success" />

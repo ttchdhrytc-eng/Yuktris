@@ -174,6 +174,7 @@ export class ICPIntelligenceService {
         conversion_rate: generated.conversion_rate,
         estimated_deal_size: generated.estimated_deal_size,
         status: 'completed',
+        prospecting_status: 'queued',
       })
       .select('*')
       .single();
@@ -239,6 +240,14 @@ export class ICPIntelligenceService {
       icp_id: icpId,
     });
     if (salesNavError) throw new Error(salesNavError.message);
+
+    // Discovery is requested only after the complete ICP graph is durable.
+    // Failure to queue is visible as queued/needs-attention state and never
+    // falls back to mock prospects.
+    const { data: account } = await supabase.from('linkedin_accounts').select('id').eq('workspace_id', workspaceId).eq('connection_state', 'connected').in('health_status', ['healthy', 'degraded']).limit(1).maybeSingle();
+    if (account?.id) {
+      await supabase.functions.invoke('linkedin-v1-pipeline', { body: { action: 'request_replenishment', workspace_id: workspaceId, icp_id: icpId, linkedin_account_id: account.id, reason: 'onboarding_confirmed' } });
+    }
 
     return icpId;
   }

@@ -616,6 +616,19 @@ Deno.serve(async (req: Request) => {
         lifecycleCampaignId = null;
       }
 
+      if (targetingMode === "autonomous_pool" && icpId) {
+        const { data: poolConfig } = await admin.from("icps").select("minimum_ready_inventory").eq("workspace_id", workspaceId).eq("id", icpId).single();
+        const { count: ready } = await admin.from("icp_prospects").select("id", { count: "exact", head: true }).eq("workspace_id", workspaceId).eq("icp_id", icpId).eq("verification_status", "verified").eq("readiness", "ready");
+        if ((ready ?? 0) < (poolConfig?.minimum_ready_inventory ?? 5)) {
+          const hour = new Date(); hour.setUTCMinutes(0, 0, 0);
+          const { data: replenishment } = await admin.from("prospect_replenishment_jobs").insert({ workspace_id: workspaceId, icp_id: icpId, linkedin_account_id: account.id, idempotency_key: `${icpId}:inventory_below_threshold:${hour.toISOString()}`, reason: "inventory_below_threshold" }).select("id").maybeSingle();
+          if (replenishment?.id) {
+            const task = processReplenishment(admin, workspaceId, replenishment.id);
+            if (typeof EdgeRuntime !== "undefined") EdgeRuntime.waitUntil(task); else await task;
+          }
+        }
+      }
+
       return json(
         {
           status: bridgeFailures.length ? "partially_launched" : "launched",
@@ -638,6 +651,11 @@ Deno.serve(async (req: Request) => {
       if (followupError) throw new Error(`Follow-up scheduling failed: ${followupError.message}`);
       const { error: replyError } = await admin.rpc("schedule_linkedin_reply_checks", { p_workspace_id: workspaceId, p_limit: 50 });
       if (replyError) throw new Error(`Reply-check scheduling failed: ${replyError.message}`);
+      const { data: dueDiscovery } = await admin.from("prospect_replenishment_jobs").select("id").eq("workspace_id", workspaceId).in("status", ["queued","cooldown"]).lte("next_attempt_at", new Date().toISOString()).order("created_at", { ascending: true }).limit(1).maybeSingle();
+      if (dueDiscovery?.id) {
+        const task = processReplenishment(admin, workspaceId, dueDiscovery.id);
+        if (typeof EdgeRuntime !== "undefined") EdgeRuntime.waitUntil(task); else await task;
+      }
       return json({ status: "ticked" });
     }
 

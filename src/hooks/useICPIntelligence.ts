@@ -143,7 +143,11 @@ export function useUpdateICP() {
         .single();
 
       if (error) throw new Error(error.message);
-      return data as ICP;
+      const updated = data as ICP;
+      const materialTargetingEdit = updates.name !== undefined || updates.description !== undefined;
+      const { data: account } = materialTargetingEdit ? await supabase.from('linkedin_accounts').select('id').eq('workspace_id', updated.workspace_id).eq('connection_state', 'connected').in('health_status', ['healthy', 'degraded']).limit(1).maybeSingle() : { data: null };
+      if (account?.id) await supabase.functions.invoke('linkedin-v1-pipeline', { body: { action: 'request_replenishment', workspace_id: updated.workspace_id, icp_id: id, linkedin_account_id: account.id, reason: 'targeting_changed' } });
+      return updated;
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: icpKeys.all });

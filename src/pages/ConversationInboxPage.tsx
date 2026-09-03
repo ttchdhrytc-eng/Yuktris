@@ -25,7 +25,7 @@ export function ConversationInboxPage() {
   const conversations = useLinkedInConversations();
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
-  const list = conversations.data ?? [];
+  const list = [...(conversations.data ?? [])].sort((a, b) => Number(needsReview(b)) - Number(needsReview(a)));
 
   return (
     <div>
@@ -62,6 +62,7 @@ export function ConversationInboxPage() {
                     </div>
                     <p className="text-xs text-ink-400 truncate">{c.last_message_preview ?? 'No messages'}</p>
                     <div className="flex items-center gap-1.5 mt-1">
+                      {needsReview(c) && <Badge tone="warning" size="sm">Needs review</Badge>}
                       <Badge tone={stageTone(c.stage)} size="sm">{c.stage}</Badge>
                       <Badge tone={healthTone(c.health)} size="sm">{c.health}</Badge>
                     </div>
@@ -86,6 +87,10 @@ export function ConversationInboxPage() {
       </div>
     </div>
   );
+}
+
+function needsReview(conversation: LinkedInConversation): boolean {
+  return conversation.auto_reply_enabled === false && (conversation.metadata?.manual_review === true || conversation.metadata?.next_action === 'manual_review' || Boolean(conversation.metadata?.manual_review_reason));
 }
 
 function MessageThread({ conversationId }: { conversationId: string }) {
