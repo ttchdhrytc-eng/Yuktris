@@ -33,6 +33,7 @@ type DiscoveryDiagnostics = {
   rejectedByDedupe: number;
   finalCandidates: number;
   historicalExcluded: number;
+  qualificationStages: Record<string, number>;
   rejectionFunnel: Record<string, number>;
   timingsMs: Record<string, number>;
   providerRequests: Record<string, number>;
@@ -47,7 +48,7 @@ type DiscoveryDiagnostics = {
   terminatedBy: string;
 };
 
-const newDiscoveryDiagnostics = (): DiscoveryDiagnostics => ({ searchQueries: 0, providerResults: 0, companyCandidates: 0, companyResearchSucceeded: 0, companyResearchFailed: 0, personResults: 0, canonicalProfileUrls: 0, rejectedByEvidence: 0, rejectedByIdentityParsing: 0, rejectedByDedupe: 0, finalCandidates: 0, historicalExcluded: 0, rejectionFunnel: {}, timingsMs: {}, providerRequests: { tavily: 0, jina: 0, openai: 0 }, providerStats: { tavily: { started: 0, completed: 0, aborted: 0, failed: 0 }, jina: { started: 0, completed: 0, aborted: 0, failed: 0 }, openai: { started: 0, completed: 0, aborted: 0, failed: 0 } }, slowestCalls: [], cheapFiltered: 0, deeplyResearched: 0, companyCacheHits: 0, companyCacheMisses: 0, uniqueCompaniesResearched: 0, internalDeadlineMs: 38000, terminatedBy: "completed" });
+const newDiscoveryDiagnostics = (): DiscoveryDiagnostics => ({ searchQueries: 0, providerResults: 0, companyCandidates: 0, companyResearchSucceeded: 0, companyResearchFailed: 0, personResults: 0, canonicalProfileUrls: 0, rejectedByEvidence: 0, rejectedByIdentityParsing: 0, rejectedByDedupe: 0, finalCandidates: 0, historicalExcluded: 0, qualificationStages: {}, rejectionFunnel: {}, timingsMs: {}, providerRequests: { tavily: 0, jina: 0, openai: 0 }, providerStats: { tavily: { started: 0, completed: 0, aborted: 0, failed: 0 }, jina: { started: 0, completed: 0, aborted: 0, failed: 0 }, openai: { started: 0, completed: 0, aborted: 0, failed: 0 } }, slowestCalls: [], cheapFiltered: 0, deeplyResearched: 0, companyCacheHits: 0, companyCacheMisses: 0, uniqueCompaniesResearched: 0, internalDeadlineMs: 38000, terminatedBy: "completed" });
 
 type Prospect = {
   companyName: string;
@@ -608,7 +609,20 @@ async function discoverVerifiedProspects(icp: ICP, maxProspects: number, diagnos
   diagnostics.searchQueries += peopleQueries.length;
   diagnostics.providerResults += earlyPeopleResults.length;
   diagnostics.personResults += earlyPeopleResults.length;
-  const canonicalBefore = [...new Set(earlyPeopleResults.map((person) => normalizeLinkedInProfile(person.url)).filter((url): url is string => Boolean(url)))];
+  const evidenceByCanonical = new Map<string, { title: string; url: string; content: string; score?: number }>();
+  for (const person of earlyPeopleResults) {
+    const canonical = normalizeLinkedInProfile(person.url);
+    if (!canonical) continue;
+    const prior = evidenceByCanonical.get(canonical);
+    evidenceByCanonical.set(canonical, prior ? {
+      title: [...new Set([prior.title, person.title])].join(" | "),
+      url: canonical,
+      content: [...new Set([prior.content, person.content].filter(Boolean))].join("\n").slice(0, 2400),
+      score: Math.max(Number(prior.score ?? 0), Number(person.score ?? 0)),
+    } : { ...person, url: canonical });
+  }
+  const canonicalPeopleResults = [...evidenceByCanonical.values()];
+  const canonicalBefore = [...evidenceByCanonical.keys()];
   diagnostics.canonicalProfileUrls += canonicalBefore.length;
   diagnostics.rejectionFunnel.canonical_before_historical = canonicalBefore.length;
   let safeCanonical = new Set(canonicalBefore);
@@ -619,10 +633,14 @@ async function discoverVerifiedProspects(icp: ICP, maxProspects: number, diagnos
     diagnostics.timingsMs.historical_exclusion_ms = Date.now() - historyAt;
   }
   diagnostics.rejectionFunnel.canonical_after_historical = safeCanonical.size;
+  diagnostics.qualificationStages.provider_linkedin_result = earlyPeopleResults.length;
+  diagnostics.qualificationStages.canonical_url = canonicalBefore.length;
+  diagnostics.qualificationStages.historical_safe = safeCanonical.size;
   diagnostics.timingsMs.early_candidate_search_and_history = Date.now() - earlySearchAt;
   // Invocation-local promises deliberately coalesce concurrent reads. Nothing in
   // this cache is shared across requests, and person evidence never enters it.
-  type CompanyResearch = { official: { title: string; url: string; content: string; score?: number }; website: string; description: string };
+  let groundedFallbackBudget = 2;
+  type CompanyResearch = { official: { title: string; url: string; content: string; score?: number }; website: string; description: string; icpFit: boolean };
   const companyResearchCache = new Map<string, Promise<CompanyResearch | null>>();
   const companyCacheMisses = new Set<string>();
   const researchCompany = (companyName: string) => {
@@ -641,10 +659,15 @@ async function discoverVerifiedProspects(icp: ICP, maxProspects: number, diagnos
       const website = rootWebsite(official.url);
       const domainKey = `domain:${new URL(website).hostname.toLowerCase().replace(/^www\./, "")}`;
       diagnostics.deeplyResearched += 1;
-      const description = await jinaRead(website, diagnostics, signal)
-        .then((value) => { diagnostics.companyResearchSucceeded += 1; return value; })
-        .catch((error) => { if (signal?.aborted) throw error; diagnostics.companyResearchFailed += 1; reject(diagnostics, "official_company_unreadable"); return official.content ?? ""; });
-      const value = { official, website, description };
+      const description = await readOfficialCompanyEvidence(website, official.url, official.content ?? "", icp, diagnostics, signal, withinBudget);
+      if (!description) { diagnostics.companyResearchFailed += 1; reject(diagnostics, "official_company_unreadable"); return null; }
+      diagnostics.companyResearchSucceeded += 1;
+      let icpFit = matchesIcpCompanyEvidence(`${official.title} ${official.content ?? ""} ${description}`, icp);
+      if (!icpFit && groundedFallbackBudget > 0 && withinBudget()) {
+        groundedFallbackBudget -= 1;
+        icpFit = await groundedCompanyFit(`${official.title}\n${official.content ?? ""}\n${description}`, icp, diagnostics, signal).catch((error) => { if (signal?.aborted) throw error; return false; });
+      }
+      const value = { official, website, description, icpFit };
       companyResearchCache.set(domainKey, Promise.resolve(value));
       return value;
     })();
@@ -658,32 +681,40 @@ async function discoverVerifiedProspects(icp: ICP, maxProspects: number, diagnos
   // Keep preview comfortably below the Edge request deadline. Deterministic
   // extraction remains primary; only the two strongest unresolved results may
   // use the grounded model fallback.
-  let aiExtractionBudget = 2;
   if (prospects.length < maxProspects) {
     // Reuse the already canonicalized, historically screened provider batch.
     // No candidate discovered later may bypass that early safety boundary.
-    for (const people of [earlyPeopleResults]) {
+    for (const people of [canonicalPeopleResults]) {
       if (prospects.length >= maxProspects || !withinBudget()) break;
       for (const person of people.sort((a, b) => Number(b.score ?? 0) - Number(a.score ?? 0)).slice(0, 4)) {
         if (prospects.length >= maxProspects) break;
         const linkedinUrl = normalizeLinkedInProfile(person.url);
         if (!linkedinUrl) continue;
         if (!safeCanonical.has(linkedinUrl)) continue;
+        pass(diagnostics, "historical_safe_candidate");
         if (seenLinkedIn.has(linkedinUrl)) { diagnostics.rejectedByDedupe += 1; continue; }
         let extracted = deterministicPersonEvidence(person.title, person.content ?? "");
-        if ((!extracted || !extracted.company) && aiExtractionBudget-- > 0 && withinBudget()) extracted = await groundedPersonExtraction(person, roles, diagnostics, signal).catch((error) => { if (signal?.aborted) throw error; return null; });
+        if ((!extracted || !extracted.company) && groundedFallbackBudget > 0 && withinBudget()) { groundedFallbackBudget -= 1; extracted = await groundedPersonExtraction(person, roles, diagnostics, signal).catch((error) => { if (signal?.aborted) throw error; return null; }); }
         if (!extracted?.firstName || !extracted.lastName) { reject(diagnostics, "missing_person_name"); continue; }
+        pass(diagnostics, "person_identity");
         if (!extracted.title) { reject(diagnostics, "missing_current_title"); continue; }
+        pass(diagnostics, "current_title");
         if (!extracted.company) { reject(diagnostics, "missing_current_company"); continue; }
+        pass(diagnostics, "current_company");
         const parsed = { firstName: extracted.firstName, lastName: extracted.lastName, title: extracted.title };
         const companyName = extracted.company;
         if (!matchesIntendedRole(parsed.title, roles) || !isDecisionMakerTitle(parsed.title)) { diagnostics.rejectedByEvidence += 1; reject(diagnostics, isDecisionMakerTitle(parsed.title) ? "role_mismatch" : "insufficient_seniority"); continue; }
+        pass(diagnostics, "role_and_seniority");
 
         const research = await researchCompany(companyName);
         if (!research) { diagnostics.rejectedByEvidence += 1; reject(diagnostics, "official_company_not_found"); continue; }
+        pass(diagnostics, "official_company_source");
         const { official, website: companyWebsite, description: companyDescription } = research;
         diagnostics.companyCandidates += 1;
-        if (!matchesIcpCompanyEvidence(`${official.title} ${official.content ?? ""} ${companyDescription}`, icp)) { diagnostics.rejectedByEvidence += 1; reject(diagnostics, "company_icp_mismatch"); continue; }
+        if (!sameCompanyEvidence(companyName, `${official.title} ${new URL(companyWebsite).hostname}`)) { diagnostics.rejectedByEvidence += 1; reject(diagnostics, "company_person_binding_failure"); continue; }
+        pass(diagnostics, "person_company_binding");
+        if (!research.icpFit) { diagnostics.rejectedByEvidence += 1; reject(diagnostics, "company_icp_mismatch"); continue; }
+        pass(diagnostics, "company_icp_fit");
         const geographyBoost = matchesGeographyEvidence(`${official.title} ${official.content ?? ""} ${companyDescription}`, icp.geography ?? []) ? 0.05 : 0;
         seenLinkedIn.add(linkedinUrl);
         prospects.push({
@@ -734,6 +765,10 @@ function reject(diagnostics: DiscoveryDiagnostics, reason: string): void {
   diagnostics.rejectionFunnel[reason] = (diagnostics.rejectionFunnel[reason] ?? 0) + 1;
 }
 
+function pass(diagnostics: DiscoveryDiagnostics, gate: string): void {
+  diagnostics.qualificationStages[gate] = (diagnostics.qualificationStages[gate] ?? 0) + 1;
+}
+
 type PersonEvidence = { firstName: string; lastName: string; title: string; company: string; location: string | null; confidence: number };
 function deterministicPersonEvidence(title: string, content: string): PersonEvidence | null {
   const parsed = parseLinkedInTitle(title, "");
@@ -755,9 +790,31 @@ async function groundedPersonExtraction(result: { title: string; url: string; co
     const fields = [value.first_name, value.last_name, value.current_title, value.current_company];
     if (!fields.every((field) => typeof field === "string" && field.trim())) return null;
     const supplied = `${result.title} ${result.content}`.toLowerCase();
+    const supportingQuote = typeof value.supporting_quote === "string" ? value.supporting_quote.trim() : "";
+    if (supportingQuote.length < 15 || !supplied.includes(supportingQuote.toLowerCase())) return null;
     if (!fields.every((field) => normalizedEvidenceTokens(String(field)).some((token) => supplied.includes(token)))) return null;
     return { firstName: value.first_name.trim(), lastName: value.last_name.trim(), title: value.current_title.trim(), company: value.current_company.trim(), location: typeof value.location === "string" ? value.location.trim() || null : null, confidence: Math.min(0.99, Number(value.confidence)) };
   } catch { return null; }
+}
+
+async function groundedCompanyFit(evidence: string, icp: ICP, diagnostics?: DiscoveryDiagnostics, signal?: AbortSignal): Promise<boolean> {
+  const key = Deno.env.get("OPENAI_API_KEY");
+  if (!key || evidence.trim().length < 80) return false;
+  const started = beginProviderCall(diagnostics, "openai");
+  const response = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST", signal: combinedSignal(signal, 6000),
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+    body: JSON.stringify({ model: Deno.env.get("OPENAI_OUTREACH_MODEL") ?? "gpt-4.1-mini", temperature: 0, response_format: { type: "json_object" }, messages: [
+      { role: "system", content: "Classify only the supplied official-company evidence against the supplied saved ICP. Do not infer facts. Return JSON {matches:boolean,supporting_quote:string,confidence:number}. A generic word such as technology, digital, business, or software alone is insufficient." },
+      { role: "user", content: JSON.stringify({ saved_icp: icp, official_company_evidence: evidence.slice(0, 10000) }) },
+    ] }),
+  }).then((value) => { completeProviderCall(diagnostics, "openai"); return value; }).catch((error) => { failProviderCall(diagnostics, "openai", signal?.aborted === true); throw error; }).finally(() => recordProviderTiming(diagnostics, "openai", Date.now() - started));
+  if (!response.ok) return false;
+  try {
+    const value = JSON.parse((await response.json()).choices?.[0]?.message?.content ?? "{}");
+    const quote = typeof value.supporting_quote === "string" ? value.supporting_quote.trim() : "";
+    return value.matches === true && Number(value.confidence) >= 0.85 && quote.length >= 20 && evidence.toLowerCase().includes(quote.toLowerCase());
+  } catch { return false; }
 }
 
 function matchesIcpCompanyEvidence(evidence: string, icp: ICP): boolean {
@@ -766,7 +823,22 @@ function matchesIcpCompanyEvidence(evidence: string, icp: ICP): boolean {
     .filter((value): value is string => Boolean(value?.trim()))
     .map((value) => value.toLowerCase().replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim())
     .filter((value) => value.split(" ").length >= 2);
-  return phrases.some((phrase) => normalizedEvidence.includes(phrase));
+  if (phrases.some((phrase) => normalizedEvidence.includes(phrase))) return true;
+  const savedIcp = [icp.name, icp.subIndustry, icp.industry, ...(icp.keywords ?? [])].join(" ").toLowerCase();
+  if (!/\b(?:it|information technology|software|technology)\b/.test(savedIcp)) return false;
+  // Require a service/activity phrase, never a lone generic industry word.
+  return [
+    /\bmanaged (?:it|technology) services?\b/,
+    /\binformation technology (?:consulting|services?|solutions?)\b/,
+    /\bit (?:consulting|services?|solutions?|support|infrastructure)\b/,
+    /\btechnology (?:consulting|services?|implementation)\b/,
+    /\bsoftware (?:development|engineering|consulting|services?)\b/,
+    /\bcloud (?:consulting|services?|solutions?|migration|infrastructure)\b/,
+    /\bcyber ?security (?:consulting|services?|solutions?)\b/,
+    /\b(?:network|systems?|technology) infrastructure services?\b/,
+    /\bdigital transformation (?:consulting|services?|solutions?|implementation)?\b/,
+    /\b(?:systems?|application) integration services?\b/,
+  ].some((pattern) => pattern.test(normalizedEvidence));
 }
 
 function normalizedEvidenceTokens(value: string, stopWords: string[] = []): string[] {
@@ -777,7 +849,10 @@ function sameCompanyEvidence(left: string, right: string): boolean {
   const stopWords = ["the", "group", "solutions", "services", "technologies", "technology", "consulting", "inc", "llc", "ltd"];
   const leftTokens = normalizedEvidenceTokens(left, stopWords);
   const rightTokens = new Set(normalizedEvidenceTokens(right, stopWords));
-  return leftTokens.length > 0 && leftTokens.some((token) => rightTokens.has(token));
+  if (leftTokens.length > 0 && leftTokens.some((token) => rightTokens.has(token))) return true;
+  const acronym = (tokens: string[]) => tokens.map((token) => token[0]).join("");
+  const rightTokensList = [...rightTokens];
+  return leftTokens.length > 1 && rightTokensList.length > 0 && (rightTokens.has(acronym(leftTokens)) || leftTokens.includes(acronym(rightTokensList)));
 }
 
 function isDecisionMakerTitle(title: string): boolean {
@@ -785,9 +860,13 @@ function isDecisionMakerTitle(title: string): boolean {
 }
 
 function matchesIntendedRole(title: string, roles: string[]): boolean {
-  const normalizedTitle = title.toLowerCase().replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
+  const normalizedTitle = title.toLowerCase()
+    .replace(/\bvice president\b/g, "vp")
+    .replace(/\bbiz dev\b/g, "business development")
+    .replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
   return roles.some((role) => role.split(/\s*(?:\/|,|\bor\b)\s*/i).some((variant) => {
-    const tokens = normalizedEvidenceTokens(variant, ["of", "and", "the", "head", "manager", "director", "chief", "officer", "vice", "president", "vp", "owner", "founder", "principal", "partner"]);
+    const normalizedRole = variant.toLowerCase().replace(/\bvice president\b/g, "vp").replace(/\bbiz dev\b/g, "business development");
+    const tokens = normalizedEvidenceTokens(normalizedRole, ["of", "and", "the", "head", "manager", "director", "chief", "officer", "vice", "president", "vp", "owner", "founder", "principal", "partner"]);
     return tokens.length > 0 && tokens.every((token) => normalizedTitle.split(" ").includes(token)) && isDecisionMakerTitle(title);
   }));
 }
@@ -863,7 +942,7 @@ function companyFromPersonEvidence(evidence: string): string | null {
   const parts = cleaned.replace(/\s*[|]\s*LinkedIn.*$/i, "").split(/\s+(?:-|–|—)\s+/u).map((part) => part.trim()).filter(Boolean);
   const sourced = parts.length >= 3 ? parts[parts.length - 1] : atMatch?.[1] ?? null;
   if (!sourced) return null;
-  const company = sourced.trim().replace(/\s+(?:Inc\.?|LLC|Ltd\.?|Limited)$/i, "").trim();
+  const company = sourced.trim().replace(/[,\s]+(?:Inc\.?|Incorporated|Corp\.?|Corporation|LLC|L\.L\.C\.?|Ltd\.?|Limited|Pvt\.?\s+Ltd\.?)$/i, "").trim();
   return company.length >= 2 && company.length <= 70 ? company : null;
 }
 
@@ -1049,6 +1128,34 @@ function cleanCompanyName(title: string, host: string): string | null {
         .includes(normalizedHost);
     });
   return candidate ? candidate.split(":")[0].trim() : null;
+}
+
+async function readOfficialCompanyEvidence(
+  rootUrl: string,
+  providerUrl: string,
+  providerSnippet: string,
+  icp: ICP,
+  diagnostics: DiscoveryDiagnostics,
+  signal: AbortSignal | undefined,
+  withinBudget: () => boolean,
+): Promise<string> {
+  const root = new URL(rootUrl);
+  const sameDomain = (value: string) => {
+    try { return new URL(value).hostname.toLowerCase().replace(/^www\./, "") === root.hostname.toLowerCase().replace(/^www\./, ""); }
+    catch { return false; }
+  };
+  const read = async (url: string): Promise<string> => {
+    if (!withinBudget()) return "";
+    return jinaRead(url, diagnostics, signal).catch((error) => { if (signal?.aborted) throw error; return ""; });
+  };
+  const homepage = await read(rootUrl);
+  const initial = [providerSnippet, homepage].filter(Boolean).join("\n");
+  if (initial.length >= 300 && matchesIcpCompanyEvidence(initial, icp)) return initial;
+  const providerPage = sameDomain(providerUrl) && new URL(providerUrl).pathname !== "/" ? providerUrl : null;
+  const fallbackUrls = [...new Set([providerPage, `${rootUrl}/about`, `${rootUrl}/services`, `${rootUrl}/solutions`].filter((value): value is string => Boolean(value)))].slice(0, 2);
+  const fallback = await Promise.all(fallbackUrls.map(read));
+  const combined = [providerSnippet, homepage, ...fallback].filter(Boolean).join("\n");
+  return combined.trim().length >= 120 ? combined : "";
 }
 
 function recordProviderTiming(diagnostics: DiscoveryDiagnostics | undefined, provider: string, duration: number): void {

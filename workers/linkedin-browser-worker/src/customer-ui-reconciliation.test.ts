@@ -64,7 +64,7 @@ test('discovery excludes history before deep providers and caches company work p
   const pipeline = readFileSync(resolve(root, 'supabase/functions/linkedin-v1-pipeline/index.ts'), 'utf8');
   const discovery = pipeline.slice(pipeline.indexOf('async function discoverVerifiedProspects'), pipeline.indexOf('function discoveryEmptyReason'));
   const history = discovery.indexOf('excludeHistoricallyUnsafeProspects');
-  const jina = discovery.indexOf('jinaRead(website');
+  const jina = discovery.indexOf('readOfficialCompanyEvidence');
   const openai = discovery.indexOf('groundedPersonExtraction');
   assert.ok(history >= 0 && history < jina && history < openai, 'historical exclusion must precede Jina and OpenAI');
   assert.match(discovery, /safeCanonical\.has\(linkedinUrl\)[\s\S]*researchCompany\(companyName\)/);
@@ -77,6 +77,21 @@ test('discovery excludes history before deep providers and caches company work p
   assert.match(discovery, /historical_exclusion_ms/);
   assert.match(discovery, /companyCacheMisses/);
   assert.match(discovery, /uniqueCompaniesResearched/);
+});
+
+test('discovery interprets source evidence without weakening mandatory gates', () => {
+  const pipeline = readFileSync(resolve(root, 'supabase/functions/linkedin-v1-pipeline/index.ts'), 'utf8');
+  assert.match(pipeline, /replace\(\/\\bvice president\\b\/g, "vp"\)/);
+  assert.match(pipeline, /business development/);
+  assert.match(pipeline, /Pvt/);
+  assert.match(pipeline, /sameCompanyEvidence\(companyName,[\s\S]*company_person_binding_failure/);
+  assert.match(pipeline, /generic word such as technology, digital, business, or software alone is insufficient/);
+  assert.match(pipeline, /managed \(\?:it\|technology\) services/);
+  assert.match(pipeline, /providerPage[\s\S]*\/about[\s\S]*\/services[\s\S]*\/solutions/);
+  assert.match(pipeline, /sameDomain\(providerUrl\)/);
+  assert.match(pipeline, /supportingQuote\.length < 15/);
+  assert.match(pipeline, /qualificationStages/);
+  assert.doesNotMatch(pipeline, /Alexis/);
 });
 
 test('Prospect reads and mutations remain scoped to the authenticated workspace', () => {
