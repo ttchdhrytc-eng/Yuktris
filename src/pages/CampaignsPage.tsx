@@ -164,7 +164,10 @@ export function CampaignsPage() {
     setDiscovering(true);
     setDiscoveryError(null);
     try {
-      const { data, error } = await supabase.functions.invoke('linkedin-v1-pipeline', { body: { action: 'preview_discovery', workspace_id: workspace.id, linkedin_account_id: selectedAccount?.id, icp: payload, max_prospects: Math.min(dailyLimit, 5) } });
+      const { data, error } = await Promise.race([
+        supabase.functions.invoke('linkedin-v1-pipeline', { body: { action: 'preview_discovery', workspace_id: workspace.id, linkedin_account_id: selectedAccount?.id, icp: payload, max_prospects: Math.min(dailyLimit, 5) } }),
+        new Promise<never>((_, reject) => window.setTimeout(() => reject(new Error("Prospect discovery couldn't complete. No outreach was started. Please try again.")), 47_000)),
+      ]);
       if (error) throw new Error(await edgeFunctionError(error));
       const prospects = Array.isArray(data?.prospects) ? data.prospects as DiscoveryPreview[] : [];
       if (!prospects.length) throw new Error(data?.reason ?? 'No source-verified LinkedIn prospects were found. Adjust the ICP and try again.');
@@ -172,7 +175,7 @@ export function CampaignsPage() {
       setSelectedProspectUrls(new Set());
       toast.success(`${prospects.length} source-verified prospects found. Review them before launch.`);
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Prospect discovery failed';
+      const message = error instanceof Error && error.message ? error.message : "Prospect discovery couldn't complete. No outreach was started. Please try again.";
       setDiscoveryError(message);
       setDiscoveryPreview([]);
       setSelectedProspectUrls(new Set());
