@@ -63,10 +63,7 @@ test('launch revalidates only canonical prospects explicitly reviewed from sourc
 test('discovery excludes history before deep providers and caches company work per request', () => {
   const pipeline = readFileSync(resolve(root, 'supabase/functions/linkedin-v1-pipeline/index.ts'), 'utf8');
   const discovery = pipeline.slice(pipeline.indexOf('async function discoverVerifiedProspects'), pipeline.indexOf('function discoveryEmptyReason'));
-  const history = discovery.indexOf('excludeHistoricallyUnsafeProspects');
-  const jina = discovery.indexOf('readOfficialCompanyEvidence');
-  const openai = discovery.indexOf('groundedPersonExtraction');
-  assert.ok(history >= 0 && history < jina && history < openai, 'historical exclusion must precede Jina and OpenAI');
+  assert.match(discovery, /newCanonical[\s\S]*excludeHistoricallyUnsafeProspects[\s\S]*candidates[\s\S]*groundedPersonExtraction[\s\S]*researchCompany/);
   assert.match(discovery, /safeCanonical\.has\(linkedinUrl\)[\s\S]*researchCompany\(companyName\)/);
   assert.match(discovery, /const companyResearchCache = new Map<string, Promise<CompanyResearch \| null>>\(\)/);
   assert.match(discovery, /companyResearchCache\.set\(identityKey, pending\)/);
@@ -77,6 +74,24 @@ test('discovery excludes history before deep providers and caches company work p
   assert.match(discovery, /historical_exclusion_ms/);
   assert.match(discovery, /companyCacheMisses/);
   assert.match(discovery, /uniqueCompaniesResearched/);
+});
+
+test('discovery expands recall through bounded diverse waves without weakening evidence gates', () => {
+  const pipeline = readFileSync(resolve(root, 'supabase/functions/linkedin-v1-pipeline/index.ts'), 'utf8');
+  assert.match(pipeline, /maxWaves: 3/);
+  assert.match(pipeline, /searchQueries: 6/);
+  assert.match(pipeline, /canonicalCandidates: 18/);
+  assert.match(pipeline, /deepResearchCandidates: 7/);
+  assert.match(pipeline, /buildDiscoveryWaves/);
+  assert.match(pipeline, /discoveryRoleVariants/);
+  assert.match(pipeline, /discoveryVerticalVariants/);
+  assert.match(pipeline, /no_materially_new_candidates/);
+  assert.match(pipeline, /requested_target_reached/);
+  assert.match(pipeline, /evaluatedCanonical/);
+  assert.match(pipeline, /rejectedSemanticKeys/);
+  assert.match(pipeline, /diversifyProspects/);
+  assert.match(pipeline, /wavesStarted/);
+  assert.match(pipeline, /deadlineRemainingMs/);
 });
 
 test('discovery interprets source evidence without weakening mandatory gates', () => {
