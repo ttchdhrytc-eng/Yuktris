@@ -48,6 +48,15 @@ test('launch revalidates only canonical prospects explicitly reviewed from sourc
   assert.match(pipeline, /sameCompanyEvidence/);
   assert.match(pipeline, /isDecisionMakerTitle/);
   assert.match(pipeline, /matchesIntendedRole/);
+  assert.match(pipeline, /new AbortController\(\)/);
+  assert.match(pipeline, /combinedSignal\(signal, 7000\)/);
+  assert.match(pipeline, /combinedSignal\(signal, 6000\)/);
+  assert.match(pipeline, /providerStats/);
+  assert.match(pipeline, /internal_deadline_reached/);
+  assert.match(pipeline, /includes\("aljpmtuekghwzrnuwkat"\)/);
+  assert.match(pipeline, /linkedin_production_acceptance_authorizations/);
+  assert.match(campaigns, /discovering\) return/);
+  assert.match(campaigns, /No outreach was started/);
 });
 
 test('Prospect reads and mutations remain scoped to the authenticated workspace', () => {

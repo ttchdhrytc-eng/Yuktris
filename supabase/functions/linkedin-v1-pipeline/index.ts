@@ -36,14 +36,16 @@ type DiscoveryDiagnostics = {
   rejectionFunnel: Record<string, number>;
   timingsMs: Record<string, number>;
   providerRequests: Record<string, number>;
+  providerStats: Record<string, { started: number; completed: number; aborted: number; failed: number }>;
   slowestCalls: Array<{ provider: string; duration_ms: number }>;
   cheapFiltered: number;
   deeplyResearched: number;
   companyCacheHits: number;
   internalDeadlineMs: number;
+  terminatedBy: string;
 };
 
-const newDiscoveryDiagnostics = (): DiscoveryDiagnostics => ({ searchQueries: 0, providerResults: 0, companyCandidates: 0, companyResearchSucceeded: 0, companyResearchFailed: 0, personResults: 0, canonicalProfileUrls: 0, rejectedByEvidence: 0, rejectedByIdentityParsing: 0, rejectedByDedupe: 0, finalCandidates: 0, historicalExcluded: 0, rejectionFunnel: {}, timingsMs: {}, providerRequests: { tavily: 0, jina: 0, openai: 0 }, slowestCalls: [], cheapFiltered: 0, deeplyResearched: 0, companyCacheHits: 0, internalDeadlineMs: 42000 });
+const newDiscoveryDiagnostics = (): DiscoveryDiagnostics => ({ searchQueries: 0, providerResults: 0, companyCandidates: 0, companyResearchSucceeded: 0, companyResearchFailed: 0, personResults: 0, canonicalProfileUrls: 0, rejectedByEvidence: 0, rejectedByIdentityParsing: 0, rejectedByDedupe: 0, finalCandidates: 0, historicalExcluded: 0, rejectionFunnel: {}, timingsMs: {}, providerRequests: { tavily: 0, jina: 0, openai: 0 }, providerStats: { tavily: { started: 0, completed: 0, aborted: 0, failed: 0 }, jina: { started: 0, completed: 0, aborted: 0, failed: 0 }, openai: { started: 0, completed: 0, aborted: 0, failed: 0 } }, slowestCalls: [], cheapFiltered: 0, deeplyResearched: 0, companyCacheHits: 0, internalDeadlineMs: 42000, terminatedBy: "completed" });
 
 type Prospect = {
   companyName: string;
@@ -159,17 +161,23 @@ Deno.serve(async (req: Request) => {
       const accountId = requireString(body.linkedin_account_id, "linkedin_account_id");
       const maxProspects = clampNumber(body.max_prospects, 1, 5, 3);
       const diagnostics = newDiscoveryDiagnostics();
-      const discovered = await Promise.race([
-        discoverVerifiedProspects(icp, maxProspects, diagnostics),
-        new Promise<Prospect[]>((resolve) => setTimeout(() => {
-          reject(diagnostics, "internal_deadline_reached");
-          diagnostics.timingsMs.total = diagnostics.internalDeadlineMs;
-          resolve([]);
-        }, diagnostics.internalDeadlineMs)),
-      ]);
+      const requestStarted = Date.now();
+      const controller = new AbortController();
+      const deadline = setTimeout(() => controller.abort("internal_deadline_reached"), diagnostics.internalDeadlineMs);
+      let discovered: Prospect[] = [];
+      try {
+        discovered = await discoverVerifiedProspects(icp, maxProspects, diagnostics, controller.signal);
+      } catch (error) {
+        if (!controller.signal.aborted) throw error;
+        reject(diagnostics, "internal_deadline_reached");
+        diagnostics.terminatedBy = "internal_deadline_reached";
+      } finally {
+        clearTimeout(deadline);
+      }
       const historyStarted = Date.now();
       const prospects = await excludeHistoricallyUnsafeProspects(admin, workspaceId, accountId, discovered, diagnostics);
       diagnostics.timingsMs.historical_exclusion = Date.now() - historyStarted;
+      diagnostics.timingsMs.total = Date.now() - requestStarted;
       return json({
         status: "preview",
         source_provider: "Tavily search + Jina Reader",
@@ -583,10 +591,10 @@ Deno.serve(async (req: Request) => {
   }
 });
 
-async function discoverVerifiedProspects(icp: ICP, maxProspects: number, diagnostics = newDiscoveryDiagnostics()): Promise<Prospect[]> {
+async function discoverVerifiedProspects(icp: ICP, maxProspects: number, diagnostics = newDiscoveryDiagnostics(), signal?: AbortSignal): Promise<Prospect[]> {
   const startedAt = Date.now();
   const deadlineAt = startedAt + diagnostics.internalDeadlineMs;
-  const withinBudget = () => Date.now() < deadlineAt - 2500;
+  const withinBudget = () => !signal?.aborted && Date.now() < deadlineAt - 2500;
   const tavilyKey = Deno.env.get("TAVILY_API_KEY");
   if (!tavilyKey) throw new Error("TAVILY_API_KEY is not configured in Supabase secrets");
 
@@ -600,7 +608,7 @@ async function discoverVerifiedProspects(icp: ICP, maxProspects: number, diagnos
   ])].slice(0, 3);
   const companyResults: Array<{ title: string; url: string; content: string; score?: number }> = [];
   const initialSearchAt = Date.now();
-  const initialSearches = await Promise.all(companyQueries.map((query) => tavilySearch(tavilyKey, query, Math.max(8, maxProspects * 2), diagnostics).catch(() => { reject(diagnostics, "provider_timeout"); return []; })));
+  const initialSearches = await Promise.all(companyQueries.map((query) => tavilySearch(tavilyKey, query, Math.max(8, maxProspects * 2), diagnostics, signal).catch((error) => { if (signal?.aborted) throw error; reject(diagnostics, "provider_timeout"); return []; })));
   for (const results of initialSearches) {
     diagnostics.searchQueries += 1;
     diagnostics.providerResults += results.length;
@@ -620,7 +628,7 @@ async function discoverVerifiedProspects(icp: ICP, maxProspects: number, diagnos
     if (prospects.length >= maxProspects || !withinBudget()) { if (!withinBudget()) reject(diagnostics, "internal_deadline_reached"); break; }
     const rootUrl = rootWebsite(candidate.url);
     diagnostics.deeplyResearched += 1;
-    const websiteText = await jinaRead(rootUrl, diagnostics).then((value) => { diagnostics.companyResearchSucceeded += 1; return value; }).catch(() => { diagnostics.companyResearchFailed += 1; reject(diagnostics, "official_company_unreadable"); return candidate.content ?? ""; });
+    const websiteText = await jinaRead(rootUrl, diagnostics, signal).then((value) => { diagnostics.companyResearchSucceeded += 1; return value; }).catch((error) => { if (signal?.aborted) throw error; diagnostics.companyResearchFailed += 1; reject(diagnostics, "official_company_unreadable"); return candidate.content ?? ""; });
     if (!matchesIcpCompanyEvidence(`${candidate.title} ${candidate.content ?? ""} ${websiteText}`, icp)) { diagnostics.rejectedByEvidence += 1; reject(diagnostics, "company_icp_mismatch"); continue; }
     const companyName = cleanCompanyName(candidate.title, new URL(rootUrl).hostname);
     if (!companyName) continue;
@@ -629,7 +637,7 @@ async function discoverVerifiedProspects(icp: ICP, maxProspects: number, diagnos
       if (prospects.length >= maxProspects) break;
       diagnostics.searchQueries += 1;
       if (!withinBudget()) { reject(diagnostics, "internal_deadline_reached"); break; }
-      const people = await tavilySearch(tavilyKey, `site:linkedin.com/in \"${companyName}\" \"${role}\"`, 6, diagnostics).catch(() => { reject(diagnostics, "provider_timeout"); return []; });
+      const people = await tavilySearch(tavilyKey, `site:linkedin.com/in \"${companyName}\" \"${role}\"`, 6, diagnostics, signal).catch((error) => { if (signal?.aborted) throw error; reject(diagnostics, "provider_timeout"); return []; });
       diagnostics.providerResults += people.length;
       diagnostics.personResults += people.length;
       const matches = people.filter((r) => {
@@ -648,7 +656,7 @@ async function discoverVerifiedProspects(icp: ICP, maxProspects: number, diagnos
       const linkedinUrl = normalizeLinkedInProfile(match.url);
       if (!linkedinUrl) continue;
       let extracted = deterministicPersonEvidence(match.title, match.content ?? "");
-      if ((!extracted || !extracted.company) && aiExtractionBudget-- > 0 && withinBudget()) extracted = await groundedPersonExtraction(match, roles, diagnostics).catch(() => null);
+      if ((!extracted || !extracted.company) && aiExtractionBudget-- > 0 && withinBudget()) extracted = await groundedPersonExtraction(match, roles, diagnostics, signal).catch((error) => { if (signal?.aborted) throw error; return null; });
       if (!extracted?.firstName || !extracted.lastName) { reject(diagnostics, "missing_person_name"); continue; }
       if (!extracted.title) { reject(diagnostics, "missing_current_title"); continue; }
       if (!extracted.company) { reject(diagnostics, "missing_current_company"); continue; }
@@ -689,7 +697,7 @@ async function discoverVerifiedProspects(icp: ICP, maxProspects: number, diagnos
     for (const query of peopleQueries) {
       if (prospects.length >= maxProspects || !withinBudget()) break;
       diagnostics.searchQueries += 1;
-      const people = await tavilySearch(tavilyKey, query, 8, diagnostics).catch(() => { reject(diagnostics, "provider_timeout"); return []; });
+      const people = await tavilySearch(tavilyKey, query, 8, diagnostics, signal).catch((error) => { if (signal?.aborted) throw error; reject(diagnostics, "provider_timeout"); return []; });
       diagnostics.providerResults += people.length;
       diagnostics.personResults += people.length;
       for (const person of people.sort((a, b) => Number(b.score ?? 0) - Number(a.score ?? 0)).slice(0, 4)) {
@@ -699,7 +707,7 @@ async function discoverVerifiedProspects(icp: ICP, maxProspects: number, diagnos
         diagnostics.canonicalProfileUrls += 1;
         if (seenLinkedIn.has(linkedinUrl)) { diagnostics.rejectedByDedupe += 1; continue; }
         let extracted = deterministicPersonEvidence(person.title, person.content ?? "");
-        if ((!extracted || !extracted.company) && aiExtractionBudget-- > 0 && withinBudget()) extracted = await groundedPersonExtraction(person, roles, diagnostics).catch(() => null);
+        if ((!extracted || !extracted.company) && aiExtractionBudget-- > 0 && withinBudget()) extracted = await groundedPersonExtraction(person, roles, diagnostics, signal).catch((error) => { if (signal?.aborted) throw error; return null; });
         if (!extracted?.firstName || !extracted.lastName) { reject(diagnostics, "missing_person_name"); continue; }
         if (!extracted.title) { reject(diagnostics, "missing_current_title"); continue; }
         if (!extracted.company) { reject(diagnostics, "missing_current_company"); continue; }
@@ -708,13 +716,13 @@ async function discoverVerifiedProspects(icp: ICP, maxProspects: number, diagnos
         if (!matchesIntendedRole(parsed.title, roles) || !isDecisionMakerTitle(parsed.title)) { diagnostics.rejectedByEvidence += 1; reject(diagnostics, isDecisionMakerTitle(parsed.title) ? "role_mismatch" : "insufficient_seniority"); continue; }
 
         diagnostics.searchQueries += 1;
-        const officialResults = await tavilySearch(tavilyKey, `\"${companyName}\" official company website`, 5, diagnostics).catch(() => { reject(diagnostics, "provider_timeout"); return []; });
+        const officialResults = await tavilySearch(tavilyKey, `\"${companyName}\" official company website`, 5, diagnostics, signal).catch((error) => { if (signal?.aborted) throw error; reject(diagnostics, "provider_timeout"); return []; });
         diagnostics.providerResults += officialResults.length;
         const official = officialResults.find((result) => isUsableCompanyUrl(result.url) && hasEvidenceToken(`${result.title} ${result.content} ${new URL(result.url).hostname}`, companyName, ["the", "group", "solutions", "services", "technologies", "technology", "consulting"]));
         if (!official) { diagnostics.rejectedByEvidence += 1; reject(diagnostics, "official_company_not_found"); continue; }
         const companyWebsite = rootWebsite(official.url);
         diagnostics.deeplyResearched += 1;
-        const companyDescription = await jinaRead(companyWebsite, diagnostics).then((value) => { diagnostics.companyResearchSucceeded += 1; return value; }).catch(() => { diagnostics.companyResearchFailed += 1; reject(diagnostics, "official_company_unreadable"); return official.content ?? ""; });
+        const companyDescription = await jinaRead(companyWebsite, diagnostics, signal).then((value) => { diagnostics.companyResearchSucceeded += 1; return value; }).catch((error) => { if (signal?.aborted) throw error; diagnostics.companyResearchFailed += 1; reject(diagnostics, "official_company_unreadable"); return official.content ?? ""; });
         if (!matchesIcpCompanyEvidence(`${official.title} ${official.content ?? ""} ${companyDescription}`, icp)) { diagnostics.rejectedByEvidence += 1; reject(diagnostics, "company_icp_mismatch"); continue; }
         const geographyBoost = matchesGeographyEvidence(`${official.title} ${official.content ?? ""} ${companyDescription}`, icp.geography ?? []) ? 0.05 : 0;
         seenLinkedIn.add(linkedinUrl);
@@ -773,11 +781,11 @@ function deterministicPersonEvidence(title: string, content: string): PersonEvid
   return parsed.firstName && parsed.lastName ? { ...parsed, company: company ?? "", location, confidence: company && parsed.title ? 0.9 : 0.55 } : null;
 }
 
-async function groundedPersonExtraction(result: { title: string; url: string; content: string }, roles: string[], diagnostics?: DiscoveryDiagnostics): Promise<PersonEvidence | null> {
+async function groundedPersonExtraction(result: { title: string; url: string; content: string }, roles: string[], diagnostics?: DiscoveryDiagnostics, signal?: AbortSignal): Promise<PersonEvidence | null> {
   const key = Deno.env.get("OPENAI_API_KEY");
   if (!key) return null;
-  diagnostics && (diagnostics.providerRequests.openai += 1); const started = Date.now();
-  const response = await fetch("https://api.openai.com/v1/chat/completions", { method: "POST", signal: AbortSignal.timeout(6000), headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` }, body: JSON.stringify({ model: Deno.env.get("OPENAI_OUTREACH_MODEL") ?? "gpt-4.1-mini", temperature: 0, response_format: { type: "json_object" }, messages: [{ role: "system", content: "Extract only explicitly supported CURRENT person employment facts from supplied search evidence. Never use outside knowledge or infer missing facts. Return JSON {sufficient,first_name,last_name,current_title,current_company,location,supporting_quote,confidence}. If current employment is not explicit, sufficient=false." }, { role: "user", content: JSON.stringify({ canonical_linkedin_url: normalizeLinkedInProfile(result.url), result_title: result.title, result_snippet: result.content.slice(0, 1200), allowed_role_criteria: roles }) }] }) }).finally(() => recordProviderTiming(diagnostics, "openai", Date.now() - started));
+  const started = beginProviderCall(diagnostics, "openai");
+  const response = await fetch("https://api.openai.com/v1/chat/completions", { method: "POST", signal: combinedSignal(signal, 6000), headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` }, body: JSON.stringify({ model: Deno.env.get("OPENAI_OUTREACH_MODEL") ?? "gpt-4.1-mini", temperature: 0, response_format: { type: "json_object" }, messages: [{ role: "system", content: "Extract only explicitly supported CURRENT person employment facts from supplied search evidence. Never use outside knowledge or infer missing facts. Return JSON {sufficient,first_name,last_name,current_title,current_company,location,supporting_quote,confidence}. If current employment is not explicit, sufficient=false." }, { role: "user", content: JSON.stringify({ canonical_linkedin_url: normalizeLinkedInProfile(result.url), result_title: result.title, result_snippet: result.content.slice(0, 1200), allowed_role_criteria: roles }) }] }) }).then((value) => { completeProviderCall(diagnostics, "openai"); return value; }).catch((error) => { failProviderCall(diagnostics, "openai", signal?.aborted === true); throw error; }).finally(() => recordProviderTiming(diagnostics, "openai", Date.now() - started));
   if (!response.ok) return null;
   try {
     const value = JSON.parse((await response.json()).choices?.[0]?.message?.content ?? "{}");
@@ -906,11 +914,11 @@ function quoted(value: string): string {
   return `"${value.replace(/["\\]/g, " ").trim()}"`;
 }
 
-async function tavilySearch(apiKey: string, query: string, maxResults: number, diagnostics?: DiscoveryDiagnostics): Promise<Array<{ title: string; url: string; content: string; score?: number }>> {
-  diagnostics && (diagnostics.providerRequests.tavily += 1); const started = Date.now();
+async function tavilySearch(apiKey: string, query: string, maxResults: number, diagnostics?: DiscoveryDiagnostics, signal?: AbortSignal): Promise<Array<{ title: string; url: string; content: string; score?: number }>> {
+  const started = beginProviderCall(diagnostics, "tavily");
   const response = await fetch("https://api.tavily.com/search", {
     method: "POST",
-    signal: AbortSignal.timeout(7000),
+    signal: combinedSignal(signal, 7000),
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       api_key: apiKey,
@@ -919,18 +927,18 @@ async function tavilySearch(apiKey: string, query: string, maxResults: number, d
       search_depth: "advanced",
       include_answer: false,
     }),
-  }).finally(() => recordProviderTiming(diagnostics, "tavily", Date.now() - started));
+  }).then((value) => { completeProviderCall(diagnostics, "tavily"); return value; }).catch((error) => { failProviderCall(diagnostics, "tavily", signal?.aborted === true); throw error; }).finally(() => recordProviderTiming(diagnostics, "tavily", Date.now() - started));
   if (!response.ok) throw new Error(`Tavily search failed (${response.status})`);
   const payload = await response.json();
   return Array.isArray(payload.results) ? payload.results : [];
 }
 
-async function jinaRead(url: string, diagnostics?: DiscoveryDiagnostics): Promise<string> {
-  diagnostics && (diagnostics.providerRequests.jina += 1); const started = Date.now();
+async function jinaRead(url: string, diagnostics?: DiscoveryDiagnostics, signal?: AbortSignal): Promise<string> {
+  const started = beginProviderCall(diagnostics, "jina");
   const response = await fetch(`https://r.jina.ai/${url}`, {
-    signal: AbortSignal.timeout(6000),
+    signal: combinedSignal(signal, 6000),
     headers: { Accept: "text/plain" },
-  }).finally(() => recordProviderTiming(diagnostics, "jina", Date.now() - started));
+  }).then((value) => { completeProviderCall(diagnostics, "jina"); return value; }).catch((error) => { failProviderCall(diagnostics, "jina", signal?.aborted === true); throw error; }).finally(() => recordProviderTiming(diagnostics, "jina", Date.now() - started));
   if (!response.ok) throw new Error(`Jina reader failed (${response.status})`);
   return (await response.text()).slice(0, 12000);
 }
@@ -1086,6 +1094,21 @@ function recordProviderTiming(diagnostics: DiscoveryDiagnostics | undefined, pro
   diagnostics.slowestCalls.push({ provider, duration_ms: duration });
   diagnostics.slowestCalls.sort((a, b) => b.duration_ms - a.duration_ms);
   diagnostics.slowestCalls = diagnostics.slowestCalls.slice(0, 8);
+}
+
+function combinedSignal(requestSignal: AbortSignal | undefined, timeoutMs: number): AbortSignal {
+  return requestSignal ? AbortSignal.any([requestSignal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs);
+}
+function beginProviderCall(diagnostics: DiscoveryDiagnostics | undefined, provider: string): number {
+  if (diagnostics) { diagnostics.providerRequests[provider] += 1; diagnostics.providerStats[provider].started += 1; }
+  return Date.now();
+}
+function completeProviderCall(diagnostics: DiscoveryDiagnostics | undefined, provider: string): void {
+  if (diagnostics) diagnostics.providerStats[provider].completed += 1;
+}
+function failProviderCall(diagnostics: DiscoveryDiagnostics | undefined, provider: string, aborted: boolean): void {
+  if (!diagnostics) return;
+  diagnostics.providerStats[provider][aborted ? "aborted" : "failed"] += 1;
 }
 function isLikelyCompanySourceUrl(value: string): boolean {
   try {
