@@ -167,7 +167,7 @@ export function CampaignsPage() {
       const { data, error } = await supabase.functions.invoke('linkedin-v1-pipeline', { body: { action: 'preview_discovery', workspace_id: workspace.id, icp: payload, max_prospects: Math.min(dailyLimit, 5) } });
       if (error) throw new Error(await edgeFunctionError(error));
       const prospects = Array.isArray(data?.prospects) ? data.prospects as DiscoveryPreview[] : [];
-      if (!prospects.length) throw new Error('No source-verified LinkedIn prospects were found. Adjust the ICP and try again.');
+      if (!prospects.length) throw new Error(data?.reason ?? 'No source-verified LinkedIn prospects were found. Adjust the ICP and try again.');
       setDiscoveryPreview(prospects);
       setSelectedProspectUrls(new Set());
       toast.success(`${prospects.length} source-verified prospects found. Review them before launch.`);
@@ -557,6 +557,9 @@ function mapIcp(icp: FullICP) {
     companySize: icp.company_profile?.company_size ?? '',
     jobTitles: icp.decision_makers.map((d) => d.job_title).filter(Boolean),
     painPoints: icp.pain_points.map((p) => p.pain_point),
+    subIndustry: icp.company_profile?.sub_industry ?? '',
+    geography: [...new Set([icp.company_profile?.country, icp.company_profile?.region, ...(icp.sales_navigator_filters?.location ?? [])].filter((value): value is string => Boolean(value)))],
+    keywords: [...new Set([...(icp.sales_navigator_filters?.keywords ?? []), ...(icp.sales_navigator_filters?.industry ?? [])])],
   };
 }
 function Review({ label, value }: { label: string; value: string }) {

@@ -37,6 +37,9 @@ test('launch revalidates only canonical prospects explicitly reviewed from sourc
   assert.match(pipeline, /reviewedTargetSet\.has\(prospect\.linkedinUrl\)/);
   assert.match(pipeline, /reviewed_prospects_not_revalidated/);
   assert.match(pipeline, /source_provider: "Tavily search \+ Jina Reader"/);
+  assert.match(pipeline, /companyQueries/);
+  assert.match(pipeline, /discoveryEmptyReason/);
+  assert.match(pipeline, /diagnostics/);
 });
 
 test('Prospect reads and mutations remain scoped to the authenticated workspace', () => {

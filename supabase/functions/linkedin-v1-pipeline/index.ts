@@ -15,7 +15,26 @@ type ICP = {
   companySize?: string;
   jobTitles?: string[];
   painPoints?: string[];
+  subIndustry?: string;
+  geography?: string[];
+  keywords?: string[];
 };
+
+type DiscoveryDiagnostics = {
+  searchQueries: number;
+  providerResults: number;
+  companyCandidates: number;
+  companyResearchSucceeded: number;
+  companyResearchFailed: number;
+  personResults: number;
+  canonicalProfileUrls: number;
+  rejectedByEvidence: number;
+  rejectedByIdentityParsing: number;
+  rejectedByDedupe: number;
+  finalCandidates: number;
+};
+
+const newDiscoveryDiagnostics = (): DiscoveryDiagnostics => ({ searchQueries: 0, providerResults: 0, companyCandidates: 0, companyResearchSucceeded: 0, companyResearchFailed: 0, personResults: 0, canonicalProfileUrls: 0, rejectedByEvidence: 0, rejectedByIdentityParsing: 0, rejectedByDedupe: 0, finalCandidates: 0 });
 
 type Prospect = {
   companyName: string;
@@ -125,12 +144,15 @@ Deno.serve(async (req: Request) => {
     if (action === "preview_discovery") {
       const icp = (body.icp ?? {}) as ICP;
       const maxProspects = clampNumber(body.max_prospects, 1, 5, 3);
-      const prospects = await discoverVerifiedProspects(icp, maxProspects);
+      const diagnostics = newDiscoveryDiagnostics();
+      const prospects = await discoverVerifiedProspects(icp, maxProspects, diagnostics);
       return json({
         status: "preview",
         source_provider: "Tavily search + Jina Reader",
         persisted: false,
         execution_jobs_created: 0,
+        diagnostics,
+        reason: prospects.length ? null : discoveryEmptyReason(diagnostics),
         prospects: prospects.map((prospect) => ({
           company_name: prospect.companyName,
           company_website: prospect.companyWebsite,
@@ -532,38 +554,61 @@ Deno.serve(async (req: Request) => {
   }
 });
 
-async function discoverVerifiedProspects(icp: ICP, maxProspects: number): Promise<Prospect[]> {
+async function discoverVerifiedProspects(icp: ICP, maxProspects: number, diagnostics = newDiscoveryDiagnostics()): Promise<Prospect[]> {
   const tavilyKey = Deno.env.get("TAVILY_API_KEY");
   if (!tavilyKey) throw new Error("TAVILY_API_KEY is not configured in Supabase secrets");
 
-  const roles = (icp.jobTitles?.length ? icp.jobTitles : ["CEO", "Founder", "VP Sales", "Head of Sales"]).slice(0, 4);
-  const companyQuery = [icp.industry ? `${icp.industry} companies` : "B2B companies", icp.companySize ? `${icp.companySize} employees` : "", icp.description ?? "", "official company website -top -best -list -directory -database"].filter(Boolean).join(" ");
-  const companyResults = await tavilySearch(tavilyKey, companyQuery, Math.max(10, maxProspects * 3));
-  const companyCandidates = companyResults.filter((r) => isUsableCompanyUrl(r.url)).slice(0, Math.max(8, maxProspects * 2));
+  const roles = (icp.jobTitles?.length ? icp.jobTitles : ["CEO", "Founder", "VP Sales", "Head of Sales"]).filter(Boolean).slice(0, 4);
+  const geography = (icp.geography ?? []).filter(Boolean).slice(0, 2).join(" ");
+  const companyTerms = [icp.subIndustry, ...(icp.keywords ?? []).slice(0, 2)].filter(Boolean).join(" ");
+  const companyQueries = [...new Set([
+    [quoted(icp.subIndustry || icp.industry || icp.name || "B2B"), geography, "company official website"].filter(Boolean).join(" "),
+    [quoted(icp.industry || icp.name || "B2B companies"), icp.companySize ? `${icp.companySize} employees` : "", geography, "official site"].filter(Boolean).join(" "),
+    [quoted(icp.name || icp.subIndustry || icp.industry || "B2B"), companyTerms, geography, "official website"].filter(Boolean).join(" "),
+  ])].slice(0, 3);
+  const companyResults: Array<{ title: string; url: string; content: string; score?: number }> = [];
+  for (const query of companyQueries) {
+    diagnostics.searchQueries += 1;
+    const results = await tavilySearch(tavilyKey, query, Math.max(8, maxProspects * 2));
+    diagnostics.providerResults += results.length;
+    companyResults.push(...results);
+  }
+  const companyCandidates = dedupeBy(companyResults.filter((r) => isUsableCompanyUrl(r.url) && isLikelyCompanySourceUrl(r.url)), (result) => rootWebsite(result.url)).slice(0, Math.max(10, maxProspects * 3));
+  diagnostics.companyCandidates = companyCandidates.length;
 
   const prospects: Prospect[] = [];
   const seenLinkedIn = new Set<string>();
   for (const candidate of companyCandidates) {
     if (prospects.length >= maxProspects) break;
     const rootUrl = rootWebsite(candidate.url);
-    const websiteText = await jinaRead(rootUrl).catch(() => candidate.content ?? "");
+    const websiteText = await jinaRead(rootUrl).then((value) => { diagnostics.companyResearchSucceeded += 1; return value; }).catch(() => { diagnostics.companyResearchFailed += 1; return candidate.content ?? ""; });
+    if (!matchesIcpCompanyEvidence(`${candidate.title} ${candidate.content ?? ""} ${websiteText}`, icp)) { diagnostics.rejectedByEvidence += 1; continue; }
     const companyName = cleanCompanyName(candidate.title, new URL(rootUrl).hostname);
     if (!companyName) continue;
 
     for (const role of roles) {
       if (prospects.length >= maxProspects) break;
+      diagnostics.searchQueries += 1;
       const people = await tavilySearch(tavilyKey, `site:linkedin.com/in \"${companyName}\" \"${role}\"`, 8);
-      const match = people.find((r) => {
+      diagnostics.providerResults += people.length;
+      diagnostics.personResults += people.length;
+      const matches = people.filter((r) => {
         const normalized = normalizeLinkedInProfile(r.url);
-        if (!normalized || seenLinkedIn.has(normalized)) return false;
-        const evidence = `${r.title} ${r.content}`.toLowerCase();
-        return evidence.includes(companyName.toLowerCase().split(" ")[0]) && evidence.includes(role.toLowerCase().split(" ")[0]);
-      });
+        if (!normalized) return false;
+        diagnostics.canonicalProfileUrls += 1;
+        if (seenLinkedIn.has(normalized)) { diagnostics.rejectedByDedupe += 1; return false; }
+        const evidence = `${r.title} ${r.content}`;
+        const sourcedHeadline = parseLinkedInTitle(r.title, "").title;
+        const accepted = Boolean(sourcedHeadline) && hasEvidenceToken(evidence, companyName, ["the", "group", "solutions", "services", "technologies", "technology", "consulting"]) && hasEvidenceToken(sourcedHeadline, role, ["head", "of", "and", "the", "manager", "lead"]);
+        if (!accepted) diagnostics.rejectedByEvidence += 1;
+        return accepted;
+      }).sort((a, b) => Number(b.score ?? 0) - Number(a.score ?? 0));
+      const match = matches[0];
       if (!match) continue;
       const linkedinUrl = normalizeLinkedInProfile(match.url);
       if (!linkedinUrl) continue;
-      const parsed = parseLinkedInTitle(match.title, role);
-      if (!parsed.firstName || !parsed.lastName) continue;
+      const parsed = parseLinkedInTitle(match.title, "");
+      if (!parsed.firstName || !parsed.lastName || !parsed.title) { diagnostics.rejectedByIdentityParsing += 1; continue; }
       seenLinkedIn.add(linkedinUrl);
       prospects.push({
         companyName,
@@ -574,12 +619,105 @@ async function discoverVerifiedProspects(icp: ICP, maxProspects: number): Promis
         contactTitle: parsed.title,
         linkedinUrl,
         evidence: `${match.title}. ${match.content ?? ""}`,
-        confidenceScore: Math.max(0.5, Math.min(0.99, 0.5 + Number(candidate.score ?? 0) * 0.2 + Number(match.score ?? 0) * 0.3)),
+        confidenceScore: Math.max(0.5, Math.min(0.99, 0.45 + Number(candidate.score ?? 0) * 0.2 + Number(match.score ?? 0) * 0.35)),
       });
       break;
     }
   }
-  return prospects;
+  if (prospects.length < maxProspects) {
+    const peopleQueries = roles.slice(0, 3).map((role) => [
+      "site:linkedin.com/in",
+      `\"${role}\"`,
+      `\"${icp.subIndustry || icp.industry || icp.name || "B2B"}\"`,
+      geography,
+    ].filter(Boolean).join(" "));
+    for (const query of peopleQueries) {
+      if (prospects.length >= maxProspects) break;
+      diagnostics.searchQueries += 1;
+      const people = await tavilySearch(tavilyKey, query, Math.max(8, maxProspects * 2));
+      diagnostics.providerResults += people.length;
+      diagnostics.personResults += people.length;
+      for (const person of people.sort((a, b) => Number(b.score ?? 0) - Number(a.score ?? 0))) {
+        if (prospects.length >= maxProspects) break;
+        const linkedinUrl = normalizeLinkedInProfile(person.url);
+        if (!linkedinUrl) continue;
+        diagnostics.canonicalProfileUrls += 1;
+        if (seenLinkedIn.has(linkedinUrl)) { diagnostics.rejectedByDedupe += 1; continue; }
+        const parsed = parseLinkedInTitle(person.title, "");
+        const companyName = companyFromPersonEvidence(person.title);
+        if (!parsed.firstName || !parsed.lastName || !parsed.title || !companyName) { diagnostics.rejectedByIdentityParsing += 1; continue; }
+        if (!roles.some((role) => hasEvidenceToken(parsed.title, role, ["head", "of", "and", "the", "manager", "lead"]))) { diagnostics.rejectedByEvidence += 1; continue; }
+
+        diagnostics.searchQueries += 1;
+        const officialResults = await tavilySearch(tavilyKey, `\"${companyName}\" official company website`, 5);
+        diagnostics.providerResults += officialResults.length;
+        const official = officialResults.find((result) => isUsableCompanyUrl(result.url) && hasEvidenceToken(`${result.title} ${result.content} ${new URL(result.url).hostname}`, companyName, ["the", "group", "solutions", "services", "technologies", "technology", "consulting"]));
+        if (!official) { diagnostics.rejectedByEvidence += 1; continue; }
+        const companyWebsite = rootWebsite(official.url);
+        const companyDescription = await jinaRead(companyWebsite).then((value) => { diagnostics.companyResearchSucceeded += 1; return value; }).catch(() => { diagnostics.companyResearchFailed += 1; return official.content ?? ""; });
+        if (!matchesIcpCompanyEvidence(`${official.title} ${official.content ?? ""} ${companyDescription}`, icp)) { diagnostics.rejectedByEvidence += 1; continue; }
+        seenLinkedIn.add(linkedinUrl);
+        prospects.push({
+          companyName,
+          companyWebsite,
+          companyDescription: companyDescription.slice(0, 3000),
+          contactFirstName: parsed.firstName,
+          contactLastName: parsed.lastName,
+          contactTitle: parsed.title,
+          linkedinUrl,
+          evidence: `${person.title}. ${person.content ?? ""}`,
+          confidenceScore: Math.max(0.5, Math.min(0.99, 0.5 + Number(person.score ?? 0) * 0.35 + Number(official.score ?? 0) * 0.15)),
+        });
+      }
+    }
+  }
+  prospects.sort((a, b) => b.confidenceScore - a.confidenceScore);
+  diagnostics.finalCandidates = prospects.length;
+  return prospects.slice(0, maxProspects);
+}
+
+function discoveryEmptyReason(diagnostics: DiscoveryDiagnostics): string {
+  if (diagnostics.providerResults === 0) return "The discovery provider returned no search results for this ICP.";
+  if (diagnostics.companyCandidates === 0) return "Search results were found, but none were eligible official company sources.";
+  if (diagnostics.personResults === 0) return "Company sources were found, but the provider returned no LinkedIn decision-maker results.";
+  if (diagnostics.canonicalProfileUrls === 0) return "Decision-maker results were found, but none had canonical LinkedIn profile URLs.";
+  if (diagnostics.rejectedByEvidence > 0) return "LinkedIn candidates were found, but company/title evidence was insufficient for safe verification.";
+  if (diagnostics.rejectedByDedupe > 0) return "All verified candidates were already present in the discovery set.";
+  return "No source-verified prospects passed the complete discovery policy.";
+}
+
+function hasEvidenceToken(evidence: string, expected: string, stopWords: string[]): boolean {
+  const haystack = evidence.toLowerCase();
+  const tokens = expected.toLowerCase().split(/[^a-z0-9]+/).filter((token) => token.length >= 3 && !stopWords.includes(token));
+  return tokens.length > 0 && tokens.some((token) => haystack.includes(token));
+}
+
+function matchesIcpCompanyEvidence(evidence: string, icp: ICP): boolean {
+  const normalizedEvidence = evidence.toLowerCase().replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
+  const phrases = [icp.subIndustry, icp.industry, ...(icp.keywords ?? [])]
+    .filter((value): value is string => Boolean(value?.trim()))
+    .map((value) => value.toLowerCase().replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim())
+    .filter((value) => value.split(" ").length >= 2);
+  return phrases.some((phrase) => normalizedEvidence.includes(phrase));
+}
+
+function companyFromPersonEvidence(evidence: string): string | null {
+  const cleaned = evidence.replace(/\s+/g, " ");
+  const atMatch = cleaned.match(/\b(?:at|@)\s+([A-Z][A-Za-z0-9&.'’ -]{1,70}?)(?=\s*[|·,]|\s+-\s+|\.|$)/);
+  const parts = cleaned.replace(/\s*[|]\s*LinkedIn.*$/i, "").split(/\s+(?:-|–|—)\s+/u).map((part) => part.trim()).filter(Boolean);
+  const sourced = parts.length >= 3 ? parts[parts.length - 1] : atMatch?.[1] ?? null;
+  if (!sourced) return null;
+  const company = sourced.trim().replace(/\s+(?:Inc\.?|LLC|Ltd\.?|Limited)$/i, "").trim();
+  return company.length >= 2 && company.length <= 70 ? company : null;
+}
+
+function dedupeBy<T>(values: T[], key: (value: T) => string): T[] {
+  const seen = new Set<string>();
+  return values.filter((value) => { const identity = key(value); if (seen.has(identity)) return false; seen.add(identity); return true; });
+}
+
+function quoted(value: string): string {
+  return `"${value.replace(/["\\]/g, " ").trim()}"`;
 }
 
 async function tavilySearch(apiKey: string, query: string, maxResults: number): Promise<Array<{ title: string; url: string; content: string; score?: number }>> {
@@ -724,7 +862,7 @@ function normalizeLinkedInProfile(value: string): string | null {
 function isUsableCompanyUrl(value: string): boolean {
   try {
     const host = new URL(value).hostname.toLowerCase();
-    return !["linkedin.com", "facebook.com", "x.com", "twitter.com", "youtube.com", "wikipedia.org", "crunchbase.com", "glassdoor.com"].some((d) => host === d || host.endsWith(`.${d}`));
+    return !["linkedin.com", "facebook.com", "x.com", "twitter.com", "youtube.com", "wikipedia.org", "crunchbase.com", "glassdoor.com", "builtin.com", "clutch.co", "g2.com", "goodfirms.co", "designrush.com", "indeed.com", "zoominfo.com"].some((d) => host === d || host.endsWith(`.${d}`));
   } catch {
     return false;
   }
@@ -750,8 +888,16 @@ function cleanCompanyName(title: string, host: string): string | null {
         .replace(/[^a-z0-9]/g, "")
         .includes(normalizedHost);
     });
-  if (!candidate) return null;
-  return candidate;
+  return candidate ? candidate.split(":")[0].trim() : null;
+}
+function isLikelyCompanySourceUrl(value: string): boolean {
+  try {
+    const path = new URL(value).pathname.toLowerCase();
+    if (/\/(blog|resources?|news|articles?|directory|rankings?|listings?)(\/|$)/.test(path)) return false;
+    return path.split("/").filter(Boolean).length <= 2;
+  } catch {
+    return false;
+  }
 }
 function optionalString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
