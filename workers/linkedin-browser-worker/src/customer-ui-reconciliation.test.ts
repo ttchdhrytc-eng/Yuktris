@@ -39,7 +39,8 @@ test('launch revalidates only canonical prospects explicitly reviewed from sourc
   assert.match(pipeline, /reviewedTargetSet\.has\(prospect\.linkedinUrl\)/);
   assert.match(pipeline, /reviewed_prospects_not_revalidated/);
   assert.match(pipeline, /source_provider: "Tavily search \+ Jina Reader"/);
-  assert.match(pipeline, /companyQueries/);
+  assert.match(pipeline, /peopleQueries/);
+  assert.match(pipeline, /researchCompany/);
   assert.match(pipeline, /discoveryEmptyReason/);
   assert.match(pipeline, /diagnostics/);
   assert.match(pipeline, /excludeHistoricallyUnsafeProspects/);
@@ -57,6 +58,25 @@ test('launch revalidates only canonical prospects explicitly reviewed from sourc
   assert.match(pipeline, /linkedin_production_acceptance_authorizations/);
   assert.match(campaigns, /discovering\) return/);
   assert.match(campaigns, /No outreach was started/);
+});
+
+test('discovery excludes history before deep providers and caches company work per request', () => {
+  const pipeline = readFileSync(resolve(root, 'supabase/functions/linkedin-v1-pipeline/index.ts'), 'utf8');
+  const discovery = pipeline.slice(pipeline.indexOf('async function discoverVerifiedProspects'), pipeline.indexOf('function discoveryEmptyReason'));
+  const history = discovery.indexOf('excludeHistoricallyUnsafeProspects');
+  const jina = discovery.indexOf('jinaRead(website');
+  const openai = discovery.indexOf('groundedPersonExtraction');
+  assert.ok(history >= 0 && history < jina && history < openai, 'historical exclusion must precede Jina and OpenAI');
+  assert.match(discovery, /safeCanonical\.has\(linkedinUrl\)[\s\S]*researchCompany\(companyName\)/);
+  assert.match(discovery, /const companyResearchCache = new Map<string, Promise<CompanyResearch \| null>>\(\)/);
+  assert.match(discovery, /companyResearchCache\.set\(identityKey, pending\)/);
+  assert.match(discovery, /Store before awaiting so simultaneous candidates share/);
+  assert.match(discovery, /identity:[\s\S]*domain:/);
+  assert.match(discovery, /person evidence never enters it/);
+  assert.match(pipeline, /internalDeadlineMs: 38000/);
+  assert.match(discovery, /historical_exclusion_ms/);
+  assert.match(discovery, /companyCacheMisses/);
+  assert.match(discovery, /uniqueCompaniesResearched/);
 });
 
 test('Prospect reads and mutations remain scoped to the authenticated workspace', () => {
