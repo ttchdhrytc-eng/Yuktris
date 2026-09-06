@@ -225,6 +225,75 @@ Deno.serve(async (req: Request) => {
       return json({ status: "ok", inventory: states, write_performed: false });
     }
 
+    if (action === "tick_replenishment") {
+      const now = new Date().toISOString();
+      const { data: activeJob, error: activeError } = await admin
+        .from("prospect_replenishment_jobs")
+        .select("id")
+        .eq("workspace_id", workspaceId)
+        .in("status", ["queued", "cooldown"])
+        .lte("next_attempt_at", now)
+        .order("next_attempt_at", { ascending: true })
+        .limit(1)
+        .maybeSingle();
+      if (activeError) throw pipelineError("replenishment_scheduler_failed", activeError.message, 500);
+
+      let jobId = activeJob?.id as string | undefined;
+      let scheduled = false;
+      if (!jobId) {
+        const { data: dueIcp, error: dueError } = await admin
+          .from("icps")
+          .select("id,next_refresh_at")
+          .eq("workspace_id", workspaceId)
+          .in("prospecting_status", ["queued", "up_to_date"])
+          .not("next_refresh_at", "is", null)
+          .lte("next_refresh_at", now)
+          .order("next_refresh_at", { ascending: true })
+          .limit(1)
+          .maybeSingle();
+        if (dueError) throw pipelineError("replenishment_scheduler_failed", dueError.message, 500);
+        if (dueIcp?.id) {
+          const { data: account } = await admin
+            .from("linkedin_accounts")
+            .select("id,profile_url,expected_profile_url")
+            .eq("workspace_id", workspaceId)
+            .eq("connection_state", "connected")
+            .in("health_status", ["healthy", "degraded"])
+            .limit(1)
+            .maybeSingle();
+          const identityOk = Boolean(account?.profile_url && account?.expected_profile_url && normalizeLinkedInProfile(account.profile_url) === normalizeLinkedInProfile(account.expected_profile_url));
+          if (account?.id && identityOk) {
+            const refreshIdentity = new Date(dueIcp.next_refresh_at).toISOString();
+            const { data: inserted, error: insertError } = await admin
+              .from("prospect_replenishment_jobs")
+              .insert({
+                workspace_id: workspaceId,
+                icp_id: dueIcp.id,
+                linkedin_account_id: account.id,
+                idempotency_key: `${dueIcp.id}:scheduled_refresh:${refreshIdentity}`,
+                reason: "scheduled_refresh",
+              })
+              .select("id")
+              .maybeSingle();
+            if (insertError && insertError.code !== "23505") throw pipelineError("replenishment_scheduler_failed", insertError.message, 500);
+            jobId = inserted?.id;
+            scheduled = Boolean(jobId);
+          } else {
+            await admin.from("icps").update({
+              prospecting_status: "needs_attention",
+              discovery_error: "A connected and identity-matched LinkedIn sender is required before prospecting can continue.",
+            }).eq("workspace_id", workspaceId).eq("id", dueIcp.id);
+          }
+        }
+      }
+
+      if (jobId) {
+        const task = processReplenishment(admin, workspaceId, jobId).catch((error) => console.error("[scheduled-replenishment-failed]", { job_id: jobId, message: error instanceof Error ? error.message : "unknown" }));
+        if (typeof EdgeRuntime !== "undefined") EdgeRuntime.waitUntil(task); else await task;
+      }
+      return json({ status: jobId ? "processing" : "idle", scheduled, job_id: jobId ?? null, executable_jobs_created: 0, write_performed: false });
+    }
+
     if (action === "request_replenishment") {
       const icpId = requireString(body.icp_id, "icp_id");
       const reason = optionalString(body.reason) ?? "explicit_activation";

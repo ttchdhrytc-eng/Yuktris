@@ -445,6 +445,27 @@ export class Worker {
     const workspaceIds = [...new Set((rows ?? []).map((row: { workspace_id?: string | null }) => row.workspace_id).filter(Boolean))] as string[];
 
     for (const workspaceId of workspaceIds) {
+      // Replenishment is deliberately separate from LinkedIn execution. The
+      // Edge endpoint processes at most one due bounded batch per workspace;
+      // it never creates browser work or bypasses the outbound gate.
+      const replenishmentResponse = await fetch(`${supabaseUrl}/functions/v1/linkedin-v1-pipeline`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${serviceKey}`,
+          apikey: serviceKey,
+        },
+        body: JSON.stringify({ action: 'tick_replenishment', workspace_id: workspaceId }),
+      });
+      if (!replenishmentResponse.ok) {
+        const responseError = await readSafeFunctionError(replenishmentResponse);
+        logger.warn('Prospect replenishment maintenance failed', {
+          workspace_id: workspaceId,
+          status: replenishmentResponse.status,
+          ...responseError,
+        });
+      }
+
       const { error: reconcileError } = await this.client.rpc('reconcile_linkedin_v1_pipeline', { p_workspace_id: workspaceId });
       if (reconcileError && !/function .* does not exist/i.test(reconcileError.message)) {
         logger.warn('Pipeline reconciliation RPC failed', {

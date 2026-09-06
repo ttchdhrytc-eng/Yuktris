@@ -1,6 +1,6 @@
 import { Component, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { AlertTriangle, CalendarClock, ChevronLeft, ChevronRight, Pause, Play, Plus, Rocket, Save } from 'lucide-react';
+import { AlertTriangle, CalendarClock, ChevronLeft, ChevronRight, Pause, Play, Plus, Rocket, Save, Sparkles } from 'lucide-react';
 import { toast } from 'sonner';
 import { Badge } from '@/components/ui/Badge';
 import { Button } from '@/components/ui/Button';
@@ -8,6 +8,7 @@ import { Card } from '@/components/ui/Card';
 import { Field, Input, Select, Textarea } from '@/components/ui/Field';
 import { PageHeader } from '@/components/ui/PageHeader';
 import { Spinner } from '@/components/ui/Spinner';
+import { CreateICPWithYuktrisModal } from '@/components/icp/CreateICPWithYuktrisModal';
 import { useWorkspace } from '@/contexts/WorkspaceContext';
 import { useAuth } from '@/contexts/AuthContext';
 import { useICP } from '@/hooks/useICPIntelligence';
@@ -67,6 +68,7 @@ export function CampaignsPage() {
   const [selectedProspectUrls, setSelectedProspectUrls] = useState<Set<string>>(new Set());
   const [discovering, setDiscovering] = useState(false);
   const [discoveryError, setDiscoveryError] = useState<string | null>(null);
+  const [createIcpOpen, setCreateIcpOpen] = useState(false);
   const initializationKey = useRef(crypto.randomUUID());
   const autoRequestedIcp = useRef(new Set<string>());
   const campaignBuilderRef = useRef<HTMLDivElement>(null);
@@ -358,24 +360,7 @@ export function CampaignsPage() {
           <div className="space-y-4"><Field label="Campaign name">
             <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="Q4 SaaS founders" />
           </Field>
-          <Field label="Use existing ICP"><Select value={icpId} onChange={(e) => setIcpId(e.target.value)}><option value="">Select an ICP</option>{(icps.data ?? []).map((i) => <option key={i.id} value={i.id}>{i.name}</option>)}</Select></Field><Button variant="secondary" onClick={() => location.assign('/app/audience')}>Create New ICP</Button></div>
-        )}
-        {false && (
-          <div className="space-y-3">
-            <Field label="Ideal customer profile">
-              <Select value={icpId} onChange={(e) => setIcpId(e.target.value)}>
-                <option value="">Select an ICP</option>
-                {(icps.data ?? []).map((i) => (
-                  <option key={i.id} value={i.id}>
-                    {i.name}
-                  </option>
-                ))}
-              </Select>
-            </Field>
-            <Button variant="secondary" onClick={() => location.assign('/app/audience')}>
-              Create ICP
-            </Button>
-          </div>
+          <div className="grid gap-4 md:grid-cols-2"><Card className="p-4"><p className="mb-3 text-sm font-semibold text-ink-100">Use existing ICP</p><Select value={icpId} onChange={(e) => setIcpId(e.target.value)}><option value="">Select an ICP</option>{(icps.data ?? []).map((i) => <option key={i.id} value={i.id}>{i.name}</option>)}</Select></Card><Card className="p-4"><p className="text-sm font-semibold text-ink-100">Create new ICP with Yuktris</p><p className="mb-3 mt-1 text-xs text-ink-400">Describe your offer, review the generated audience, and continue here.</p><Button variant="secondary" onClick={() => setCreateIcpOpen(true)}><Sparkles className="h-4 w-4" />Create New ICP</Button></Card></div></div>
         )}
         {step === 2 && (
           <Field label="LinkedIn account">
@@ -414,7 +399,7 @@ export function CampaignsPage() {
               <Review label="Verified prospects" value={String(inventory.data?.counts?.verified ?? 0)} />
               <Review label="High-fit prospects" value={String(inventory.data?.counts?.high_fit ?? 0)} />
               <Review label="Ready prospects" value={String(inventory.data?.counts?.ready ?? 0)} />
-              <Review label="Discovery state" value={inventory.data?.prospecting_status?.replaceAll('_', ' ') ?? 'Building audience'} />
+              <Review label="Discovery state" value={campaignDiscoveryLabel(inventory.data?.prospecting_status)} />
               <Review label="Message strategy" value={strategy} />
               <Review label="Sending schedule" value={`${dailyLimit}/day · ${days.map((d) => SENDING_DAYS.find(([value]) => value === d)?.[1]).join(', ')} · ${startTime}–${endTime} · ${outreachTimezone}`} />
               <Review label="Next outreach window" value={nextWindow ? formatCampaignWindow(nextWindow.toISOString(), outreachTimezone) : 'Invalid schedule'} />
@@ -443,6 +428,7 @@ export function CampaignsPage() {
           )}
         </div>
       </Card>
+      <CreateICPWithYuktrisModal open={createIcpOpen} onClose={() => setCreateIcpOpen(false)} onCreated={async (createdIcpId) => { await queryClient.invalidateQueries({ queryKey: ['icp-intelligence'] }); setIcpId(createdIcpId); }} />
       </div>
       {existing.isLoading && !existing.data ? <div className="flex justify-center py-12"><Spinner /></div> : existing.isError ? (
         <Reason text="Campaigns could not be loaded. Refresh this page; no campaign was created or launched." />
@@ -602,6 +588,14 @@ function Reason({ text }: { text: string }) {
       {text}
     </p>
   );
+}
+
+function campaignDiscoveryLabel(status?: string): string {
+  if (status === 'paused') return 'Paused';
+  if (status === 'refreshing') return 'Updating — Yuktris is finding and verifying prospects';
+  if (status === 'up_to_date') return 'Up to date';
+  if (status === 'needs_attention') return 'Needs attention';
+  return 'Active — Yuktris is continuously finding matching prospects';
 }
 
 function ScheduleEditor({ days, start, end, timezone, onDays, onStart, onEnd, onTimezone }: {

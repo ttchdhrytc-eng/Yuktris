@@ -1,304 +1,76 @@
-import { useState, type FormEvent } from 'react';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { toast } from 'sonner';
-import { Users, Plus, Search, Trash2, Mail, Linkedin, Sparkles } from 'lucide-react';
+import { Fragment, useMemo, useState } from 'react';
+import { ExternalLink, Search, Sparkles, Users } from 'lucide-react';
+import { useQuery } from '@tanstack/react-query';
 import { PageHeader } from '@/components/ui/PageHeader';
 import { Card } from '@/components/ui/Card';
-import { Button } from '@/components/ui/Button';
-import { Input, Label, Select } from '@/components/ui/Field';
-import { Modal } from '@/components/ui/Modal';
+import { Input, Select } from '@/components/ui/Field';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { Spinner } from '@/components/ui/Spinner';
 import { supabase } from '@/lib/supabase';
 import { useWorkspace } from '@/contexts/WorkspaceContext';
-import { formatDate } from '@/lib/utils';
-import type { Prospect, ProspectStatus, Company } from '@/types';
-import { fetchCampaignProspects } from '@/services/campaign-prospects';
+
+type InventoryRow = {
+  id: string; prospect_id: string; fit_score: number;
+  fit_evidence: Record<string, unknown> | null; provenance: Record<string, unknown> | null;
+  intent_status: string; intent_evidence: Record<string, unknown> | null;
+  readiness: string; verification_status: string;
+  icps: { name: string } | null;
+  prospects: { id: string; first_name: string | null; last_name: string | null; title: string | null; company_name: string | null; company_website: string | null; normalized_linkedin_url: string | null; status: string } | null;
+};
 
 export function ProspectsPage() {
   const { workspace } = useWorkspace();
-  const queryClient = useQueryClient();
   const [search, setSearch] = useState('');
-  const [statusFilter, setStatusFilter] = useState('');
-  const [modalOpen, setModalOpen] = useState(false);
-  const [form, setForm] = useState({
-    first_name: '', last_name: '', title: '', email: '', linkedin_url: '', phone: '', company_id: '',
-  });
-
-  const { data: companies, isError: companiesError } = useQuery({
-    queryKey: ['companies', workspace?.id],
-    enabled: !!workspace?.id,
-    queryFn: async () => {
-      if (!workspace) return [];
-      const { data, error } = await supabase.from('companies').select('*').eq('workspace_id', workspace.id);
-      if (error) throw error;
-      return (data ?? []) as Company[];
-    },
-  });
-
-  const { data: prospects, isLoading, isError: prospectsError } = useQuery({
-    queryKey: ['prospects', workspace?.id, search, statusFilter],
-    enabled: !!workspace?.id,
-    queryFn: async () => {
-      if (!workspace) return [];
-      let q = supabase
-        .from('prospects')
-        .select('*, company:companies(*)')
-        .eq('workspace_id', workspace.id);
-      if (search) q = q.or(`first_name.ilike.%${search}%,last_name.ilike.%${search}%,email.ilike.%${search}%`);
-      if (statusFilter) q = q.eq('status', statusFilter);
-      const { data, error } = await q.order('created_at', { ascending: false });
-      if (error) throw error;
-      return (data ?? []) as Prospect[];
-    },
-  });
-  const { data: campaignProspects, isLoading: campaignProspectsLoading, isError: campaignProspectsError } = useQuery({
-    queryKey: ['campaign-prospects', workspace?.id], enabled: !!workspace?.id,
-    queryFn: () => fetchCampaignProspects(workspace!.id),
-  });
+  const [filter, setFilter] = useState('all');
+  const [expanded, setExpanded] = useState<string | null>(null);
   const inventory = useQuery({
-    queryKey: ['prospect-inventory', workspace?.id], enabled: !!workspace,
-    queryFn: async () => {
-      const { data, error } = await supabase.from('icp_prospects').select('id,fit_score,intent_status,readiness,verification_status,last_verified_at,icps(name),prospects(id,first_name,last_name,title,company_name,company_website,normalized_linkedin_url,status)').eq('workspace_id', workspace!.id).order('fit_score', { ascending: false });
+    queryKey: ['prospect-inventory', workspace?.id], enabled: Boolean(workspace),
+    queryFn: async (): Promise<InventoryRow[]> => {
+      const { data, error } = await supabase.from('icp_prospects').select('id,prospect_id,fit_score,fit_evidence,provenance,intent_status,intent_evidence,readiness,verification_status,icps(name),prospects(id,first_name,last_name,title,company_name,company_website,normalized_linkedin_url,status)').eq('workspace_id', workspace!.id).order('fit_score', { ascending: false });
       if (error) throw error;
-      return data ?? [];
+      return (data ?? []) as unknown as InventoryRow[];
     }, refetchInterval: 10_000,
   });
-
-  const createMutation = useMutation({
-    mutationFn: async () => {
-      if (!workspace) throw new Error('No workspace');
-      const { error } = await supabase.from('prospects').insert({
-        workspace_id: workspace.id,
-        first_name: form.first_name || null,
-        last_name: form.last_name || null,
-        title: form.title || null,
-        email: form.email || null,
-        linkedin_url: form.linkedin_url || null,
-        phone: form.phone || null,
-        company_id: form.company_id || null,
-        status: 'new',
-      });
+  const reservations = useQuery({
+    queryKey: ['prospect-campaign-bindings', workspace?.id], enabled: Boolean(workspace),
+    queryFn: async () => {
+      const { data, error } = await supabase.from('campaign_prospect_reservations').select('prospect_id,status,customer_campaigns(name)').eq('workspace_id', workspace!.id).in('status', ['reserved', 'consumed']);
       if (error) throw error;
+      return data ?? [];
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['prospects'] });
-      toast.success('Prospect added.');
-      setModalOpen(false);
-      setForm({ first_name: '', last_name: '', title: '', email: '', linkedin_url: '', phone: '', company_id: '' });
-    },
-    onError: (err) => toast.error(err.message),
   });
+  const campaignByProspect = useMemo(() => new Map((reservations.data ?? []).map((row: any) => [row.prospect_id, row.customer_campaigns?.name ?? null])), [reservations.data]);
+  const rows = useMemo(() => (inventory.data ?? []).filter((row) => {
+    const person = row.prospects;
+    const haystack = `${person?.first_name ?? ''} ${person?.last_name ?? ''} ${person?.title ?? ''} ${person?.company_name ?? ''} ${row.icps?.name ?? ''}`.toLowerCase();
+    if (search && !haystack.includes(search.toLowerCase())) return false;
+    if (filter === 'ready') return row.readiness === 'ready' && row.verification_status === 'verified';
+    if (filter === 'high_fit') return row.fit_score >= 80 && row.verification_status === 'verified';
+    if (filter === 'intent') return row.intent_status === 'evidenced';
+    if (filter === 'contacted') return person?.status === 'contacted';
+    if (filter === 'connected') return person?.status === 'connected';
+    if (filter === 'replied') return person?.status === 'replied';
+    if (filter === 'qualified') return person?.status === 'qualified';
+    if (filter === 'excluded') return row.readiness === 'excluded' || person?.status === 'disqualified';
+    return true;
+  }), [filter, inventory.data, search]);
+  const all = inventory.data ?? [];
 
-  const deleteMutation = useMutation({
-    mutationFn: async (id: string) => {
-      if (!workspace) throw new Error('No workspace');
-      const { error } = await supabase.from('prospects').delete().eq('workspace_id', workspace.id).eq('id', id);
-      if (error) throw error;
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['prospects'] });
-      toast.success('Prospect removed.');
-    },
-    onError: (err) => toast.error(err.message),
-  });
-
-  const updateStatus = async (id: string, status: ProspectStatus) => {
-    if (!workspace) return;
-    const { error } = await supabase.from('prospects').update({ status }).eq('workspace_id', workspace.id).eq('id', id);
-    if (error) {
-      toast.error(error.message);
-    } else {
-      queryClient.invalidateQueries({ queryKey: ['prospects'] });
-    }
-  };
-
-  const handleSubmit = (e: FormEvent) => {
-    e.preventDefault();
-    if (!form.first_name && !form.last_name && !form.email) {
-      toast.error('Please enter at least a name or email.');
-      return;
-    }
-    createMutation.mutate();
-  };
-
-  return (
-    <div>
-      <PageHeader
-        title="Prospects"
-        description="Real, verified prospects Yuktris discovers and maintains for your ICPs."
-        actions={
-          <Button onClick={() => setModalOpen(true)}>
-            <Plus className="h-4 w-4" />
-            Add Prospect
-          </Button>
-        }
-      />
-
-      {(companiesError || prospectsError || campaignProspectsError) && <Card className="mb-4 border-error-500/30 p-4 text-sm text-error-300">Prospect data could not be loaded. Refresh this page; no prospect was added or changed.</Card>}
-
-      <div className="mb-5 grid grid-cols-2 gap-3 md:grid-cols-5">
-        <InventoryMetric label="Discovered" value={inventory.data?.length ?? 0} />
-        <InventoryMetric label="Verified" value={inventory.data?.filter((row) => row.verification_status === 'verified').length ?? 0} />
-        <InventoryMetric label="High fit" value={inventory.data?.filter((row) => row.fit_score >= 80 && row.verification_status === 'verified').length ?? 0} />
-        <InventoryMetric label="Intent evidenced" value={inventory.data?.filter((row) => row.intent_status === 'evidenced').length ?? 0} />
-        <InventoryMetric label="Ready" value={inventory.data?.filter((row) => row.readiness === 'ready' && row.verification_status === 'verified').length ?? 0} />
-      </div>
-
-      {(inventory.data?.length ?? 0) > 0 && <Card className="mb-5"><div className="border-b border-gold-500/10 px-4 py-3"><h2 className="flex items-center gap-2 text-sm font-semibold text-ink-100"><Sparkles className="h-4 w-4 text-gold-400" />Autonomous prospect inventory</h2><p className="text-xs text-ink-500">Fit and intent are tracked separately. Counts reflect persisted, source-verified records only.</p></div><div className="overflow-x-auto"><table className="w-full"><thead><tr className="border-b border-gold-500/10 text-left">{['Prospect','Company','ICP','Fit','Intent','Status'].map((label) => <th key={label} className="px-4 py-3 text-xs text-ink-500">{label}</th>)}</tr></thead><tbody>{inventory.data?.map((row: any) => <tr key={row.id} className="border-b border-gold-500/8 last:border-0"><td className="px-4 py-3"><p className="text-sm text-ink-100">{`${row.prospects?.first_name ?? ''} ${row.prospects?.last_name ?? ''}`.trim()}</p><p className="text-xs text-ink-500">{row.prospects?.title}</p></td><td className="px-4 py-3 text-sm text-ink-300">{row.prospects?.company_name}</td><td className="px-4 py-3 text-sm text-ink-300">{row.icps?.name}</td><td className="px-4 py-3 text-sm text-ink-300">{row.fit_score}%</td><td className="px-4 py-3 text-sm text-ink-300">{row.intent_status === 'evidenced' ? 'Evidenced' : 'No intent evidenced'}</td><td className="px-4 py-3 text-sm capitalize text-ink-300">{row.readiness}</td></tr>)}</tbody></table></div></Card>}
-
-      <div className="flex flex-col sm:flex-row gap-3 mb-4">
-        <div className="relative flex-1 max-w-sm">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-ink-500" />
-          <Input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search prospects..." className="pl-9" />
-        </div>
-        <Select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} className="max-w-[160px]">
-          <option value="">All statuses</option>
-          <option value="new">New</option>
-          <option value="contacted">Contacted</option>
-          <option value="replied">Replied</option>
-          <option value="meeting_booked">Meeting Booked</option>
-          <option value="qualified">Qualified</option>
-          <option value="disqualified">Disqualified</option>
-        </Select>
-      </div>
-
-      {(campaignProspectsLoading || (campaignProspects?.length ?? 0) > 0) && <Card className="mb-4">
-        <div className="border-b border-gold-500/10 px-4 py-3"><h2 className="text-sm font-semibold text-ink-100">Campaign prospects</h2><p className="text-xs text-ink-500">Prospects genuinely discovered for your campaigns.</p></div>
-        {campaignProspectsLoading ? <div className="flex justify-center py-8"><Spinner className="h-5 w-5" /></div> : <div className="overflow-x-auto"><table className="w-full"><thead><tr className="border-b border-gold-500/10 text-left"><th className="px-4 py-3 text-xs text-ink-500">Name</th><th className="px-4 py-3 text-xs text-ink-500">Company</th><th className="px-4 py-3 text-xs text-ink-500">Outreach status</th><th className="px-4 py-3 text-xs text-ink-500">Last / next action</th><th className="px-4 py-3 text-xs text-ink-500">Discovered</th></tr></thead><tbody>{campaignProspects?.map(p => <tr key={p.jobId} className="border-b border-gold-500/8 last:border-0"><td className="px-4 py-3"><p className="text-sm text-ink-100">{p.name}</p><p className="text-xs text-ink-500">{p.title ?? 'Title unavailable'}</p>{p.linkedinUrl && <a href={p.linkedinUrl} target="_blank" rel="noopener noreferrer" className="text-xs text-brand-400 hover:underline">LinkedIn profile</a>}</td><td className="px-4 py-3 text-sm text-ink-300">{p.company ?? 'Company unavailable'}</td><td className="px-4 py-3 text-sm text-ink-300">{p.status}</td><td className="px-4 py-3 text-xs text-ink-500"><p>{p.lastAction ?? 'No action yet'}</p><p>Next: {p.nextAction ?? 'None scheduled'}</p></td><td className="px-4 py-3 text-xs text-ink-500">{formatDate(p.createdAt)}</td></tr>)}</tbody></table></div>}
-      </Card>}
-
-      {isLoading ? (
-        <div className="flex justify-center py-20"><Spinner className="h-6 w-6" /></div>
-      ) : prospects && prospects.length > 0 ? (
-        <Card>
-          <div className="overflow-x-auto scrollbar-thin">
-            <table className="w-full">
-              <thead>
-                <tr className="border-b border-gold-500/12 text-left">
-                  <th className="px-4 py-3 text-xs font-medium text-ink-500">Name</th>
-                  <th className="px-4 py-3 text-xs font-medium text-ink-500">Title</th>
-                  <th className="px-4 py-3 text-xs font-medium text-ink-500">Company</th>
-                  <th className="px-4 py-3 text-xs font-medium text-ink-500">Status</th>
-                  <th className="px-4 py-3 text-xs font-medium text-ink-500">Added</th>
-                  <th className="px-4 py-3 text-xs font-medium text-ink-500 text-right">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {prospects.map((p) => (
-                  <tr key={p.id} className="border-b border-gold-500/8 last:border-0 hover:bg-card-800 transition-colors">
-                    <td className="px-4 py-3">
-                      <div className="flex items-center gap-2">
-                        <div className="flex h-8 w-8 items-center justify-center rounded-full bg-gradient-to-r from-gold-400 to-gold-300/20 text-brand-300 text-xs font-medium">
-                          {((p.first_name ?? '?')[0] ?? '?')}{((p.last_name ?? '')[0] ?? '')}
-                        </div>
-                        <div>
-                          <p className="text-sm text-ink-500">{`${p.first_name ?? ''} ${p.last_name ?? ''}`.trim() || 'Unknown'}</p>
-                          {p.email && <p className="text-xs text-ink-500">{p.email}</p>}
-                        </div>
-                      </div>
-                    </td>
-                    <td className="px-4 py-3 text-sm text-ink-500">{p.title ?? '—'}</td>
-                    <td className="px-4 py-3 text-sm text-ink-500">{p.company?.name ?? '—'}</td>
-                    <td className="px-4 py-3">
-                      <select
-                        value={p.status}
-                        onChange={(e) => updateStatus(p.id, e.target.value as ProspectStatus)}
-                        className="bg-transparent text-xs border-0 cursor-pointer"
-                        style={{ color: 'inherit' }}
-                      >
-                        {(['new', 'contacted', 'replied', 'meeting_booked', 'qualified', 'disqualified'] as ProspectStatus[]).map((s) => (
-                          <option key={s} value={s} className="bg-maroon-900">{s.replace('_', ' ')}</option>
-                        ))}
-                      </select>
-                    </td>
-                    <td className="px-4 py-3 text-xs text-ink-500">{formatDate(p.created_at)}</td>
-                    <td className="px-4 py-3 text-right">
-                      <div className="flex items-center justify-end gap-1">
-                        {p.email && (
-                          <a href={`mailto:${p.email}`} className="p-1.5 text-ink-500 hover:text-ink-500 transition-colors">
-                            <Mail className="h-3.5 w-3.5" />
-                          </a>
-                        )}
-                        {p.linkedin_url && (
-                          <a href={p.linkedin_url} target="_blank" rel="noopener noreferrer" className="p-1.5 text-ink-500 hover:text-ink-500 transition-colors">
-                            <Linkedin className="h-3.5 w-3.5" />
-                          </a>
-                        )}
-                        <button onClick={() => deleteMutation.mutate(p.id)} className="p-1.5 text-ink-500 hover:text-error-400 transition-colors">
-                          <Trash2 className="h-3.5 w-3.5" />
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </Card>
-      ) : (campaignProspects?.length ?? 0) === 0 ? (
-        <EmptyState
-          icon={<Users className="h-5 w-5" />}
-          title="No prospects yet"
-          description="Add prospects individually or import them to start your outreach campaigns."
-          action={<Button onClick={() => setModalOpen(true)}><Plus className="h-4 w-4" />Add Prospect</Button>}
-        />
-      ) : null}
-
-      <Modal
-        open={modalOpen}
-        onClose={() => setModalOpen(false)}
-        title="Add Prospect"
-        description="Add a new prospect to your workspace."
-        footer={
-          <>
-            <Button variant="ghost" onClick={() => setModalOpen(false)}>Cancel</Button>
-            <Button onClick={handleSubmit} loading={createMutation.isPending}>Add Prospect</Button>
-          </>
-        }
-      >
-        <div className="space-y-4">
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <Label>First name</Label>
-              <Input value={form.first_name} onChange={(e) => setForm({ ...form, first_name: e.target.value })} placeholder="Jane" autoFocus />
-            </div>
-            <div>
-              <Label>Last name</Label>
-              <Input value={form.last_name} onChange={(e) => setForm({ ...form, last_name: e.target.value })} placeholder="Doe" />
-            </div>
-          </div>
-          <div>
-            <Label>Job title</Label>
-            <Input value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} placeholder="VP of Sales" />
-          </div>
-          <div>
-            <Label>Email</Label>
-            <Input type="email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} placeholder="jane@acme.com" />
-          </div>
-          <div>
-            <Label>Company</Label>
-            <Select value={form.company_id} onChange={(e) => setForm({ ...form, company_id: e.target.value })}>
-              <option value="">No company</option>
-              {companies?.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-            </Select>
-          </div>
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <Label>LinkedIn URL</Label>
-              <Input value={form.linkedin_url} onChange={(e) => setForm({ ...form, linkedin_url: e.target.value })} placeholder="https://linkedin.com/in/jane" />
-            </div>
-            <div>
-              <Label>Phone</Label>
-              <Input value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} placeholder="+1 555-0000" />
-            </div>
-          </div>
-        </div>
-      </Modal>
-    </div>
-  );
+  return <div>
+    <PageHeader title="Prospects" description="Real, source-verified prospects Yuktris discovers and maintains for your ICPs." />
+    {(inventory.isError || reservations.isError) && <Card className="mb-4 border-error-500/30 p-4 text-sm text-error-300">Prospect inventory could not be loaded. Refresh this page; no prospect or campaign was changed.</Card>}
+    <div className="mb-5 grid grid-cols-2 gap-3 md:grid-cols-5"><Metric label="Discovered" value={all.length} /><Metric label="Verified" value={all.filter((row) => row.verification_status === 'verified').length} /><Metric label="High fit" value={all.filter((row) => row.fit_score >= 80 && row.verification_status === 'verified').length} /><Metric label="Intent detected" value={all.filter((row) => row.intent_status === 'evidenced').length} /><Metric label="Ready" value={all.filter((row) => row.readiness === 'ready' && row.verification_status === 'verified').length} /></div>
+    <Card>
+      <div className="border-b border-gold-500/10 px-4 py-4"><h2 className="flex items-center gap-2 text-sm font-semibold text-ink-100"><Sparkles className="h-4 w-4 text-gold-400" />Autonomous prospect inventory</h2><p className="mt-1 text-xs text-ink-500">Only canonical ICP inventory appears here. Campaign execution history and internal diagnostics remain in their appropriate campaign and system records.</p></div>
+      <div className="flex flex-col gap-3 border-b border-gold-500/10 p-4 sm:flex-row"><div className="relative flex-1"><Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-ink-500" /><Input className="pl-9" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search name, company, role, or ICP" /></div><Select className="sm:max-w-48" value={filter} onChange={(event) => setFilter(event.target.value)}><option value="all">All</option><option value="ready">Ready</option><option value="high_fit">High fit</option><option value="intent">Intent</option><option value="contacted">Contacted</option><option value="connected">Connected</option><option value="replied">Replied</option><option value="qualified">Qualified</option><option value="excluded">Excluded</option></Select></div>
+      {inventory.isLoading ? <div className="flex justify-center py-16"><Spinner /></div> : rows.length ? <div className="overflow-x-auto"><table className="w-full"><thead><tr className="border-b border-gold-500/10 text-left">{['Prospect', 'Company', 'ICP', 'Fit', 'Intent', 'Status', 'Campaign'].map((label) => <th key={label} className="px-4 py-3 text-xs text-ink-500">{label}</th>)}</tr></thead><tbody>{rows.map((row) => {
+        const person = row.prospects;
+        return <Fragment key={row.id}><tr className="cursor-pointer border-b border-gold-500/8 hover:bg-card-800" onClick={() => setExpanded(expanded === row.id ? null : row.id)}><td className="px-4 py-3"><p className="text-sm text-ink-100">{`${person?.first_name ?? ''} ${person?.last_name ?? ''}`.trim() || 'Verified prospect'}</p><p className="text-xs text-ink-500">{person?.title || 'Current role verified'}</p></td><td className="px-4 py-3"><p className="text-sm text-ink-300">{person?.company_name || 'Verified company'}</p>{person?.company_website && <a href={person.company_website} onClick={(event) => event.stopPropagation()} target="_blank" rel="noopener noreferrer" className="text-xs text-gold-400 hover:underline">Company source</a>}</td><td className="px-4 py-3 text-sm text-ink-300">{row.icps?.name ?? 'ICP'}</td><td className="px-4 py-3 text-sm text-ink-300">{row.fit_score}%</td><td className="px-4 py-3 text-sm text-ink-300">{row.intent_status === 'evidenced' ? 'Evidenced' : 'No intent evidenced'}</td><td className="px-4 py-3 text-sm capitalize text-ink-300">{safeStatus(row)}</td><td className="px-4 py-3 text-sm text-ink-300">{campaignByProspect.get(row.prospect_id) ?? 'Not assigned'}</td></tr>{expanded === row.id && <tr className="border-b border-gold-500/8 bg-maroon-950/30"><td colSpan={7} className="px-4 py-4"><p className="text-xs font-medium uppercase tracking-wide text-ink-500">Why this prospect</p><p className="mt-1 max-w-3xl text-sm text-ink-300">{customerReason(row)}</p>{person?.normalized_linkedin_url && <a href={person.normalized_linkedin_url} target="_blank" rel="noopener noreferrer" className="mt-2 inline-flex items-center gap-1 text-sm text-gold-400 hover:underline">LinkedIn profile <ExternalLink className="h-3.5 w-3.5" /></a>}</td></tr>}</Fragment>;
+      })}</tbody></table></div> : <div className="p-8"><EmptyState icon={Users} title="Yuktris is building your prospect inventory" description="Verified prospects will appear here after bounded background discovery completes. Returning zero is valid when candidates do not pass the quality gates." /></div>}
+    </Card>
+  </div>;
 }
 
-function InventoryMetric({ label, value }: { label: string; value: number }) {
-  return <Card className="p-3"><p className="text-xs text-ink-500">{label}</p><p className="mt-1 text-xl font-semibold text-ink-100">{value}</p></Card>;
-}
+function Metric({ label, value }: { label: string; value: number }) { return <Card className="p-4"><p className="text-xs text-ink-500">{label}</p><p className="mt-1 text-2xl font-semibold text-ink-100">{value}</p></Card>; }
+function safeStatus(row: InventoryRow): string { if (row.readiness === 'excluded') return 'Excluded'; const status = row.prospects?.status; if (status === 'meeting_booked') return 'Meeting ready'; if (['contacted', 'connected', 'replied', 'qualified', 'disqualified'].includes(status ?? '')) return status!.replace('_', ' '); if (row.readiness === 'ready' && row.verification_status === 'verified') return 'Ready'; return row.verification_status === 'verified' ? 'Verified' : 'Verifying'; }
+function customerReason(row: InventoryRow): string { const fit = row.fit_evidence ?? {}; const company = typeof fit.company_fit === 'string' ? fit.company_fit : ''; const person = typeof fit.person_fit === 'string' ? fit.person_fit : ''; return [company, person].filter(Boolean).join(' ') || 'Yuktris verified the current role, company association, canonical LinkedIn identity, and ICP fit from source evidence.'; }

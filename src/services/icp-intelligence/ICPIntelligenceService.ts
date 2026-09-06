@@ -155,6 +155,10 @@ export class ICPIntelligenceService {
     marketAnalysisId: string | null,
     generated: GeneratedICP,
     companyName?: string | null,
+    options?: {
+      offerContext?: Record<string, unknown>;
+      discoveryReason?: 'onboarding_confirmed' | 'icp_activated';
+    },
   ): Promise<string> {
     // Insert ICP record
     const { data: icpRow, error: icpError } = await supabase
@@ -175,6 +179,7 @@ export class ICPIntelligenceService {
         estimated_deal_size: generated.estimated_deal_size,
         status: 'completed',
         prospecting_status: 'queued',
+        offer_context: options?.offerContext ?? {},
       })
       .select('*')
       .single();
@@ -246,10 +251,33 @@ export class ICPIntelligenceService {
     // falls back to mock prospects.
     const { data: account } = await supabase.from('linkedin_accounts').select('id').eq('workspace_id', workspaceId).eq('connection_state', 'connected').in('health_status', ['healthy', 'degraded']).limit(1).maybeSingle();
     if (account?.id) {
-      await supabase.functions.invoke('linkedin-v1-pipeline', { body: { action: 'request_replenishment', workspace_id: workspaceId, icp_id: icpId, linkedin_account_id: account.id, reason: 'onboarding_confirmed' } });
+      await supabase.functions.invoke('linkedin-v1-pipeline', { body: { action: 'request_replenishment', workspace_id: workspaceId, icp_id: icpId, linkedin_account_id: account.id, reason: options?.discoveryReason ?? 'onboarding_confirmed' } });
     }
 
     return icpId;
+  }
+
+  /** Generate a strictly validated ICP proposal from a customer's offer. */
+  async generateICPFromOffer(params: {
+    workspaceId: string;
+    offer: string;
+    geography?: string;
+    website?: string;
+  }): Promise<GeneratedICP> {
+    const proposals = await this.generateICPs({
+      workspaceId: params.workspaceId,
+      businessSummary: {
+        description: params.offer,
+        products: [params.offer],
+        services: [params.offer],
+        target_geography: params.geography || null,
+        product_page: params.website || null,
+        generation_instruction: 'Create a source-grounded targeting proposal only from the supplied offer. Do not invent claims about the seller or customer intent.',
+      },
+      marketSummary: {},
+    });
+    if (!proposals[0]) throw new Error('Yuktris could not generate a complete ICP from that offer. Add more detail and retry.');
+    return proposals[0];
   }
 
   /**
