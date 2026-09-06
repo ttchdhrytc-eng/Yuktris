@@ -1,5 +1,6 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { authorizeLinkedInWorkspace, authorizationStatus } from "../_shared/linkedinAuthorization.ts";
+import { nextAcquisitionCadence } from "../_shared/prospectAcquisition.ts";
 
 declare const EdgeRuntime: { waitUntil(promise: Promise<unknown>): void } | undefined;
 
@@ -316,7 +317,13 @@ Deno.serve(async (req: Request) => {
         if (insertError) throw pipelineError("replenishment_enqueue_failed", insertError.message, 409);
         job = inserted;
       }
-      await admin.from("icps").update({ prospecting_status: "queued", discovery_error: null, next_refresh_at: new Date().toISOString() }).eq("workspace_id", workspaceId).eq("id", icpId);
+      const resetInitialAcquisition = ["onboarding_confirmed", "icp_activated", "targeting_changed"].includes(reason);
+      await admin.from("icps").update({
+        prospecting_status: "queued",
+        discovery_error: null,
+        next_refresh_at: new Date().toISOString(),
+        ...(resetInitialAcquisition ? { acquisition_phase: "initial_acquisition", initial_acquisition_batches_completed: 0 } : {}),
+      }).eq("workspace_id", workspaceId).eq("id", icpId);
       const task = processReplenishment(admin, workspaceId, job.id).catch((error) => console.error("[replenishment-failed]", { job_id: job.id, message: error instanceof Error ? error.message : "unknown" }));
       if (typeof EdgeRuntime !== "undefined") EdgeRuntime.waitUntil(task); else await task;
       return json({ status: "queued", job_id: job.id, duplicate_trigger_coalesced: Boolean(active), executable_jobs_created: 0, write_performed: false }, 202);
@@ -794,14 +801,14 @@ async function processReplenishment(admin: any, workspaceId: string, jobId: stri
   if (claimError || !claim?.claimed) return;
   const icpId = String(claim.icp_id);
   try {
-    const { data: config, error: configError } = await admin.from("icps").select("minimum_ready_inventory,target_ready_inventory,replenishment_batch_size").eq("workspace_id", workspaceId).eq("id", icpId).single();
+    const { data: config, error: configError } = await admin.from("icps").select("minimum_ready_inventory,target_ready_inventory,replenishment_batch_size,acquisition_phase,initial_acquisition_batches_completed,starter_ready_target,max_initial_acquisition_batches,initial_acquisition_interval_minutes").eq("workspace_id", workspaceId).eq("id", icpId).single();
     if (configError) throw configError;
     const { count: readyCount, error: countError } = await admin.from("icp_prospects").select("id", { count: "exact", head: true }).eq("workspace_id", workspaceId).eq("icp_id", icpId).eq("verification_status", "verified").eq("readiness", "ready");
     if (countError) throw countError;
     if ((readyCount ?? 0) >= config.minimum_ready_inventory) {
       const next = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
       await admin.from("prospect_replenishment_jobs").update({ status: "completed", completed_at: new Date().toISOString(), lease_owner: null, lease_expires_at: null, result_metadata: { skipped: "inventory_above_threshold", ready_count: readyCount }, updated_at: new Date().toISOString() }).eq("id", jobId);
-      await admin.from("icps").update({ prospecting_status: "up_to_date", next_refresh_at: next, last_discovery_completed_at: new Date().toISOString(), discovery_consecutive_failures: 0, discovery_error: null }).eq("id", icpId);
+      await admin.from("icps").update({ prospecting_status: "up_to_date", acquisition_phase: "maintenance", next_refresh_at: next, last_discovery_completed_at: new Date().toISOString(), discovery_consecutive_failures: 0, discovery_error: null }).eq("id", icpId);
       return;
     }
     await admin.from("icps").update({ prospecting_status: "refreshing", last_discovery_started_at: new Date().toISOString() }).eq("id", icpId);
@@ -840,9 +847,10 @@ async function processReplenishment(admin: any, workspaceId: string, jobId: stri
       persisted += 1;
     }
     const { count: finalReady } = await admin.from("icp_prospects").select("id", { count: "exact", head: true }).eq("workspace_id", workspaceId).eq("icp_id", icpId).eq("verification_status", "verified").eq("readiness", "ready");
-    const next = new Date(Date.now() + ((finalReady ?? 0) < config.minimum_ready_inventory ? 6 : 24) * 60 * 60 * 1000).toISOString();
-    await admin.from("prospect_replenishment_jobs").update({ status: "completed", completed_at: new Date().toISOString(), lease_owner: null, lease_expires_at: null, result_metadata: { persisted, ready_count: finalReady, diagnostics }, updated_at: new Date().toISOString() }).eq("id", jobId);
-    await admin.from("icps").update({ prospecting_status: (finalReady ?? 0) >= config.minimum_ready_inventory ? "up_to_date" : "queued", next_refresh_at: next, last_discovery_completed_at: new Date().toISOString(), discovery_consecutive_failures: 0, discovery_error: null }).eq("id", icpId);
+    const cadence = nextAcquisitionCadence(config, finalReady ?? 0);
+    const next = new Date(Date.now() + cadence.delayMinutes * 60 * 1000).toISOString();
+    await admin.from("prospect_replenishment_jobs").update({ status: "completed", completed_at: new Date().toISOString(), lease_owner: null, lease_expires_at: null, result_metadata: { persisted, ready_count: finalReady, diagnostics, acquisition_phase: cadence.phase, initial_batches_completed: cadence.initialBatchesCompleted }, updated_at: new Date().toISOString() }).eq("id", jobId);
+    await admin.from("icps").update({ prospecting_status: (finalReady ?? 0) >= config.minimum_ready_inventory ? "up_to_date" : "queued", acquisition_phase: cadence.phase, initial_acquisition_batches_completed: cadence.initialBatchesCompleted, next_refresh_at: next, last_discovery_completed_at: new Date().toISOString(), discovery_consecutive_failures: 0, discovery_error: null }).eq("id", icpId);
   } catch (error) {
     const message = error instanceof Error ? `${error.name}: ${error.message}` : typeof error === "string" ? error : JSON.stringify(error) || "Discovery failed";
     const { data: job } = await admin.from("prospect_replenishment_jobs").select("attempt_count,max_attempts").eq("id", jobId).single();
@@ -1041,12 +1049,13 @@ function discoveryRoleVariants(roles: string[]): string[] {
   for (const role of roles) {
     variants.push(role);
     const normalized = role.toLowerCase();
-    if (/vice president|\bvp\b/.test(normalized)) variants.push(role.replace(/vice president/i, "VP"), role.replace(/\bVP\b/i, "Vice President"));
+    if (/vice president|\bvp\b/.test(normalized)) variants.push(role.replace(/vice president(?: of)?/i, "VP"), role.replace(/\bVP\b/i, "Vice President"));
     if (/business development|biz dev/.test(normalized)) variants.push("Head of Business Development", "Business Development Director", "VP Business Development");
     if (/\bsales\b/.test(normalized)) variants.push("Head of Sales", "Sales Director", "Director of Sales", "VP Sales");
     if (/founder|owner|chief executive|\bceo\b/.test(normalized)) variants.push("Founder", "Co-Founder", "CEO");
     if (/revenue|\bcro\b/.test(normalized)) variants.push("Chief Revenue Officer", "CRO");
-    if (/managing director/.test(normalized)) variants.push("Managing Director");
+    if (/managing director|\bmd\b/.test(normalized)) variants.push("Managing Director", "MD");
+    if (/head of business development|business development head/.test(normalized)) variants.push("Head of Business Development", "Business Development Head");
   }
   return [...new Set(variants.map((value) => value.trim()).filter(Boolean))];
 }

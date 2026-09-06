@@ -81,6 +81,8 @@ export function CreateICPWithYuktrisModal({ open, onClose, onCreated }: { open: 
       status: 'completed',
       priority: 'secondary',
       prospecting_status: 'queued',
+      acquisition_phase: 'initial_acquisition',
+      initial_acquisition_batches_completed: 0,
     }).select('id').single();
     if (error) throw error;
     const roles = list(draft.roles);

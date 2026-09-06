@@ -40,7 +40,7 @@ export function ICPAndOffersPage() {
     const { error } = await supabase.from('icps').update({ prospecting_status: next, updated_at: new Date().toISOString() }).eq('workspace_id', workspace!.id).eq('id', item.id);
     if (error) return toast.error(error.message);
     await queryClient.invalidateQueries({ queryKey: ['autonomous-inventory'] });
-    if (next === 'queued') await request(item.id, 'icp_activated');
+    if (next === 'queued') await request(item.id, 'scheduled_refresh');
   }
   return <div className="space-y-6">
     <PageHeader title="ICP & Offers" description="Reusable audiences that Yuktris keeps supplied with verified prospects." actions={<Button onClick={() => setOpen(true)}><Plus className="h-4 w-4" />Create ICP</Button>} />

@@ -81,6 +81,8 @@ const ICP_ITEM_SCHEMA = {
     },
     decision_makers: {
       type: 'array',
+      minItems: 6,
+      maxItems: 12,
       items: {
         type: 'object',
         properties: {
@@ -195,7 +197,17 @@ export class ICPGenerationAgent extends BaseAgent {
           'seniority, responsibilities, authority score 0-100, priority), pain points (with severity, urgency, business ' +
           'impact, recommended solution), goals, buying triggers (with confidence 0-100), explicit exclusion/negative ' +
           'filters (industries, countries, company sizes, technologies, or revenue ranges this business should NOT ' +
-          'target and why), and LinkedIn Sales Navigator search filters. Ground every field in the supplied research — ' +
+          'target and why), and LinkedIn Sales Navigator search filters. Generate 6-12 distinct, relevant decision-maker ' +
+          'titles based on the offer, target industry, company size, business model, sales motion, and geography. For a ' +
+          'sales, outbound, or growth offer, cover the contextually sensible economic buyer, sales or revenue owner, and ' +
+          'business-development or growth owner categories. Include marketing leadership only when the offer genuinely maps ' +
+          'to marketing ownership. Small-company targeting may emphasize founders and owners; mid-market may combine executives ' +
+          'with functional leaders; larger organizations should favor functional senior leaders. Include useful equivalent ' +
+          'customer-recognizable title forms without stuffing irrelevant roles. Do not relabel product, engineering, customer ' +
+          'success, HR, finance, or general operations roles as growth owners unless the supplied research explicitly makes that ' +
+          'function an owner of the buying decision. Include only senior roles with budget or strategy ownership; exclude individual ' +
+          'contributors and generic managers such as Account Executive, Lead Generation Manager, or Sales Operations Manager unless ' +
+          'the supplied research explicitly proves they own the buying decision. Ground every field in the supplied research — ' +
           'do not invent unrelated industries. Return only valid JSON matching the schema.',
         userPrompt: `Company name: ${companyName || 'Unknown'}\n\nPersisted business research:\n${JSON.stringify(businessSummary).slice(0, 8000)}\n\nPersisted market research:\n${JSON.stringify(marketSummary).slice(0, 6000)}`,
         temperature: 0.4,
@@ -212,6 +224,14 @@ export class ICPGenerationAgent extends BaseAgent {
           `AI output failed validation: ${validation.errors.join('; ')}`,
           Date.now() - start,
         );
+      }
+
+      const narrowTitleSet = validation.icps.find((icp) => {
+        const distinctTitles = new Set(icp.decision_makers.map((item) => item.job_title.trim().toLowerCase())).size;
+        return distinctTitles < 6 || distinctTitles > 12;
+      });
+      if (narrowTitleSet) {
+        return failure(this.definition.agent_name, `AI output did not provide sufficient context-aware decision-maker coverage for ${narrowTitleSet.name}`, Date.now() - start);
       }
 
       const output = { icps: validation.icps };

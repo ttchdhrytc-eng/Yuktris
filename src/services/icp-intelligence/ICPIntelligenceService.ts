@@ -179,6 +179,8 @@ export class ICPIntelligenceService {
         estimated_deal_size: generated.estimated_deal_size,
         status: 'completed',
         prospecting_status: 'queued',
+        acquisition_phase: 'initial_acquisition',
+        initial_acquisition_batches_completed: 0,
         offer_context: options?.offerContext ?? {},
       })
       .select('*')
