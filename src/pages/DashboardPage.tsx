@@ -6,7 +6,7 @@ import {
   ChevronRight, Users, Send, Target,
   Linkedin, Hand, FileText, RefreshCw,
   Award, Clock3, BarChart3,
-  Video, Activity,
+  Video, Activity, Mail,
 } from 'lucide-react';
 import { useState } from 'react';
 import { Card } from '@/components/ui/Card';
