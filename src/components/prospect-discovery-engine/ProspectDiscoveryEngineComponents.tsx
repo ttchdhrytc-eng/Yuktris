@@ -7,7 +7,7 @@ import { useState } from 'react';
 import { Card } from '@/components/ui/Card';
 import { Badge } from '@/components/ui/Badge';
 import { Button } from '@/components/ui/Button';
-import { cn, timeAgo } from '@/lib/utils';
+import { cn, timeAgo, getDiscoveryJobCustomerStatus, getDiscoveryJobCustomerStatusTone } from '@/lib/utils';
 import type {
   DiscoveryDashboard, CompanyWithDetails, ContactWithDetails,
   DiscoveryJob, ProviderSource, ProspectList, SmartFilters,
@@ -313,7 +313,6 @@ export function DiscoveryJobsSection({ jobs }: { jobs: DiscoveryJob[] }) {
   if (jobs.length === 0) {
     return <div className="text-center py-8 text-sm text-ink-500">No discovery jobs yet.</div>;
   }
-  const statusTone = { completed: 'success', processing: 'brand', pending: 'neutral', failed: 'error', cancelled: 'neutral' } as const;
   return (
     <div className="space-y-2">
       {jobs.map((job) => (
@@ -324,7 +323,7 @@ export function DiscoveryJobsSection({ jobs }: { jobs: DiscoveryJob[] }) {
               <span className="text-sm text-ink-500 capitalize">{job.job_type.replace(/_/g, ' ')}</span>
             </div>
             <div className="flex items-center gap-2">
-              <Badge tone={statusTone[job.status]} dot>{job.status}</Badge>
+              <Badge tone={getDiscoveryJobCustomerStatusTone(job.status)} dot>{getDiscoveryJobCustomerStatus(job.status)}</Badge>
               <span className="text-xs text-ink-500">{timeAgo(job.created_at)}</span>
             </div>
           </div>
@@ -498,6 +497,8 @@ export function LiveDiscoveryFeedSection({ jobs }: { jobs: DiscoveryJob[] }) {
             <CheckCircle2 className="h-4 w-4 text-success-400 shrink-0" />
           ) : job.status === 'failed' ? (
             <AlertTriangle className="h-4 w-4 text-error-400 shrink-0" />
+          ) : job.status === 'cancelled' ? (
+            <Clock className="h-4 w-4 text-ink-500 shrink-0" />
           ) : (
             <Clock className="h-4 w-4 text-ink-500 shrink-0" />
           )}
@@ -508,6 +509,7 @@ export function LiveDiscoveryFeedSection({ jobs }: { jobs: DiscoveryJob[] }) {
             </p>
           </div>
           {job.provider_used && <Badge tone="neutral" className="capitalize">{job.provider_used.replace(/_/g, ' ')}</Badge>}
+          <Badge tone={getDiscoveryJobCustomerStatusTone(job.status)}>{getDiscoveryJobCustomerStatus(job.status)}</Badge>
         </div>
       ))}
     </div>

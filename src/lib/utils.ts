@@ -62,3 +62,58 @@ export function getInitials(name: string): string {
 export function isValidEmail(email: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 }
+
+export type ICPStatus = 'queued' | 'processing' | 'completed' | 'failed';
+export type DiscoveryJobStatus = 'pending' | 'processing' | 'completed' | 'failed' | 'cancelled';
+
+export function getICPCustomerStatus(status: ICPStatus): string {
+  switch (status) {
+    case 'queued':
+    case 'processing':
+      return 'Updating';
+    case 'completed':
+      return 'Up to date';
+    case 'failed':
+      return 'Needs attention';
+  }
+}
+
+export function getDiscoveryJobCustomerStatus(status: DiscoveryJobStatus): string {
+  switch (status) {
+    case 'pending':
+    case 'processing':
+      return 'Active';
+    case 'completed':
+      return 'Up to date';
+    case 'failed':
+      return 'Needs attention';
+    case 'cancelled':
+      return 'Paused';
+  }
+}
+
+export function getICPCustomerStatusTone(status: ICPStatus): 'success' | 'warning' | 'error' | 'neutral' {
+  switch (status) {
+    case 'queued':
+    case 'processing':
+      return 'warning';
+    case 'completed':
+      return 'success';
+    case 'failed':
+      return 'error';
+  }
+}
+
+export function getDiscoveryJobCustomerStatusTone(status: DiscoveryJobStatus): 'success' | 'warning' | 'error' | 'neutral' {
+  switch (status) {
+    case 'pending':
+    case 'processing':
+      return 'warning';
+    case 'completed':
+      return 'success';
+    case 'failed':
+      return 'error';
+    case 'cancelled':
+      return 'neutral';
+  }
+}
