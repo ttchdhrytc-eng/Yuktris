@@ -43,7 +43,7 @@ import { Timeline } from '@/components/icp-intelligence/Timeline';
 import { useICP, useGenerateICP, useRefreshICP, useDeleteICP, usePrimaryICP } from '@/hooks/useICPIntelligence';
 import { icpService, ICP_STAGES } from '@/services/icp-intelligence';
 import { MOCK_BUSINESS_SUMMARY, MOCK_RECOMMENDATIONS } from '@/services/icp-intelligence/mockData';
-import { cn, timeAgo, getICPCustomerStatus, getICPCustomerStatusTone } from '@/lib/utils';
+import { cn, timeAgo } from '@/lib/utils';
 import type { FullICP, ICPGoal, GoalCategory } from '@/types/icp-intelligence';
 
 // ============================================================
@@ -254,7 +254,7 @@ export function ICPIntelligencePage() {
       {/* KPI cards */}
       <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-3 mb-6">
         <KpiCard icon={CheckCircle2} label="ICP Status">
-          <Badge tone={getICPCustomerStatusTone(icps[0]?.status ?? 'completed')} dot>{getICPCustomerStatus(icps[0]?.status ?? 'completed')}</Badge>
+          <Badge tone="success" dot>Completed</Badge>
         </KpiCard>
         <KpiCard icon={Users} label="Total ICPs">
           <span className="text-sm text-ink-500 font-semibold">{icps.length}</span>
