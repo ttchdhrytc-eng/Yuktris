@@ -1,6 +1,6 @@
 import { Component, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { AlertTriangle, CalendarClock, ChevronLeft, ChevronRight, Pause, Play, Plus, Rocket, Save, Sparkles } from 'lucide-react';
+import { AlertTriangle, CalendarClock, ChevronLeft, ChevronRight, Pause, Play, Plus, Rocket, Save, Sparkles, Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Badge } from '@/components/ui/Badge';
 import { Button } from '@/components/ui/Button';
@@ -19,9 +19,9 @@ import type { FullICP } from '@/types/icp-intelligence';
 import { fetchCampaignMetrics } from '@/services/campaign-reporting';
 import { fetchCampaignProspects } from '@/services/campaign-prospects';
 import { CAMPAIGN_SENDING_DAYS, CAMPAIGN_WEEKDAYS, detectBrowserIanaTimezone, formatCampaignWindow, isIanaTimezone, nextCampaignSendingWindow, normalizeIanaTimezone, parseCampaignDays, parseCampaignHours, resolveNewCampaignTimezone } from '@/services/campaign-schedule';
-import { readCampaignUiState, writeCampaignUiState, type PersistedScheduleDraft } from '@/services/campaign-ui-state';
+import { readCampaignUiState, writeCampaignUiState, type PersistedScheduleDraft, type MessageTemplates, type FollowUpDelays } from '@/services/campaign-ui-state';
 
-const STEPS = ['Goal & Audience', 'Outreach', 'Safety & Schedule', 'Review & Launch'];
+const STEPS = ['Goal & Audience', 'Outreach Strategy', 'Message Review', 'Safety & Schedule', 'Review & Launch'];
 const SENDING_DAYS = CAMPAIGN_SENDING_DAYS;
 const WEEKDAYS = CAMPAIGN_WEEKDAYS;
 const TIMEZONE_SUGGESTIONS = ['Asia/Kolkata', 'America/New_York', 'Europe/London', 'America/Los_Angeles', 'Asia/Singapore', 'Australia/Sydney', 'UTC'];
@@ -69,19 +69,43 @@ export function CampaignsPage() {
   const [discovering, setDiscovering] = useState(false);
   const [discoveryError, setDiscoveryError] = useState<string | null>(null);
   const [createIcpOpen, setCreateIcpOpen] = useState(false);
+  const [messageTemplates, setMessageTemplates] = useState<MessageTemplates>({
+    connectionNote: '',
+    firstMessage: '',
+    followUp1: '',
+    followUp2: '',
+  });
+  const [followUpDelays, setFollowUpDelays] = useState<FollowUpDelays>({
+    afterConnectionHours: 0,
+    afterFirstMessageHours: 72,
+    afterFollowUp1Hours: 96,
+  });
+  const [generatingMessages, setGeneratingMessages] = useState(false);
+  const [messagesGenerated, setMessagesGenerated] = useState(false);
   const initializationKey = useRef(crypto.randomUUID());
   const autoRequestedIcp = useRef(new Set<string>());
   const campaignBuilderRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const current = readCampaignUiState(workspace?.id);
-    writeCampaignUiState(workspace?.id, { ...current, expandedCampaign, scheduleDraft });
-  }, [workspace?.id, expandedCampaign, scheduleDraft]);
+    writeCampaignUiState(workspace?.id, {
+      ...current,
+      expandedCampaign,
+      scheduleDraft,
+      messageTemplates,
+      followUpDelays,
+      messagesGenerated,
+    });
+  }, [workspace?.id, expandedCampaign, scheduleDraft, messageTemplates, followUpDelays, messagesGenerated]);
 
   useEffect(() => {
     if (!workspace?.id) return;
-    const persisted = readCampaignUiState(workspace.id).newCampaignTimezone;
-    setOutreachTimezone(resolveNewCampaignTimezone(persisted, Intl.DateTimeFormat().resolvedOptions().timeZone));
+    const persisted = readCampaignUiState(workspace.id);
+    const tz = resolveNewCampaignTimezone(persisted.newCampaignTimezone, Intl.DateTimeFormat().resolvedOptions().timeZone);
+    setOutreachTimezone(tz);
+    if (persisted.messageTemplates) setMessageTemplates(persisted.messageTemplates);
+    if (persisted.followUpDelays) setFollowUpDelays(persisted.followUpDelays);
+    if (typeof persisted.messagesGenerated === 'boolean') setMessagesGenerated(persisted.messagesGenerated);
   }, [workspace?.id]);
 
   useEffect(() => { setDiscoveryPreview([]); setSelectedProspectUrls(new Set()); setDiscoveryError(null); }, [icpId]);
@@ -92,13 +116,54 @@ export function CampaignsPage() {
     if (workspace?.id) writeCampaignUiState(workspace.id, { ...readCampaignUiState(workspace.id), newCampaignTimezone: timezone });
   };
 
+  async function generatePreviewMessages() {
+    if (!workspace || !payload || !discoveryPreview.length || generatingMessages) return;
+    setGeneratingMessages(true);
+    try {
+      const sampleProspect = discoveryPreview[0];
+      const { data, error } = await supabase.functions.invoke('linkedin-v1-pipeline', {
+        body: {
+          action: 'generate_preview_messages',
+          workspace_id: workspace.id,
+          icp: payload,
+          prospect: sampleProspect,
+          strategy,
+        },
+      });
+      if (error) throw new Error(await edgeFunctionError(error));
+      const copy = data?.copy;
+      if (copy) {
+        setMessageTemplates({
+          connectionNote: copy.connectionNote ?? '',
+          firstMessage: copy.firstMessage ?? '',
+          followUp1: copy.followUp1 ?? '',
+          followUp2: copy.followUp2 ?? '',
+        });
+        setMessagesGenerated(true);
+        toast.success('Preview messages generated. Review and edit them below.');
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Could not generate preview messages');
+    } finally {
+      setGeneratingMessages(false);
+    }
+  }
+
   const connectedAccounts = (accounts.data ?? []).filter((a) => a.connection_state === 'connected' && ['healthy', 'degraded'].includes(a.health_status) && a.profile_url);
   const selectedIcp = (icps.data ?? []).find((i) => i.id === icpId);
   const selectedAccount = connectedAccounts.find((a) => a.id === accountId);
   const outboundEnabled = isLinkedInOutboundEnabled();
   const outboundUiStatus = linkedinOutboundUiStatus();
   const scheduleValid = days.length > 0 && startTime < endTime && isIanaTimezone(outreachTimezone);
-  const canContinue = [name.trim().length > 1 && !!selectedIcp, strategy.trim().length > 20, !!selectedAccount && dailyLimit >= 1 && dailyLimit <= 20 && scheduleValid, true][step];
+  const messagesReady = messageTemplates.connectionNote.length > 0 && messageTemplates.firstMessage.length > 0 && messageTemplates.followUp1.length > 0 && messageTemplates.followUp2.length > 0;
+  const delaysValid = followUpDelays.afterConnectionHours >= 0 && followUpDelays.afterFirstMessageHours >= 1 && followUpDelays.afterFollowUp1Hours >= 1;
+  const canContinue = [
+    name.trim().length > 1 && !!selectedIcp,
+    strategy.trim().length > 20,
+    messagesReady,
+    !!selectedAccount && dailyLimit >= 1 && dailyLimit <= 20 && scheduleValid && delaysValid,
+    true
+  ][step];
   const nextWindow = useMemo(() => nextCampaignSendingWindow(days, startTime, endTime, outreachTimezone), [days, startTime, endTime, outreachTimezone]);
   const mayManageAcceptance = import.meta.env.VITE_SUPABASE_URL?.includes('vdiqfiuqckaxdjkadinu') === true
     && members.some((member) => member.user_id === user?.id && member.status === 'active' && ['owner', 'admin'].includes(member.role));
@@ -225,6 +290,13 @@ export function CampaignsPage() {
             operating_hours: `${startTime}–${endTime}`,
             outreach_timezone: outreachTimezone,
             initialization_key: initializationKey.current,
+            connection_note_template: messageTemplates.connectionNote,
+            first_message_template: messageTemplates.firstMessage,
+            follow_up_1_template: messageTemplates.followUp1,
+            follow_up_2_template: messageTemplates.followUp2,
+            delay_after_connection_hours: followUpDelays.afterConnectionHours,
+            delay_after_first_message_hours: followUpDelays.afterFirstMessageHours,
+            delay_after_follow_up_1_hours: followUpDelays.afterFollowUp1Hours,
           },
           icp: payload,
           max_prospects: Math.min(dailyLimit, 5),
@@ -362,7 +434,74 @@ export function CampaignsPage() {
           </Field>
           <div className="grid gap-4 md:grid-cols-2"><Card className="p-4"><p className="mb-3 text-sm font-semibold text-ink-100">Use existing ICP</p><Select value={icpId} onChange={(e) => setIcpId(e.target.value)}><option value="">Select an ICP</option>{(icps.data ?? []).map((i) => <option key={i.id} value={i.id}>{i.name}</option>)}</Select></Card><Card className="p-4"><p className="text-sm font-semibold text-ink-100">Create new ICP with Yuktris</p><p className="mb-3 mt-1 text-xs text-ink-400">Describe your offer, review the generated audience, and continue here.</p><Button variant="secondary" onClick={() => setCreateIcpOpen(true)}><Sparkles className="h-4 w-4" />Create New ICP</Button></Card></div></div>
         )}
+        {step === 1 && (
+          <Field label="Message strategy">
+            <Textarea className="min-h-40" value={strategy} onChange={(e) => setStrategy(e.target.value)} />
+            <p className="mt-2 text-xs text-ink-500">Yuktris generates prospect-specific copy from this strategy. You can review the direction here.</p>
+          </Field>
+        )}
         {step === 2 && (
+          <div className="space-y-4">
+            <div className="flex items-center justify-between">
+              <p className="text-sm font-medium text-ink-100">Review & Edit Outreach Sequence</p>
+              <Button variant="secondary" size="sm" disabled={!discoveryPreview.length || generatingMessages} onClick={generatePreviewMessages}>
+                {generatingMessages ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />} Generate Preview
+              </Button>
+            </div>
+            {!discoveryPreview.length && <Reason text="Discover prospects in the Goal & Audience step first, then generate preview messages here." />}
+            {messagesGenerated && (
+              <div className="space-y-4">
+                <Field label="Connection request note (max 190 chars)">
+                  <Textarea
+                    className="min-h-24"
+                    value={messageTemplates.connectionNote}
+                    onChange={(e) => setMessageTemplates({ ...messageTemplates, connectionNote: e.target.value })}
+                    maxLength={190}
+                  />
+                  <p className="mt-1 text-xs text-ink-500">{messageTemplates.connectionNote.length}/190 characters</p>
+                </Field>
+                <Field label="First message (after connection accepted, max 500 chars)">
+                  <Textarea
+                    className="min-h-28"
+                    value={messageTemplates.firstMessage}
+                    onChange={(e) => setMessageTemplates({ ...messageTemplates, firstMessage: e.target.value })}
+                    maxLength={500}
+                  />
+                  <p className="mt-1 text-xs text-ink-500">{messageTemplates.firstMessage.length}/500 characters</p>
+                </Field>
+                <Field label="Follow-up 1 (max 400 chars)">
+                  <Textarea
+                    className="min-h-24"
+                    value={messageTemplates.followUp1}
+                    onChange={(e) => setMessageTemplates({ ...messageTemplates, followUp1: e.target.value })}
+                    maxLength={400}
+                  />
+                  <p className="mt-1 text-xs text-ink-500">{messageTemplates.followUp1.length}/400 characters</p>
+                </Field>
+                <Field label="Follow-up 2 (max 350 chars)">
+                  <Textarea
+                    className="min-h-24"
+                    value={messageTemplates.followUp2}
+                    onChange={(e) => setMessageTemplates({ ...messageTemplates, followUp2: e.target.value })}
+                    maxLength={350}
+                  />
+                  <p className="mt-1 text-xs text-ink-500">{messageTemplates.followUp2.length}/350 characters</p>
+                </Field>
+                <div className="rounded-xl border border-gold-500/10 p-3 text-xs text-ink-400">
+                  <p className="font-medium text-ink-200">Sequence order:</p>
+                  <ol className="mt-1 list-decimal list-inside space-y-1">
+                    <li>Connection request with note → wait {followUpDelays.afterConnectionHours}h</li>
+                    <li>First message → wait {followUpDelays.afterFirstMessageHours}h</li>
+                    <li>Follow-up 1 → wait {followUpDelays.afterFollowUp1Hours}h</li>
+                    <li>Follow-up 2</li>
+                  </ol>
+                  <p className="mt-2">Adjust timing in the next step (Safety & Schedule).</p>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+        {step === 3 && (
           <Field label="LinkedIn account">
             <Select value={accountId} onChange={(e) => setAccountId(e.target.value)}>
               <option value="">Select a connected account</option>
@@ -375,22 +514,31 @@ export function CampaignsPage() {
             {connectedAccounts.length === 0 && <Reason text="Connect or re-authenticate LinkedIn before launching." />}
           </Field>
         )}
-        {step === 1 && (
-          <Field label="Message strategy">
-            <Textarea className="min-h-40" value={strategy} onChange={(e) => setStrategy(e.target.value)} />
-            <p className="mt-2 text-xs text-ink-500">Yuktris generates prospect-specific copy from this strategy. You can review the direction here.</p>
-          </Field>
-        )}
-        {step === 2 && (
+        {step === 4 && (
           <div className="space-y-5">
             <Field label="Daily connection limit">
               <Input type="number" min={1} max={20} value={dailyLimit} onChange={(e) => setDailyLimit(Number(e.target.value))} />
             </Field>
             <ScheduleEditor days={days} start={startTime} end={endTime} timezone={outreachTimezone} onDays={setDays} onStart={setStartTime} onEnd={setEndTime} onTimezone={updateNewCampaignTimezone} />
+            <div className="rounded-xl border border-gold-500/10 p-4 space-y-4">
+              <p className="text-sm font-medium text-ink-200">Follow-up Timing</p>
+              <p className="text-xs text-ink-500">Hours to wait between each outreach step. Campaign operating window (days/hours/timezone) still governs when actions can run.</p>
+              <div className="grid gap-4 md:grid-cols-3">
+                <Field label="After connection → First message (hours)">
+                  <Input type="number" min={0} max={168} value={followUpDelays.afterConnectionHours} onChange={(e) => setFollowUpDelays({ ...followUpDelays, afterConnectionHours: Number(e.target.value) })}/>
+                </Field>
+                <Field label="After first message → Follow-up 1 (hours)">
+                  <Input type="number" min={1} max={720} value={followUpDelays.afterFirstMessageHours} onChange={(e) => setFollowUpDelays({ ...followUpDelays, afterFirstMessageHours: Number(e.target.value) })}/>
+                </Field>
+                <Field label="After follow-up 1 → Follow-up 2 (hours)">
+                  <Input type="number" min={1} max={720} value={followUpDelays.afterFollowUp1Hours} onChange={(e) => setFollowUpDelays({ ...followUpDelays, afterFollowUp1Hours: Number(e.target.value) })}/>
+                </Field>
+              </div>
+            </div>
             {nextWindow && <div className="rounded-lg border border-brand-500/20 bg-brand-500/5 p-3 text-sm text-ink-200"><CalendarClock className="mr-2 inline h-4 w-4" />Next outreach window: {formatCampaignWindow(nextWindow.toISOString(), outreachTimezone)}</div>}
           </div>
         )}
-        {step === 3 && (
+        {step === 5 && (
           <div className="space-y-4">
             <div className="grid gap-3 md:grid-cols-2">
               <Review label="Campaign" value={name} />
@@ -401,7 +549,12 @@ export function CampaignsPage() {
               <Review label="Ready prospects" value={String(inventory.data?.counts?.ready ?? 0)} />
               <Review label="Discovery state" value={campaignDiscoveryLabel(inventory.data?.prospecting_status)} />
               <Review label="Message strategy" value={strategy} />
+              <Review label="Connection note" value={messageTemplates.connectionNote || '(not set)'} />
+              <Review label="First message" value={messageTemplates.firstMessage || '(not set)'} />
+              <Review label="Follow-up 1" value={messageTemplates.followUp1 || '(not set)'} />
+              <Review label="Follow-up 2" value={messageTemplates.followUp2 || '(not set)'} />
               <Review label="Sending schedule" value={`${dailyLimit}/day · ${days.map((d) => SENDING_DAYS.find(([value]) => value === d)?.[1]).join(', ')} · ${startTime}–${endTime} · ${outreachTimezone}`} />
+              <Review label="Follow-up delays" value={`${followUpDelays.afterConnectionHours}h → ${followUpDelays.afterFirstMessageHours}h → ${followUpDelays.afterFollowUp1Hours}h`} />
               <Review label="Next outreach window" value={nextWindow ? formatCampaignWindow(nextWindow.toISOString(), outreachTimezone) : 'Invalid schedule'} />
             </div>
             {outboundUiStatus === 'staging_disabled' && <p className="rounded-lg border border-warning-500/20 bg-warning-500/5 p-3 text-sm text-warning-300">Staging safety mode — LinkedIn outreach is disabled. You can test campaign setup and prospect discovery without sending anything.</p>}
@@ -415,7 +568,7 @@ export function CampaignsPage() {
             <ChevronLeft className="h-4 w-4" />
             Back
           </Button>
-          {step < 3 ? (
+          {step < 5 ? (
             <Button disabled={!canContinue} onClick={() => setStep((s) => s + 1)}>
               Continue
               <ChevronRight className="h-4 w-4" />

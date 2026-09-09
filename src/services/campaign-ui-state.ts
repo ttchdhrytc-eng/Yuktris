@@ -6,16 +6,32 @@ export type PersistedScheduleDraft = {
   timezone: string;
 };
 
+export type MessageTemplates = {
+  connectionNote: string;
+  firstMessage: string;
+  followUp1: string;
+  followUp2: string;
+};
+
+export type FollowUpDelays = {
+  afterConnectionHours: number;
+  afterFirstMessageHours: number;
+  afterFollowUp1Hours: number;
+};
+
 export type CampaignUiState = {
   expandedCampaign: string | null;
   scheduleDraft: PersistedScheduleDraft | null;
   newCampaignTimezone: string | null;
+  messageTemplates: MessageTemplates | null;
+  followUpDelays: FollowUpDelays | null;
+  messagesGenerated: boolean | null;
 };
 
 const storageKey = (workspaceId: string) => `yuktris:campaigns-ui:${workspaceId}`;
 
 export function readCampaignUiState(workspaceId?: string): CampaignUiState {
-  const fallback = { expandedCampaign: null, scheduleDraft: null, newCampaignTimezone: null };
+  const fallback = { expandedCampaign: null, scheduleDraft: null, newCampaignTimezone: null, messageTemplates: null, followUpDelays: null, messagesGenerated: null };
   if (!workspaceId || typeof sessionStorage === 'undefined') return fallback;
   try {
     const value = JSON.parse(sessionStorage.getItem(storageKey(workspaceId)) ?? 'null') as Partial<CampaignUiState> | null;
@@ -23,6 +39,9 @@ export function readCampaignUiState(workspaceId?: string): CampaignUiState {
       expandedCampaign: typeof value?.expandedCampaign === 'string' ? value.expandedCampaign : null,
       scheduleDraft: validScheduleDraft(value?.scheduleDraft) ? value.scheduleDraft : null,
       newCampaignTimezone: typeof value?.newCampaignTimezone === 'string' ? value.newCampaignTimezone : null,
+      messageTemplates: value?.messageTemplates && typeof value.messageTemplates === 'object' ? value.messageTemplates as MessageTemplates : null,
+      followUpDelays: value?.followUpDelays && typeof value.followUpDelays === 'object' ? value.followUpDelays as FollowUpDelays : null,
+      messagesGenerated: typeof value?.messagesGenerated === 'boolean' ? value.messagesGenerated : null,
     };
   } catch {
     return fallback;
