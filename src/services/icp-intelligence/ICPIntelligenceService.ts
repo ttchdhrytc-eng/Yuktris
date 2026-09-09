@@ -19,6 +19,7 @@
 //   - sales_navigator_filters
 
 import { supabase } from '@/lib/supabase';
+import { requestInitialAcquisition } from '@/services/initial-acquisition';
 import { agentOrchestrator } from '@/services/agents';
 import { biService } from '@/services/business-intelligence';
 import { miService } from '@/services/market-intelligence';
@@ -180,6 +181,7 @@ export class ICPIntelligenceService {
         status: 'completed',
         prospecting_status: 'queued',
         acquisition_phase: 'initial_acquisition',
+        next_refresh_at: new Date().toISOString(),
         initial_acquisition_batches_completed: 0,
         offer_context: options?.offerContext ?? {},
       })
@@ -248,13 +250,8 @@ export class ICPIntelligenceService {
     });
     if (salesNavError) throw new Error(salesNavError.message);
 
-    // Discovery is requested only after the complete ICP graph is durable.
-    // Failure to queue is visible as queued/needs-attention state and never
-    // falls back to mock prospects.
-    const { data: account } = await supabase.from('linkedin_accounts').select('id').eq('workspace_id', workspaceId).eq('connection_state', 'connected').in('health_status', ['healthy', 'degraded']).limit(1).maybeSingle();
-    if (account?.id) {
-      await supabase.functions.invoke('linkedin-v1-pipeline', { body: { action: 'request_replenishment', workspace_id: workspaceId, icp_id: icpId, linkedin_account_id: account.id, reason: options?.discoveryReason ?? 'onboarding_confirmed' } });
-    }
+    // The complete ICP is durable and has a recovery timestamp before handoff.
+    await requestInitialAcquisition(supabase, workspaceId, icpId, options?.discoveryReason ?? 'onboarding_confirmed');
 
     return icpId;
   }

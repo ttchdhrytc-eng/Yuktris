@@ -6,6 +6,7 @@ import { Input, Label, Textarea } from '@/components/ui/Field';
 import { Modal } from '@/components/ui/Modal';
 import { useWorkspace } from '@/contexts/WorkspaceContext';
 import { supabase } from '@/lib/supabase';
+import { requestInitialAcquisition } from '@/services/initial-acquisition';
 import { icpService } from '@/services/icp-intelligence';
 import type { GeneratedICP } from '@/services/icp-intelligence/icpValidation';
 
@@ -82,6 +83,7 @@ export function CreateICPWithYuktrisModal({ open, onClose, onCreated }: { open: 
       priority: 'secondary',
       prospecting_status: 'queued',
       acquisition_phase: 'initial_acquisition',
+        next_refresh_at: new Date().toISOString(),
       initial_acquisition_batches_completed: 0,
     }).select('id').single();
     if (error) throw error;
@@ -98,8 +100,7 @@ export function CreateICPWithYuktrisModal({ open, onClose, onCreated }: { open: 
     const results = await Promise.all(writes);
     const childError = results.find((result) => result.error)?.error;
     if (childError) throw childError;
-    const { data: account } = await supabase.from('linkedin_accounts').select('id').eq('workspace_id', workspace.id).eq('connection_state', 'connected').in('health_status', ['healthy', 'degraded']).limit(1).maybeSingle();
-    if (account?.id) await supabase.functions.invoke('linkedin-v1-pipeline', { body: { action: 'request_replenishment', workspace_id: workspace.id, icp_id: icp.id, linkedin_account_id: account.id, reason: 'icp_activated' } });
+    await requestInitialAcquisition(supabase, workspace.id, icp.id, 'icp_activated');
     return icp.id;
   }
 

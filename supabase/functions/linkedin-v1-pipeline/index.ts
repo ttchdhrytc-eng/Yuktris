@@ -242,49 +242,16 @@ Deno.serve(async (req: Request) => {
       let jobId = activeJob?.id as string | undefined;
       let scheduled = false;
       if (!jobId) {
-        const { data: dueIcp, error: dueError } = await admin
-          .from("icps")
-          .select("id,next_refresh_at")
-          .eq("workspace_id", workspaceId)
-          .in("prospecting_status", ["queued", "up_to_date"])
-          .not("next_refresh_at", "is", null)
-          .lte("next_refresh_at", now)
-          .order("next_refresh_at", { ascending: true })
-          .limit(1)
-          .maybeSingle();
+        const { data: dueRows, error: dueError } = await admin.rpc("due_prospect_replenishment_icp", { p_workspace_id: workspaceId });
+        const dueIcp = dueRows?.[0];
         if (dueError) throw pipelineError("replenishment_scheduler_failed", dueError.message, 500);
         if (dueIcp?.id) {
-          const { data: account } = await admin
-            .from("linkedin_accounts")
-            .select("id,profile_url,expected_profile_url")
-            .eq("workspace_id", workspaceId)
-            .eq("connection_state", "connected")
-            .in("health_status", ["healthy", "degraded"])
-            .limit(1)
-            .maybeSingle();
-          const identityOk = Boolean(account?.profile_url && account?.expected_profile_url && normalizeLinkedInProfile(account.profile_url) === normalizeLinkedInProfile(account.expected_profile_url));
-          if (account?.id && identityOk) {
-            const refreshIdentity = new Date(dueIcp.next_refresh_at).toISOString();
-            const { data: inserted, error: insertError } = await admin
-              .from("prospect_replenishment_jobs")
-              .insert({
-                workspace_id: workspaceId,
-                icp_id: dueIcp.id,
-                linkedin_account_id: account.id,
-                idempotency_key: `${dueIcp.id}:scheduled_refresh:${refreshIdentity}`,
-                reason: "scheduled_refresh",
-              })
-              .select("id")
-              .maybeSingle();
-            if (insertError && insertError.code !== "23505") throw pipelineError("replenishment_scheduler_failed", insertError.message, 500);
-            jobId = inserted?.id;
-            scheduled = Boolean(jobId);
-          } else {
-            await admin.from("icps").update({
-              prospecting_status: "needs_attention",
-              discovery_error: "A connected and identity-matched LinkedIn sender is required before prospecting can continue.",
-            }).eq("workspace_id", workspaceId).eq("id", dueIcp.id);
-          }
+          const { data: handoff, error: enqueueError } = await admin.rpc("enqueue_prospect_replenishment", {
+            p_workspace_id: workspaceId, p_icp_id: dueIcp.id, p_reason: "scheduled_refresh",
+          });
+          if (enqueueError) throw pipelineError("replenishment_enqueue_failed", enqueueError.message, 500);
+          jobId = handoff?.job_id ?? undefined;
+          scheduled = Boolean(jobId && !handoff?.duplicate_trigger_coalesced);
         }
       }
 
@@ -298,32 +265,12 @@ Deno.serve(async (req: Request) => {
     if (action === "request_replenishment") {
       const icpId = requireString(body.icp_id, "icp_id");
       const reason = optionalString(body.reason) ?? "explicit_activation";
-      const { data: icp, error: icpError } = await admin.from("icps").select("id,prospecting_status").eq("workspace_id", workspaceId).eq("id", icpId).maybeSingle();
-      if (icpError || !icp) throw pipelineError("icp_not_found", "ICP was not found in this workspace", 404);
-      const requestedAccount = optionalString(body.linkedin_account_id);
-      let accountQuery = admin.from("linkedin_accounts").select("id,connection_state,health_status,profile_url,expected_profile_url").eq("workspace_id", workspaceId);
-      if (requestedAccount) accountQuery = accountQuery.eq("id", requestedAccount);
-      const { data: account, error: accountError } = await accountQuery.limit(1).maybeSingle();
-      const identityOk = Boolean(account?.profile_url && account?.expected_profile_url && normalizeLinkedInProfile(account.profile_url) === normalizeLinkedInProfile(account.expected_profile_url));
-      if (accountError || !account || account.connection_state !== "connected" || !["healthy", "degraded"].includes(account.health_status) || !identityOk) {
-        throw pipelineError("linkedin_account_not_ready", "A connected, identity-matched LinkedIn account is required for historical exclusion", 409);
-      }
-      const bucket = new Date(); bucket.setUTCMinutes(0, 0, 0);
-      const idempotencyKey = `${icpId}:${materialDiscoveryReason(reason)}:${bucket.toISOString()}`;
-      const { data: active } = await admin.from("prospect_replenishment_jobs").select("id,status").eq("workspace_id", workspaceId).eq("icp_id", icpId).in("status", ["queued","processing","cooldown"]).maybeSingle();
-      let job = active;
-      if (!job) {
-        const { data: inserted, error: insertError } = await admin.from("prospect_replenishment_jobs").insert({ workspace_id: workspaceId, icp_id: icpId, linkedin_account_id: account.id, idempotency_key: idempotencyKey, reason }).select("id,status").single();
-        if (insertError) throw pipelineError("replenishment_enqueue_failed", insertError.message, 409);
-        job = inserted;
-      }
-      const resetInitialAcquisition = ["onboarding_confirmed", "icp_activated", "targeting_changed"].includes(reason);
-      await admin.from("icps").update({
-        prospecting_status: "queued",
-        discovery_error: null,
-        next_refresh_at: new Date().toISOString(),
-        ...(resetInitialAcquisition ? { acquisition_phase: "initial_acquisition", initial_acquisition_batches_completed: 0 } : {}),
-      }).eq("workspace_id", workspaceId).eq("id", icpId);
+      const { data: handoff, error: enqueueError } = await admin.rpc("enqueue_prospect_replenishment", {
+        p_workspace_id: workspaceId, p_icp_id: icpId, p_reason: materialDiscoveryReason(reason),
+      });
+      if (enqueueError || !handoff?.job_id) throw pipelineError("replenishment_enqueue_failed", enqueueError?.message ?? "No durable job was returned", 409);
+      const job = { id: handoff.job_id };
+      const active = handoff.duplicate_trigger_coalesced;
       const task = processReplenishment(admin, workspaceId, job.id).catch((error) => console.error("[replenishment-failed]", { job_id: job.id, message: error instanceof Error ? error.message : "unknown" }));
       if (typeof EdgeRuntime !== "undefined") EdgeRuntime.waitUntil(task); else await task;
       return json({ status: "queued", job_id: job.id, duplicate_trigger_coalesced: Boolean(active), executable_jobs_created: 0, write_performed: false }, 202);
@@ -817,14 +764,14 @@ async function processReplenishment(admin: any, workspaceId: string, jobId: stri
     const controller = new AbortController();
     const deadline = setTimeout(() => controller.abort("internal_deadline_reached"), diagnostics.internalDeadlineMs);
     let discovered: Prospect[] = [];
-    try { discovered = await discoverVerifiedProspects(icp, Math.min(config.replenishment_batch_size, 5), diagnostics, controller.signal, admin, workspaceId, String(claim.account_id)); }
+    try { discovered = await discoverVerifiedProspects(icp, Math.min(config.replenishment_batch_size, 5), diagnostics, controller.signal, admin, workspaceId, claim.account_id ?? undefined); }
     catch (error) {
       if (!controller.signal.aborted) throw error;
       reject(diagnostics, "internal_deadline_reached");
       diagnostics.terminatedBy = "internal_deadline_reached";
     }
     finally { clearTimeout(deadline); }
-    const safe = await excludeHistoricallyUnsafeProspects(admin, workspaceId, String(claim.account_id), discovered, diagnostics);
+    const safe = await excludeHistoricallyUnsafeProspects(admin, workspaceId, claim.account_id ?? undefined, discovered, diagnostics);
     let persisted = 0;
     for (const prospect of safe) {
       const canonical = normalizeLinkedInProfile(prospect.linkedinUrl);
@@ -950,7 +897,7 @@ async function discoverVerifiedProspects(icp: ICP, maxProspects: number, diagnos
     diagnostics.rejectionFunnel.canonical_before_historical = (diagnostics.rejectionFunnel.canonical_before_historical ?? 0) + newCanonical.length;
     if (!newCanonical.length) { diagnostics.terminatedBy = "no_materially_new_candidates"; waveRecord.deadlineRemainingMs = Math.max(0, deadlineAt - Date.now()); diagnostics.wavesCompleted += 1; break; }
     let safeCanonical = new Set(newCanonical);
-    if (admin && workspaceId && accountId) {
+    if (admin && workspaceId) {
       const historyAt = Date.now();
       const placeholders = newCanonical.map((linkedinUrl) => ({ companyName: "", companyWebsite: "", companyDescription: "", contactFirstName: "", contactLastName: "", contactTitle: "", linkedinUrl, evidence: "", confidenceScore: 0, companyFit: "", personFit: "", location: null, sourceConfidence: 0 }));
       safeCanonical = new Set((await excludeHistoricallyUnsafeProspects(admin, workspaceId, accountId, placeholders, diagnostics)).map((item) => item.linkedinUrl));
@@ -1246,7 +1193,7 @@ function matchesGeographyEvidence(evidence: string, geography: string[]): boolea
 async function excludeHistoricallyUnsafeProspects(
   admin: any,
   workspaceId: string,
-  accountId: string,
+  accountId: string | undefined,
   prospects: Prospect[],
   diagnostics = newDiscoveryDiagnostics(),
 ): Promise<Prospect[]> {
@@ -1259,14 +1206,15 @@ async function excludeHistoricallyUnsafeProspects(
     return Array.isArray(data) ? data : [];
   };
   const canonical = (value: unknown): string | null => typeof value === "string" ? normalizeLinkedInProfile(value) : null;
+  const scopeAccount = (query: any, column: string) => accountId ? query.eq(column, accountId) : query;
   const [contacts, jobs, audits, queues, generations, authorizations] = await Promise.all([
     checked(admin.from("contacts").select("id,normalized_linkedin_url,status").eq("workspace_id", workspaceId).in("normalized_linkedin_url", [...targets]), "contact"),
-    checked(admin.from("linkedin_execution_jobs").select("id,contact_id,action_payload,status").eq("workspace_id", workspaceId).eq("linkedin_account_id", accountId), "execution job"),
-    checked(admin.from("linkedin_write_audit").select("id,target_identifier,execution_result").eq("workspace_id", workspaceId).eq("linkedin_account_id", accountId), "write audit"),
-    checked(admin.from("browser_execution_queue").select("id,action_type,action_params,status,result,interaction_crossed").eq("workspace_id", workspaceId).eq("account_id", accountId), "browser queue"),
-    checked(admin.from("controlled_acceptance_generations").select("id,target_identifier,status").eq("workspace_id", workspaceId).eq("linkedin_account_id", accountId), "acceptance generation"),
+    checked(scopeAccount(admin.from("linkedin_execution_jobs").select("id,contact_id,action_payload,status").eq("workspace_id", workspaceId), "linkedin_account_id"), "execution job"),
+    checked(scopeAccount(admin.from("linkedin_write_audit").select("id,target_identifier,execution_result").eq("workspace_id", workspaceId), "linkedin_account_id"), "write audit"),
+    checked(scopeAccount(admin.from("browser_execution_queue").select("id,action_type,action_params,status,result,interaction_crossed").eq("workspace_id", workspaceId), "account_id"), "browser queue"),
+    checked(scopeAccount(admin.from("controlled_acceptance_generations").select("id,target_identifier,status").eq("workspace_id", workspaceId), "linkedin_account_id"), "acceptance generation"),
     Deno.env.get("SUPABASE_URL")?.includes("aljpmtuekghwzrnuwkat")
-      ? checked(admin.from("linkedin_production_acceptance_authorizations").select("id,canonical_target_url,status").eq("workspace_id", workspaceId).eq("linkedin_account_id", accountId), "production acceptance authorization")
+      ? checked(scopeAccount(admin.from("linkedin_production_acceptance_authorizations").select("id,canonical_target_url,status").eq("workspace_id", workspaceId), "linkedin_account_id"), "production acceptance authorization")
       : Promise.resolve([]),
   ]);
   const contactTargets = new Map<string, string>();

@@ -1,5 +1,6 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { logger } from './logger.js';
+import { runDueProspectMaintenance } from './prospect-maintenance.js';
 import { Queue, QueueItem } from './queue.js';
 import { LinkedInBrowser, SessionData, ProgressStep, ProgressCallback, IntendedLinkedInIdentity } from './linkedin.js';
 import { encrypt, decrypt, decryptLinkedInCredential, getKeyId } from './session.js';
@@ -440,32 +441,21 @@ export class Worker {
   private async runAutonomousMaintenance(): Promise<void> {
     const supabaseUrl = process.env.SUPABASE_URL!;
     const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY!;
+    await runDueProspectMaintenance(this.client, async (workspaceId) => {
+      const response = await fetch(supabaseUrl + '/functions/v1/linkedin-v1-pipeline', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + serviceKey, apikey: serviceKey },
+        body: JSON.stringify({ action: 'tick_replenishment', workspace_id: workspaceId }),
+      });
+      if (!response.ok) logger.warn('Prospect replenishment maintenance failed', {
+        workspace_id: workspaceId, status: response.status, ...await readSafeFunctionError(response),
+      });
+    }).catch((error) => logger.warn('Prospect replenishment scheduling failed', { error: String(error) }));
     const { data: rows, error } = await this.client.from('linkedin_accounts').select('workspace_id').eq('connection_state', 'connected').limit(100);
     if (error) throw new Error(`Unable to load connected LinkedIn workspaces: ${error.message}`);
     const workspaceIds = [...new Set((rows ?? []).map((row: { workspace_id?: string | null }) => row.workspace_id).filter(Boolean))] as string[];
 
     for (const workspaceId of workspaceIds) {
-      // Replenishment is deliberately separate from LinkedIn execution. The
-      // Edge endpoint processes at most one due bounded batch per workspace;
-      // it never creates browser work or bypasses the outbound gate.
-      const replenishmentResponse = await fetch(`${supabaseUrl}/functions/v1/linkedin-v1-pipeline`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${serviceKey}`,
-          apikey: serviceKey,
-        },
-        body: JSON.stringify({ action: 'tick_replenishment', workspace_id: workspaceId }),
-      });
-      if (!replenishmentResponse.ok) {
-        const responseError = await readSafeFunctionError(replenishmentResponse);
-        logger.warn('Prospect replenishment maintenance failed', {
-          workspace_id: workspaceId,
-          status: replenishmentResponse.status,
-          ...responseError,
-        });
-      }
-
       const { error: reconcileError } = await this.client.rpc('reconcile_linkedin_v1_pipeline', { p_workspace_id: workspaceId });
       if (reconcileError && !/function .* does not exist/i.test(reconcileError.message)) {
         logger.warn('Pipeline reconciliation RPC failed', {

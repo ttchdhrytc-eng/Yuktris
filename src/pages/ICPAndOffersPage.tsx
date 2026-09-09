@@ -9,13 +9,13 @@ import { Badge } from '@/components/ui/Badge';
 import { CreateICPWithYuktrisModal } from '@/components/icp/CreateICPWithYuktrisModal';
 import { supabase } from '@/lib/supabase';
 import { useWorkspace } from '@/contexts/WorkspaceContext';
-import { useLinkedInAccounts } from '@/hooks/useLinkedInBrowser';
+
 
 type InventoryState = { id: string; name: string; offer_context: { offer?: string }; prospecting_status: string; next_refresh_at: string | null; last_discovery_started_at: string | null; last_discovery_completed_at: string | null; discovery_error: string | null; counts: { verified: number; ready: number } };
 
 export function ICPAndOffersPage() {
   const { workspace } = useWorkspace();
-  const accounts = useLinkedInAccounts();
+
   const queryClient = useQueryClient();
   const [open, setOpen] = useState(false);
   const inventory = useQuery({
@@ -26,11 +26,10 @@ export function ICPAndOffersPage() {
       return data?.inventory ?? [];
     }, refetchInterval: 10_000,
   });
-  const account = (accounts.data ?? []).find((item) => item.connection_state === 'connected' && ['healthy', 'degraded'].includes(item.health_status));
 
   async function request(icpId: string, reason: string) {
-    if (!workspace || !account) return toast.error('Connect a healthy LinkedIn sender before prospecting.');
-    const { error } = await supabase.functions.invoke('linkedin-v1-pipeline', { body: { action: 'request_replenishment', workspace_id: workspace.id, icp_id: icpId, linkedin_account_id: account.id, reason } });
+    if (!workspace) return;
+    const { error } = await supabase.functions.invoke('linkedin-v1-pipeline', { body: { action: 'request_replenishment', workspace_id: workspace.id, icp_id: icpId, reason } });
     if (error) return toast.error('Prospecting could not be queued. No outreach was started.');
     toast.success('Prospecting is running in the background.');
     await queryClient.invalidateQueries({ queryKey: ['autonomous-inventory'] });
