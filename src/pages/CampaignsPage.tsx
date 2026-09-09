@@ -188,6 +188,19 @@ export function CampaignsPage() {
   const scheduleValid = days.length > 0 && startTime < endTime && isIanaTimezone(outreachTimezone);
   const messagesReady = messageTemplates.connectionNote.length > 0 && messageTemplates.firstMessage.length > 0 && messageTemplates.followUp1.length > 0 && messageTemplates.followUp2.length > 0;
   const delaysValid = followUpDelays.afterConnectionHours >= 0 && followUpDelays.afterFirstMessageHours >= 1 && followUpDelays.afterFollowUp1Hours >= 1;
+  const nextWindow = useMemo(() => nextCampaignSendingWindow(days, startTime, endTime, outreachTimezone), [days, startTime, endTime, outreachTimezone]);
+  const mayManageAcceptance = import.meta.env.VITE_SUPABASE_URL?.includes('vdiqfiuqckaxdjkadinu') === true
+    && members.some((member) => member.user_id === user?.id && member.status === 'active' && ['owner', 'admin'].includes(member.role));
+
+  const inventory = useQuery({
+    queryKey: ['campaign-inventory', workspace?.id, icpId], enabled: !!workspace && !!icpId,
+    queryFn: async () => {
+      const { data, error } = await supabase.functions.invoke('linkedin-v1-pipeline', { body: { action: 'inventory_status', workspace_id: workspace!.id, icp_id: icpId } });
+      if (error) throw error;
+      return data?.inventory?.[0] ?? null;
+    }, refetchInterval: 10_000,
+  });
+
   const readyProspects = inventory.data?.counts?.ready ?? 0;
   const canContinue = [
     name.trim().length > 1 && !!selectedIcp,
@@ -196,9 +209,6 @@ export function CampaignsPage() {
     !!selectedAccount && dailyLimit >= 1 && dailyLimit <= 20 && scheduleValid && delaysValid,
     true
   ][step];
-  const nextWindow = useMemo(() => nextCampaignSendingWindow(days, startTime, endTime, outreachTimezone), [days, startTime, endTime, outreachTimezone]);
-  const mayManageAcceptance = import.meta.env.VITE_SUPABASE_URL?.includes('vdiqfiuqckaxdjkadinu') === true
-    && members.some((member) => member.user_id === user?.id && member.status === 'active' && ['owner', 'admin'].includes(member.role));
 
   useEffect(() => {
     if (!workspace || !icpId || !selectedAccount || autoRequestedIcp.current.has(icpId)) return;
@@ -210,29 +220,6 @@ export function CampaignsPage() {
   }, [workspace, icpId, selectedAccount, queryClient]);
 
   const existing = useQuery({
-    queryKey: ['customer-campaigns', workspace?.id],
-    enabled: !!workspace,
-    queryFn: async () => {
-      const { data, error } = await supabase.from('customer_campaigns').select('*').eq('workspace_id', workspace!.id).order('created_at', { ascending: false });
-      if (error) throw error;
-      const ids = (data ?? []).map((c) => c.id);
-      if (!ids.length) return { campaigns: data ?? [], metrics: {} };
-      return {
-        campaigns: data ?? [],
-        metrics: await fetchCampaignMetrics(workspace!.id),
-      };
-    },
-    placeholderData: (previous) => previous,
-  });
-  const inventory = useQuery({
-    queryKey: ['campaign-inventory', workspace?.id, icpId], enabled: !!workspace && !!icpId,
-    queryFn: async () => {
-      const { data, error } = await supabase.functions.invoke('linkedin-v1-pipeline', { body: { action: 'inventory_status', workspace_id: workspace!.id, icp_id: icpId } });
-      if (error) throw error;
-      return data?.inventory?.[0] ?? null;
-    }, refetchInterval: 10_000,
-  });
-  const campaignProspects = useQuery({
     queryKey: ['campaign-prospects', workspace?.id],
     enabled: !!workspace,
     queryFn: () => fetchCampaignProspects(workspace!.id),
