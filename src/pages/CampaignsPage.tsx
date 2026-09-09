@@ -117,10 +117,41 @@ export function CampaignsPage() {
   };
 
   async function generatePreviewMessages() {
-    if (!workspace || !payload || !discoveryPreview.length || generatingMessages) return;
+    if (!workspace || !payload || generatingMessages) return;
+    if (discoveryPreview.length === 0 && readyProspects === 0) return;
     setGeneratingMessages(true);
     try {
-      const sampleProspect = discoveryPreview[0];
+      let sampleProspect = discoveryPreview[0];
+      if (!sampleProspect && readyProspects > 0) {
+        const { data: autonomousProspects, error: autonomousError } = await supabase
+          .from('icp_prospects')
+          .select('prospect_id,fit_score,fit_evidence,provenance,prospects!inner(id,first_name,last_name,title,normalized_linkedin_url,company_name,company_website,location)')
+          .eq('workspace_id', workspace.id)
+          .eq('icp_id', icpId)
+          .eq('verification_status', 'verified')
+          .eq('readiness', 'ready')
+          .order('fit_score', { ascending: false })
+          .limit(1);
+        if (autonomousError) throw new Error(autonomousError.message);
+        if (autonomousProspects?.length) {
+          const row = autonomousProspects[0];
+          const p = row.prospects;
+          sampleProspect = {
+            company_name: p.company_name,
+            company_website: p.company_website,
+            contact_name: `${p.first_name ?? ''} ${p.last_name ?? ''}`.trim(),
+            contact_title: p.title,
+            linkedin_url: p.normalized_linkedin_url,
+            evidence: String(row.provenance?.evidence ?? ''),
+            company_fit: String(row.fit_evidence?.company_fit ?? 'Verified ICP fit'),
+            person_fit: String(row.fit_evidence?.person_fit ?? 'Verified role fit'),
+            location: p.location,
+            source_confidence: Number(row.provenance?.source_confidence ?? 0),
+            confidence_score: Number(row.fit_score) / 100,
+          };
+        }
+      }
+      if (!sampleProspect) return;
       const { data, error } = await supabase.functions.invoke('linkedin-v1-pipeline', {
         body: {
           action: 'generate_preview_messages',
@@ -157,10 +188,11 @@ export function CampaignsPage() {
   const scheduleValid = days.length > 0 && startTime < endTime && isIanaTimezone(outreachTimezone);
   const messagesReady = messageTemplates.connectionNote.length > 0 && messageTemplates.firstMessage.length > 0 && messageTemplates.followUp1.length > 0 && messageTemplates.followUp2.length > 0;
   const delaysValid = followUpDelays.afterConnectionHours >= 0 && followUpDelays.afterFirstMessageHours >= 1 && followUpDelays.afterFollowUp1Hours >= 1;
+  const readyProspects = inventory.data?.counts?.ready ?? 0;
   const canContinue = [
     name.trim().length > 1 && !!selectedIcp,
     strategy.trim().length > 20,
-    messagesReady,
+    readyProspects === 0 ? true : messagesReady,
     !!selectedAccount && dailyLimit >= 1 && dailyLimit <= 20 && scheduleValid && delaysValid,
     true
   ][step];
@@ -444,11 +476,11 @@ export function CampaignsPage() {
           <div className="space-y-4">
             <div className="flex items-center justify-between">
               <p className="text-sm font-medium text-ink-100">Review & Edit Outreach Sequence</p>
-              <Button variant="secondary" size="sm" disabled={!discoveryPreview.length || generatingMessages} onClick={generatePreviewMessages}>
+              <Button variant="secondary" size="sm" disabled={readyProspects === 0 || generatingMessages} onClick={generatePreviewMessages}>
                 {generatingMessages ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />} Generate Preview
               </Button>
             </div>
-            {!discoveryPreview.length && <Reason text="Discover prospects in the Goal & Audience step first, then generate preview messages here." />}
+            {readyProspects === 0 && <Reason text="Yuktris is automatically finding and verifying prospects for this ICP in the background. Generate Preview will be available when at least one eligible prospect is ready." />}
             {messagesGenerated && (
               <div className="space-y-4">
                 <Field label="Connection request note (max 190 chars)">
