@@ -1071,8 +1071,8 @@ function cheapCandidateRank(candidate: { title: string; content: string; score?:
 }
 
 function discoveryVerticalVariants(icp: ICP): string[] {
-  const saved = [icp.subIndustry, icp.industry, icp.name, ...(icp.keywords ?? [])].filter(Boolean).join(" ");
-  const variants = [icp.subIndustry, icp.industry, icp.name, ...(icp.keywords ?? [])].filter((value): value is string => Boolean(value?.trim()));
+  const saved = [icp.subIndustry, icp.industry, ...(icp.keywords ?? [])].filter(Boolean).join(" ");
+  const variants = [icp.subIndustry, icp.industry, ...(icp.keywords ?? [])].filter((value): value is string => Boolean(value?.trim()));
   if (/\b(?:it|information technology|technology|software)\b/i.test(saved)) {
     variants.push("IT services", "IT consulting", "managed IT services", "software development services", "cloud consulting services", "cybersecurity services", "digital transformation services", "systems integration");
   }
@@ -1082,12 +1082,97 @@ function discoveryVerticalVariants(icp: ICP): string[] {
 function buildDiscoveryWaves(roles: string[], roleVariants: string[], verticals: string[], geography: string[], companySize?: string): string[][] {
   const location = geography.join(" ");
   const vertical = verticals[0] ?? "B2B";
-  const query = (role: string, market: string, extra = "") => ["site:linkedin.com/in", quoted(role), quoted(market), location, extra].filter(Boolean).join(" ");
-  const exact = roles.slice(0, 2).map((role, index) => query(role, verticals[index % Math.max(1, verticals.length)] ?? vertical));
-  const expandedRoles = roleVariants.filter((role) => !roles.some((saved) => saved.toLowerCase() === role.toLowerCase())).slice(0, 2)
-    .map((role, index) => query(role, verticals[(index + 1) % Math.max(1, verticals.length)] ?? vertical));
-  const serviceAndSize = verticals.slice(2, 4).map((market, index) => query(roleVariants[(index + 2) % Math.max(1, roleVariants.length)] ?? roles[0], market, companySize ? quoted(companySize) : ""));
-  return [exact, expandedRoles, serviceAndSize].filter((wave) => wave.length > 0);
+  const primaryVertical = vertical;
+  const serviceVerticals = verticals.slice(1).filter(Boolean);
+
+  // Build complementary query strategies - separate recall from precision
+  // Wave 1: Precise - exact role + primary industry + geography
+  const preciseQueries = roles.slice(0, 2).map((role) => 
+    ["site:linkedin.com/in", quoted(role), quoted(primaryVertical), geography.join(" ")].filter(Boolean).join(" ")
+  );
+
+  // Wave 2: Role family + broader industry concepts
+  const roleFamilies = groupRoleFamily(roleVariants.filter((rv) => !roles.some(r => r.toLowerCase() === rv.toLowerCase())));
+  const roleFamilyQueries = roleFamilies.slice(0, 2).flatMap((family) =>
+    family.roles.slice(0, 2).map((role) =>
+      ["site:linkedin.com/in", quoted(role), quoted(primaryVertical), geography.join(" ")].filter(Boolean).join(" ")
+    )
+  );
+
+  // Wave 3: Broader industry/service concepts + role family
+  const broaderVerticals = serviceVerticals.slice(0, 2).length > 0 
+    ? serviceVerticals.slice(0, 2)
+    : ["IT services", "technology consulting", "software development", "cloud services"];
+  const broaderQueries = broaderVerticals.flatMap((vertical) =>
+    roleFamilies.slice(0, 2).flatMap((family) =>
+      family.roles.slice(0, 1).map((role) =>
+        ["site:linkedin.com/in", quoted(role), quoted(vertical), geography.join(" ")].filter(Boolean).join(" ")
+      )
+    )
+  );
+
+  // Wave 4: Company/service concept + role (for fallback when zero results)
+  const conceptQueries = [
+    "site:linkedin.com/in " + quoted(roles[0]) + " \"software services\" " + geography.join(" "),
+    "site:linkedin.com/in " + quoted(roles[0]) + " \"technology services\" " + geography.join(" "),
+    "site:linkedin.com/in " + quoted(roles[0]) + " \"consulting\" " + geography.join(" "),
+  ].filter(Boolean);
+
+  return [preciseQueries, expandedRolesQueries(roleVariants, roles, verticals, geography), broaderQueries, conceptQueries].filter((wave) => wave.length > 0);
+}
+
+function expandedRolesQueries(roleVariants: string[], roles: string[], verticals: string[], geography: string[]): string[] {
+  const vertical = verticals[0] ?? "B2B";
+  const location = geography.join(" ");
+  const expandedRoles = roleVariants.filter((rv) => !roles.some(r => r.toLowerCase() === rv.toLowerCase())).slice(0, 3);
+  return expandedRoles.map((role) =>
+    ["site:linkedin.com/in", quoted(role), quoted(verticals[0] ?? "B2B"), geography.join(" ")].filter(Boolean).join(" ")
+  );
+}
+
+function groupRoleFamily(roleVariants: string[]): { label: string; roles: string[] }[] {
+  const families: { label: string; roles: string[] }[] = [];
+  const used = new Set<string>();
+  
+  for (const role of roleVariants) {
+    const normalized = role.toLowerCase();
+    if (used.has(normalized)) continue;
+    
+    if (/vice president|\bvp\b|head of|director of/.test(normalized) && /sales|business development|revenue|growth/.test(normalized)) {
+      const familyRoles = roleVariants.filter(r => 
+        /vice president|\bvp\b|head of|director of/.test(r.toLowerCase()) && 
+        /sales|business development|revenue|growth/.test(r.toLowerCase())
+      );
+      families.push({ label: "sales_bd_leadership", roles: familyRoles });
+      familyRoles.forEach(r => used.add(r.toLowerCase()));
+    } else if (/founder|ceo|chief executive|owner|principal|partner/.test(normalized)) {
+      const familyRoles = roleVariants.filter(r => 
+        /founder|ceo|chief executive|owner|principal|partner/.test(r.toLowerCase())
+      );
+      families.push({ label: "founder_executive", roles: familyRoles });
+      familyRoles.forEach(r => used.add(r.toLowerCase()));
+    } else if (/cto|chief technology|head of (engineering|technology)|vp engineering|vp technology/.test(normalized)) {
+      const familyRoles = roleVariants.filter(r => 
+        /cto|chief technology|head of (engineering|technology)|vp engineering|vp technology/.test(r.toLowerCase())
+      );
+      families.push({ label: "tech_leadership", roles: familyRoles });
+      familyRoles.forEach(r => used.add(r.toLowerCase()));
+    } else if (!used.has(normalized)) {
+      // Unmatched roles go to general leadership
+      families.push({ label: "general_leadership", roles: [role] });
+      used.add(normalized);
+    }
+  }
+  
+  // Add any remaining ungrouped roles
+  for (const role of roleVariants) {
+    if (!used.has(role.toLowerCase())) {
+      families.push({ label: "general_leadership", roles: [role] });
+      used.add(role.toLowerCase());
+    }
+  }
+  
+  return families;
 }
 
 function diversifyProspects(prospects: Prospect[]): Prospect[] {
