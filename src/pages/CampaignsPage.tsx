@@ -541,7 +541,7 @@ export function CampaignsPage() {
               <option value="">Select a connected account</option>
               {connectedAccounts.map((a) => (
                 <option key={a.id} value={a.id}>
-                  {a.profile_name ?? a.account_name}
+                  {a.profile_name ?? a.account_name} — {a.profile_url ?? a.expected_profile_url ?? 'No profile URL'}
                 </option>
               ))}
             </Select>
