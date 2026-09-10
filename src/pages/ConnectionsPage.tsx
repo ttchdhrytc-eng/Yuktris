@@ -3,6 +3,7 @@ import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { PageHeader } from '@/components/ui/PageHeader';
 import { useConnectLinkedIn, useLinkedInAccounts } from '@/hooks/useLinkedInBrowser';
+import { toast } from 'sonner';
 
 type State = 'Connected' | 'Action required' | 'Not connected';
 
@@ -21,9 +22,10 @@ export function ConnectionsPage() {
       <ConnectionCard icon={Linkedin} name="LinkedIn" detail={liAccount?.profile_name ?? liAccount?.account_name}
         state={liAccount ? 'Connected' : liNeedsAction ? 'Action required' : 'Not connected'}
         health={liAccount?.health_status === 'healthy' ? 'Healthy' : liAccount?.health_status === 'degraded' ? 'Connected — degraded' : undefined}
-        action={liAccount ? undefined : () => connectLinkedIn.mutate({ operationId: crypto.randomUUID() })}
+        action={liAccount ? undefined : () => connectLinkedIn.mutate({ operationId: crypto.randomUUID() }, { onError: (error) => toast.error(error instanceof Error ? error.message : 'Failed to start LinkedIn connection') })}
         busy={linkedIn.isLoading || connectLinkedIn.isPending} />
     </div>}
+    {connectLinkedIn.isError && <Card className="border-error-500/30 p-4 mt-4"><div className="flex items-center gap-2 text-error-300"><AlertTriangle className="h-4 w-4" /><p className="text-sm">Connection failed: {connectLinkedIn.error instanceof Error ? connectLinkedIn.error.message : 'Unknown error'}</p></div></Card>}
   </div>;
 }
 
