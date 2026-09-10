@@ -156,7 +156,7 @@ export function DashboardPage() {
   const linkedinConnected = (linkedinAccounts.data ?? []).some(a => a.connection_state === 'connected' && ['healthy', 'degraded'].includes(a.health_status));
 
   if (!linkedinConnected) {
-    tasks.push({ icon: Linkedin, title: 'Reconnect LinkedIn', desc: 'Your LinkedIn account needs to be reconnected to continue outreach', tone: 'error', action: 'Reconnect', onClick: () => navigate('/app/integrations') });
+    tasks.push({ icon: Linkedin, title: 'Reconnect LinkedIn', desc: 'Your LinkedIn account needs to be reconnected to continue outreach', tone: 'error', action: 'Reconnect', onClick: () => navigate('/app/connections') });
   }
   if (d.campaigns.length === 0) {
     tasks.push({ icon: Rocket, title: 'Launch Your First Campaign', desc: 'Your AI sales team is ready. Launch a campaign to start finding prospects.', tone: 'brand', action: 'Launch', onClick: () => navigate('/app/campaigns') });

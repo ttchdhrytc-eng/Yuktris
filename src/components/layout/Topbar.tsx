@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Menu, Search, Bell, LogOut, ChevronDown, Settings, Command, Check, Sparkles } from 'lucide-react';
+import { Menu, Search, Bell, LogOut, ChevronDown, Settings, Command, Check, Sparkles, Linkedin } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
 import { useWorkspace } from '@/contexts/WorkspaceContext';
 import { Avatar } from '@/components/ui/Avatar';
@@ -235,11 +235,11 @@ export function Topbar({ onMenuClick }: { onMenuClick: () => void }) {
                 Settings
               </button>
               <button
-                onClick={() => { setMenuOpen(false); navigate('/app/integrations'); }}
+                onClick={() => { setMenuOpen(false); navigate('/app/connections'); }}
                 className="w-full flex items-center gap-2.5 px-3 py-2 text-xs text-ink-300 hover:bg-gold-500/8 hover:text-gold-400 transition-colors"
               >
-                <Settings className="h-3.5 w-3.5" />
-                Integrations
+                <Linkedin className="h-3.5 w-3.5" />
+                LinkedIn
               </button>
               <div className="my-1 border-t border-gold-500/10" />
               <button
