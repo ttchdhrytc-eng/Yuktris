@@ -220,6 +220,21 @@ export function CampaignsPage() {
   }, [workspace, icpId, selectedAccount, queryClient]);
 
   const existing = useQuery({
+    queryKey: ['customer-campaigns', workspace?.id],
+    enabled: !!workspace,
+    queryFn: async () => {
+      const { data, error } = await supabase.from('customer_campaigns').select('*').eq('workspace_id', workspace!.id).order('created_at', { ascending: false });
+      if (error) throw error;
+      const ids = (data ?? []).map((c) => c.id);
+      if (!ids.length) return { campaigns: data ?? [], metrics: {} };
+      return {
+        campaigns: data ?? [],
+        metrics: await fetchCampaignMetrics(workspace!.id),
+      };
+    },
+    placeholderData: (previous) => previous,
+  });
+  const campaignProspects = useQuery({
     queryKey: ['campaign-prospects', workspace?.id],
     enabled: !!workspace,
     queryFn: () => fetchCampaignProspects(workspace!.id),
